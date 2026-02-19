@@ -1,4 +1,4 @@
-package com.payments.ratelimiter
+package com.ratelimiter
 
 import io.quarkus.test.common.QuarkusTestResourceLifecycleManager
 import org.testcontainers.containers.OracleContainer

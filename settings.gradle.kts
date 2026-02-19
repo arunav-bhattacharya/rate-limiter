@@ -12,4 +12,4 @@ pluginManagement {
     }
 }
 
-rootProject.name = "payments-rate-limiter"
+rootProject.name = "rate-limiter"

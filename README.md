@@ -108,6 +108,73 @@ Each event is identified by a unique `event_id`. Calling `assignSlot()` twice wi
 same `event_id` returns the same `AssignedSlot`. A UNIQUE constraint on `event_id`
 prevents duplicate assignments under concurrent access.
 
+### Slot Assignment Sequence Diagram
+
+```mermaid
+sequenceDiagram
+    participant Caller
+    participant SAS as SlotAssignmentService
+    participant Cache as ConfigCache
+    participant DB as Oracle DB
+
+    Caller->>SAS: assignSlot(eventId, configName, requestedTime)
+
+    Note over SAS: Step 1 — Idempotency check
+    SAS->>DB: SELECT * FROM rate_limit_event_slot WHERE event_id = ?
+    alt Slot already exists
+        DB-->>SAS: existing row
+        SAS-->>Caller: return AssignedSlot (idempotent hit)
+    end
+
+    Note over SAS: Step 2 — Load config
+    SAS->>Cache: loadActiveConfig(configName)
+    alt Cache miss
+        Cache->>DB: SELECT * FROM rate_limit_config WHERE config_name = ? AND is_active = 1
+        DB-->>Cache: config row
+    end
+    Cache-->>SAS: RateLimitConfig
+
+    Note over SAS: Step 3 — Compute search range
+    SAS->>SAS: windowStart = align(requestedTime)<br/>searchLimit = max(frontier, windowStart) + headroom
+
+    loop Step 4 — Walk windows until windowStart > searchLimit
+        Note over SAS,DB: Begin transaction
+
+        SAS->>DB: INSERT INTO rate_limit_window_counter (window_start, 0)
+        Note right of DB: Catch ORA-00001 if row exists
+
+        SAS->>DB: SELECT slot_count FROM rate_limit_window_counter<br/>WHERE window_start = ? FOR UPDATE NOWAIT
+        alt ORA-00054 / ORA-00060 (locked by another txn)
+            DB-->>SAS: Contended
+            SAS->>SAS: advance to next window
+        else slot_count >= max_per_window
+            DB-->>SAS: Full
+            SAS->>SAS: advance to next window
+        else Has capacity
+            DB-->>SAS: slot_count
+
+            SAS->>DB: UPDATE rate_limit_window_counter SET slot_count = slot_count + 1
+            SAS->>SAS: scheduledTime = windowStart + random(0, windowSizeMs)
+            SAS->>DB: INSERT INTO rate_limit_event_slot
+
+            alt ORA-00001 on event_id (idempotency race)
+                SAS->>DB: UPDATE rate_limit_window_counter SET slot_count = slot_count - 1
+                SAS->>DB: SELECT * FROM rate_limit_event_slot WHERE event_id = ?
+                DB-->>SAS: existing row
+                Note over SAS,DB: End transaction
+                SAS-->>Caller: return AssignedSlot (race resolved)
+            else Insert succeeded
+                DB-->>SAS: inserted id
+                Note over SAS,DB: End transaction (COMMIT)
+                SAS->>SAS: update furthestAssignedWindow
+                SAS-->>Caller: return AssignedSlot
+            end
+        end
+    end
+
+    SAS-->>Caller: throw SlotAssignmentException (search limit exhausted)
+```
+
 ## Prerequisites
 
 - **JDK**: 17 or later
@@ -277,10 +344,10 @@ Access via: `GET http://localhost:8080/q/metrics`
 
 ### Suspected Slot Leakage
 
-**Symptom**: Events in `scheduled_event_slot` with no corresponding Temporal workflow.
+**Symptom**: Events in `rate_limit_event_slot` with no corresponding Temporal workflow.
 
 **Action**:
-1. Query: `SELECT * FROM scheduled_event_slot WHERE created_at < SYSDATE - INTERVAL '10' MINUTE`
+1. Query: `SELECT * FROM rate_limit_event_slot WHERE created_at < SYSDATE - INTERVAL '10' MINUTE`
    and cross-reference with Temporal workflow history.
 2. For confirmed leaked slots, manually decrement `rate_limit_window_counter.slot_count`.
 3. (Phase 2) Automated reconciliation job handles this.

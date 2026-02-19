@@ -1,4 +1,4 @@
-package com.payments.ratelimiter.metrics
+package com.ratelimiter.metrics
 
 import io.micrometer.core.instrument.Counter
 import io.micrometer.core.instrument.MeterRegistry

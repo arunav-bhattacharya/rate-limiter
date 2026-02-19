@@ -1,7 +1,7 @@
-package com.payments.ratelimiter.admin
+package com.ratelimiter.admin
 
-import com.payments.ratelimiter.config.RateLimitConfig
-import com.payments.ratelimiter.config.RateLimitConfigRepository
+import com.ratelimiter.config.RateLimitConfig
+import com.ratelimiter.config.RateLimitConfigRepository
 import jakarta.inject.Inject
 import jakarta.ws.rs.Consumes
 import jakarta.ws.rs.GET

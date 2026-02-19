@@ -1,16 +1,15 @@
-package com.payments.ratelimiter
+package com.ratelimiter
 
-import com.payments.ratelimiter.config.RateLimitConfigRepository
-import com.payments.ratelimiter.db.ScheduledEventSlotTable
-import com.payments.ratelimiter.db.WindowCounterTable
-import com.payments.ratelimiter.slot.SlotAssignmentException
-import com.payments.ratelimiter.slot.SlotAssignmentService
+import com.ratelimiter.config.RateLimitConfigRepository
+import com.ratelimiter.db.RateLimitEventSlotTable
+import com.ratelimiter.db.WindowCounterTable
+import com.ratelimiter.slot.ConfigLoadException
+import com.ratelimiter.slot.SlotAssignmentService
 import io.quarkus.test.common.QuarkusTestResource
 import io.quarkus.test.junit.QuarkusTest
 import jakarta.inject.Inject
 import org.assertj.core.api.Assertions.assertThat
 import org.assertj.core.api.Assertions.assertThatThrownBy
-import org.jetbrains.exposed.sql.SqlExpressionBuilder.eq
 import org.jetbrains.exposed.sql.deleteAll
 import org.jetbrains.exposed.sql.selectAll
 import org.jetbrains.exposed.sql.transactions.transaction
@@ -32,7 +31,7 @@ class SlotAssignmentServiceTest {
     fun setup() {
         // Clean slate for each test
         transaction {
-            ScheduledEventSlotTable.deleteAll()
+            RateLimitEventSlotTable.deleteAll()
             WindowCounterTable.deleteAll()
         }
         configRepository.evictCache()
@@ -67,8 +66,8 @@ class SlotAssignmentServiceTest {
 
         // Verify only one row exists in the DB
         val count = transaction {
-            ScheduledEventSlotTable.selectAll()
-                .where { ScheduledEventSlotTable.eventId eq "evt-idem-1" }
+            RateLimitEventSlotTable.selectAll()
+                .where { RateLimitEventSlotTable.eventId eq "evt-idem-1" }
                 .count()
         }
         assertThat(count).isEqualTo(1)
@@ -160,7 +159,7 @@ class SlotAssignmentServiceTest {
     fun `throws ConfigLoadException for unknown config name`() {
         assertThatThrownBy {
             service.assignSlot("evt-bad-config", "non-existent", Instant.now())
-        }.isInstanceOf(com.payments.ratelimiter.slot.ConfigLoadException::class.java)
+        }.isInstanceOf(ConfigLoadException::class.java)
             .hasMessageContaining("non-existent")
     }
 

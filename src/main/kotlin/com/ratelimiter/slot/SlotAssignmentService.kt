@@ -1,15 +1,14 @@
-package com.payments.ratelimiter.slot
+package com.ratelimiter.slot
 
-import com.payments.ratelimiter.config.RateLimitConfig
-import com.payments.ratelimiter.config.RateLimitConfigRepository
-import com.payments.ratelimiter.db.ScheduledEventSlotTable
-import com.payments.ratelimiter.db.WindowCounterTable
-import com.payments.ratelimiter.metrics.RateLimiterMetrics
+import com.ratelimiter.config.RateLimitConfig
+import com.ratelimiter.config.RateLimitConfigRepository
+import com.ratelimiter.db.RateLimitEventSlotTable
+import com.ratelimiter.db.WindowCounterTable
+import com.ratelimiter.metrics.RateLimiterMetrics
 import jakarta.annotation.PostConstruct
 import jakarta.enterprise.context.ApplicationScoped
 import jakarta.inject.Inject
 import org.eclipse.microprofile.config.inject.ConfigProperty
-import org.jetbrains.exposed.sql.SqlExpressionBuilder.eq
 import org.jetbrains.exposed.sql.insert
 import org.jetbrains.exposed.sql.javatime.JavaInstantColumnType
 import org.jetbrains.exposed.sql.selectAll
@@ -218,15 +217,15 @@ class SlotAssignmentService @Inject constructor(
 
             // Step 4f: Insert the slot record
             try {
-                val insertedId = ScheduledEventSlotTable.insert {
-                    it[ScheduledEventSlotTable.eventId] = eventId
+                val insertedId = RateLimitEventSlotTable.insert {
+                    it[RateLimitEventSlotTable.eventId] = eventId
                     it[requestedTime] = Instant.now()
-                    it[ScheduledEventSlotTable.windowStart] = windowStart
-                    it[ScheduledEventSlotTable.slotIndex] = newSlotIndex
-                    it[ScheduledEventSlotTable.scheduledTime] = scheduledTime
+                    it[RateLimitEventSlotTable.windowStart] = windowStart
+                    it[RateLimitEventSlotTable.slotIndex] = newSlotIndex
+                    it[RateLimitEventSlotTable.scheduledTime] = scheduledTime
                     it[configId] = config.id
                     it[createdAt] = Instant.now()
-                } get ScheduledEventSlotTable.id
+                } get RateLimitEventSlotTable.id
 
                 WindowResult.Assigned(
                     AssignedSlot(
@@ -277,18 +276,18 @@ class SlotAssignmentService @Inject constructor(
      * Look up an existing slot by event_id within an existing transaction.
      */
     private fun findExistingSlotInTransaction(eventId: String): AssignedSlot? {
-        return ScheduledEventSlotTable
+        return RateLimitEventSlotTable
             .selectAll()
-            .where { ScheduledEventSlotTable.eventId eq eventId }
+            .where { RateLimitEventSlotTable.eventId eq eventId }
             .firstOrNull()
             ?.let { row ->
                 AssignedSlot(
-                    slotId = row[ScheduledEventSlotTable.id],
-                    eventId = row[ScheduledEventSlotTable.eventId],
-                    windowStart = row[ScheduledEventSlotTable.windowStart],
-                    slotIndex = row[ScheduledEventSlotTable.slotIndex],
-                    scheduledTime = row[ScheduledEventSlotTable.scheduledTime],
-                    configId = row[ScheduledEventSlotTable.configId]
+                    slotId = row[RateLimitEventSlotTable.id],
+                    eventId = row[RateLimitEventSlotTable.eventId],
+                    windowStart = row[RateLimitEventSlotTable.windowStart],
+                    slotIndex = row[RateLimitEventSlotTable.slotIndex],
+                    scheduledTime = row[RateLimitEventSlotTable.scheduledTime],
+                    configId = row[RateLimitEventSlotTable.configId]
                 )
             }
     }

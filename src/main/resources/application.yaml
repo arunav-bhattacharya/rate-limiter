@@ -1,0 +1,35 @@
+quarkus:
+  datasource:
+    db-kind: oracle
+    username: ${DB_USERNAME:rate_limiter}
+    password: ${DB_PASSWORD:rate_limiter}
+    jdbc:
+      url: ${DB_URL:jdbc:oracle:thin:@localhost:1521/XEPDB1}
+      min-size: 5
+      max-size: 30
+      acquisition-timeout: 5S
+
+  flyway:
+    migrate-at-start: true
+    locations: db/migration
+
+  micrometer:
+    export:
+      prometheus:
+        enabled: true
+
+  log:
+    category:
+      "com.payments.ratelimiter":
+        level: DEBUG
+      "org.jetbrains.exposed":
+        level: INFO
+
+rate-limiter:
+  default-config-name: default
+  headroom-windows: 100
+
+temporal:
+  service-address: ${TEMPORAL_URL:localhost:7233}
+  namespace: ${TEMPORAL_NAMESPACE:default}
+  task-queue: ${TEMPORAL_TASK_QUEUE:payment-exec}

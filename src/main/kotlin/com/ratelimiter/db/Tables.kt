@@ -1,4 +1,4 @@
-package com.payments.ratelimiter.db
+package com.ratelimiter.db
 
 import org.jetbrains.exposed.sql.Table
 import org.jetbrains.exposed.sql.javatime.timestamp
@@ -25,14 +25,14 @@ object WindowCounterTable : Table("rate_limit_window_counter") {
 }
 
 /** Immutable slot assignment record. */
-object ScheduledEventSlotTable : Table("scheduled_event_slot") {
+object RateLimitEventSlotTable : Table("rate_limit_event_slot") {
     val id = long("id").autoIncrement()
     val eventId = varchar("event_id", 256)
     val requestedTime = timestamp("requested_time")
     val windowStart = timestamp("window_start")
     val slotIndex = integer("slot_index")
     val scheduledTime = timestamp("scheduled_time")
-    val configId = long("config_id").references(RateLimitConfigTable.id)
+    val configId = long("config_id")
     val createdAt = timestamp("created_at")
 
     override val primaryKey = PrimaryKey(id)

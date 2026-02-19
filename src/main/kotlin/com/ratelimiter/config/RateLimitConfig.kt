@@ -1,4 +1,4 @@
-package com.payments.ratelimiter.config
+package com.ratelimiter.config
 
 import java.time.Duration
 import java.time.Instant

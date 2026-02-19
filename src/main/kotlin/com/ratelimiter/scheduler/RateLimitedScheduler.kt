@@ -1,9 +1,8 @@
-package com.payments.ratelimiter.scheduler
+package com.ratelimiter.scheduler
 
-import com.payments.ratelimiter.slot.AssignedSlot
-import com.payments.ratelimiter.slot.SlotAssignmentService
+import com.ratelimiter.slot.AssignedSlot
+import com.ratelimiter.slot.SlotAssignmentService
 import io.temporal.client.WorkflowClient
-import io.temporal.client.WorkflowOptions
 import jakarta.enterprise.context.ApplicationScoped
 import jakarta.inject.Inject
 import org.eclipse.microprofile.config.inject.ConfigProperty

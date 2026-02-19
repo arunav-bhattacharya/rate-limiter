@@ -1,4 +1,4 @@
-package com.payments.ratelimiter.scheduler
+package com.ratelimiter.scheduler
 
 import io.temporal.client.WorkflowClient
 import io.temporal.client.WorkflowClientOptions

@@ -1,4 +1,4 @@
-package com.payments.ratelimiter.slot
+package com.ratelimiter.slot
 
 import java.time.Instant
 

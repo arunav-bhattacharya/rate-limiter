@@ -1,10 +1,9 @@
-package com.payments.ratelimiter.config
+package com.ratelimiter.config
 
-import com.payments.ratelimiter.db.RateLimitConfigTable
+import com.ratelimiter.db.RateLimitConfigTable
 import jakarta.enterprise.context.ApplicationScoped
 import org.jetbrains.exposed.sql.ResultRow
 import org.jetbrains.exposed.sql.SortOrder
-import org.jetbrains.exposed.sql.SqlExpressionBuilder.eq
 import org.jetbrains.exposed.sql.and
 import org.jetbrains.exposed.sql.insert
 import org.jetbrains.exposed.sql.selectAll

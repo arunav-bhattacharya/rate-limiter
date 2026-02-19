@@ -159,7 +159,7 @@ assignSlot(eventId, configName, requestedTime):
         - if slot_count >= maxPerWindow → WindowResult.Full → next window
         - UPDATE slot_count = slot_count + 1
         - scheduledTime = windowStart + random(0, windowSizeMs)
-        - INSERT into scheduled_event_slot
+        - INSERT into rate_limit_event_slot
           → catch ORA-00001 on event_id → idempotency race → decrement counter, re-read
         - return WindowResult.Assigned
      }

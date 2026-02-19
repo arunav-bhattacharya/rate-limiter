@@ -1,6 +1,6 @@
-package com.payments.ratelimiter
+package com.ratelimiter
 
-import com.payments.ratelimiter.config.RateLimitConfigRepository
+import com.ratelimiter.config.RateLimitConfigRepository
 import io.quarkus.test.common.QuarkusTestResource
 import io.quarkus.test.junit.QuarkusTest
 import jakarta.inject.Inject

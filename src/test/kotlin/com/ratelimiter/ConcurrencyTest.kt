@@ -1,10 +1,10 @@
-package com.payments.ratelimiter
+package com.ratelimiter
 
-import com.payments.ratelimiter.config.RateLimitConfigRepository
-import com.payments.ratelimiter.db.ScheduledEventSlotTable
-import com.payments.ratelimiter.db.WindowCounterTable
-import com.payments.ratelimiter.slot.AssignedSlot
-import com.payments.ratelimiter.slot.SlotAssignmentService
+import com.ratelimiter.config.RateLimitConfigRepository
+import com.ratelimiter.db.RateLimitEventSlotTable
+import com.ratelimiter.db.WindowCounterTable
+import com.ratelimiter.slot.AssignedSlot
+import com.ratelimiter.slot.SlotAssignmentService
 import io.quarkus.test.common.QuarkusTestResource
 import io.quarkus.test.junit.QuarkusTest
 import jakarta.inject.Inject
@@ -20,6 +20,8 @@ import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
+import kotlin.collections.iterator
 
 @QuarkusTest
 @QuarkusTestResource(OracleTestResource::class)
@@ -34,7 +36,7 @@ class ConcurrencyTest {
     @BeforeEach
     fun setup() {
         transaction {
-            ScheduledEventSlotTable.deleteAll()
+            RateLimitEventSlotTable.deleteAll()
             WindowCounterTable.deleteAll()
         }
         configRepository.evictCache()
@@ -147,8 +149,8 @@ class ConcurrencyTest {
 
         // Only one row should exist in DB
         val dbCount = transaction {
-            ScheduledEventSlotTable.selectAll()
-                .where { ScheduledEventSlotTable.eventId eq eventId }
+            RateLimitEventSlotTable.selectAll()
+                .where { RateLimitEventSlotTable.eventId eq eventId }
                 .count()
         }
         assertThat(dbCount).isEqualTo(1)
@@ -188,10 +190,10 @@ class ConcurrencyTest {
         assertThat(errors).isEmpty()
         assertThat(results).hasSize(totalEvents)
 
-        // For each window, verify counter == actual number of scheduled_event_slot rows
+        // For each window, verify counter == actual number of rate_limit_event_slot rows
         val slotCountsByWindow = transaction {
-            ScheduledEventSlotTable.selectAll().toList()
-                .groupBy { it[ScheduledEventSlotTable.windowStart] }
+            RateLimitEventSlotTable.selectAll().toList()
+                .groupBy { it[RateLimitEventSlotTable.windowStart] }
                 .mapValues { it.value.size }
         }
 
@@ -221,7 +223,7 @@ class ConcurrencyTest {
         configRepository.createConfig("test-deadlock", 10, 4)
         val requestedTime = Instant.parse("2025-06-01T12:00:00Z")
 
-        val successCount = java.util.concurrent.atomic.AtomicInteger(0)
+        val successCount = AtomicInteger(0)
         val errors = ConcurrentLinkedQueue<Throwable>()
         val latch = CountDownLatch(totalEvents)
         val executor = Executors.newFixedThreadPool(threadCount)

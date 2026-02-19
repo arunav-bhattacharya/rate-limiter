@@ -1,4 +1,4 @@
-package com.payments.ratelimiter.db
+package com.ratelimiter.db
 
 import jakarta.annotation.PostConstruct
 import jakarta.enterprise.context.ApplicationScoped

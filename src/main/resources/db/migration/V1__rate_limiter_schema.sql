@@ -21,7 +21,7 @@ CREATE TABLE rate_limit_window_counter (
 );
 
 -- Immutable slot assignment record
-CREATE TABLE scheduled_event_slot (
+CREATE TABLE rate_limit_event_slot (
     id             NUMBER(19) GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     event_id       VARCHAR2(256)  NOT NULL,
     requested_time TIMESTAMP      NOT NULL,
@@ -30,8 +30,7 @@ CREATE TABLE scheduled_event_slot (
     scheduled_time TIMESTAMP      NOT NULL,
     config_id      NUMBER(19)     NOT NULL,
     created_at     TIMESTAMP      DEFAULT SYSTIMESTAMP NOT NULL,
-    CONSTRAINT uq_event_id UNIQUE (event_id),
-    CONSTRAINT fk_slot_config FOREIGN KEY (config_id) REFERENCES rate_limit_config(id)
+    CONSTRAINT uq_event_id UNIQUE (event_id)
 );
 
 CREATE INDEX idx_slot_window  ON scheduled_event_slot (window_start);
