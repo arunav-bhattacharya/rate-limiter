@@ -1,0 +1,54 @@
+# Gradle
+.gradle/
+build/
+!gradle-wrapper.jar
+gradle-app.setting
+
+# IDE - IntelliJ IDEA
+.idea/
+*.iml
+*.ipr
+*.iws
+out/
+
+# IDE - VS Code
+.vscode/
+
+# IDE - Eclipse
+.classpath
+.project
+.settings/
+
+# Kotlin/JVM
+*.class
+*.jar
+*.war
+*.ear
+hs_err_pid*
+replay_pid*
+
+# OS
+.DS_Store
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# Quarkus
+.quarkus/
+
+# Claude Code
+.claude/
+
+# Vim/Emacs
+*.swp
+*.swo
+*~
+\#*\#
+
+# Logs
+*.log
