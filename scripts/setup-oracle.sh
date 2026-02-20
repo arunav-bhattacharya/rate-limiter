@@ -19,6 +19,9 @@
 
 set -euo pipefail
 
+# Ensure common install paths are on PATH (Docker Desktop on macOS)
+export PATH="/Applications/Docker.app/Contents/Resources/bin:/usr/local/bin:/opt/homebrew/bin:$HOME/.docker/bin:$PATH"
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
 

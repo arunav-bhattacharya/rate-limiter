@@ -1,4 +1,6 @@
 quarkus:
+  live-reload:
+    enabled: false
   datasource:
     db-kind: oracle
     username: ${DB_USERNAME:rate_limiter}

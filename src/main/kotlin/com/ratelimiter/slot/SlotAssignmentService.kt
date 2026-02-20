@@ -169,8 +169,8 @@ class SlotAssignmentService @Inject constructor(
             windowsSearched++
             val result = tryClaimSlotInWindow(eventId, windowStart, config, requestedTime)
 
-            when (result) {
-                is WindowResult.Assigned -> {
+            if (result != null) {
+                if (result.isNew) {
                     // Advance the frontier atomically. Uses updateAndGet with a
                     // monotonic max to ensure the high-water mark only moves forward,
                     // even under concurrent assignments from multiple threads. This
@@ -178,22 +178,12 @@ class SlotAssignmentService @Inject constructor(
                     furthestAssignedWindow.updateAndGet { current ->
                         if (windowStart.isAfter(current)) windowStart else current
                     }
-                    return result.slot.toAssignedSlot()
                 }
-
-                is WindowResult.AlreadyAssigned -> {
-                    return result.existingSlot.toAssignedSlot()
-                }
-
-                is WindowResult.Full -> {
-                    logger.debug("Window {} is full, advancing", windowStart)
-                }
-
-                is WindowResult.Contended -> {
-                    logger.debug("Window {} is contended, advancing", windowStart)
-                }
+                return result.slot.toAssignedSlot()
             }
 
+            // Window was full or contended — advance to the next one
+            logger.debug("Window {} unavailable, advancing", windowStart)
             windowStart = windowStart.plus(config.windowDuration)
         }
 
@@ -211,14 +201,17 @@ class SlotAssignmentService @Inject constructor(
      *
      * Runs inside a single database transaction. Uses `SELECT FOR UPDATE NOWAIT`
      * for pessimistic locking — if the row is locked by another transaction,
-     * ORA-00054 is caught and converted to [WindowResult.Contended].
+     * ORA-00054 is caught and we return null (skip to next window).
+     *
+     * @return [ClaimResult] if a slot was obtained (new or idempotent), null if
+     *         the window should be skipped (full or contended).
      */
     private fun tryClaimSlotInWindow(
         eventId: String,
         windowStart: Instant,
         config: RateLimitConfig,
         requestedTime: Instant
-    ): WindowResult {
+    ): ClaimResult? {
         return transaction {
             // Step 4a: Ensure counter row exists (plain INSERT, catch ORA-00001 if already exists)
             try {
@@ -242,14 +235,14 @@ class SlotAssignmentService @Inject constructor(
                 } ?: 0
             } catch (e: SQLException) {
                 return@transaction when (oracleErrorCode(e)) {
-                    ORA_RESOURCE_BUSY, ORA_DEADLOCK_DETECTED -> WindowResult.Contended
+                    ORA_RESOURCE_BUSY, ORA_DEADLOCK_DETECTED -> null // contended — skip
                     else -> throw e
                 }
             }
 
             // Step 4c: Check capacity
             if (currentCount >= config.maxPerWindow) {
-                return@transaction WindowResult.Full
+                return@transaction null // full — skip
             }
 
             // Step 4d: Compute random jitter within the window
@@ -274,15 +267,16 @@ class SlotAssignmentService @Inject constructor(
                     it[slotCount] = currentCount + 1
                 }
 
-                WindowResult.Assigned(
-                    InternalSlot(
+                ClaimResult(
+                    slot = InternalSlot(
                         slotId = insertedId,
                         eventId = eventId,
                         windowStart = windowStart,
                         scheduledTime = scheduledTime,
                         configId = config.configId,
                         requestedTime = requestedTime
-                    )
+                    ),
+                    isNew = true
                 )
             } catch (e: SQLException) {
                 if (oracleErrorCode(e) == ORA_UNIQUE_CONSTRAINT_VIOLATED) {
@@ -291,13 +285,11 @@ class SlotAssignmentService @Inject constructor(
                     logger.info("Idempotency race for eventId={}, re-reading", eventId)
 
                     val existingSlot = findExistingSlotInTransaction(eventId, requestedTime)
-                    if (existingSlot != null) {
-                        WindowResult.AlreadyAssigned(existingSlot)
-                    } else {
-                        throw IllegalStateException(
+                        ?: throw IllegalStateException(
                             "ORA-00001 on event_id=$eventId but no existing slot found"
                         )
-                    }
+
+                    ClaimResult(slot = existingSlot, isNew = false)
                 } else {
                     throw e
                 }

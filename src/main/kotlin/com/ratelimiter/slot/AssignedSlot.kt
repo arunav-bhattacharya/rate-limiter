@@ -55,41 +55,18 @@ internal data class InternalSlot(
 }
 
 /**
- * All possible outcomes of attempting to claim a slot within a single time window.
- * Sealed hierarchy forces exhaustive `when` expressions at every call site.
+ * Result of [SlotAssignmentService.tryClaimSlotInWindow].
+ *
+ * Non-null means a slot was obtained (either freshly created or an idempotent hit).
+ * Null (returned by the caller convention) means the window was skipped (full or contended).
+ *
+ * @property slot  the assigned slot details
+ * @property isNew true if this slot was just inserted in the current window
+ *                 (counter was incremented, frontier should advance).
+ *                 false if this is an idempotent re-read of an existing slot
+ *                 (counter was NOT touched, frontier should NOT advance).
  */
-sealed class WindowResult {
-
-    /** Slot was successfully assigned in this window. */
-    data class Assigned(val slot: InternalSlot) : WindowResult()
-
-    /** Window is at capacity (slot_count >= max_per_window). */
-    data object Full : WindowResult()
-
-    /**
-     * Window row is locked by another transaction (ORA-00054)
-     * or deadlock was detected (ORA-00060).
-     */
-    data object Contended : WindowResult()
-
-    /** Idempotent hit — this event_id was already assigned a slot. */
-    data class AlreadyAssigned(val existingSlot: InternalSlot) : WindowResult()
-}
-
-/**
- * Thrown when no window could accommodate this event
- * within the dynamic lookahead range.
- */
-class SlotAssignmentException(
-    val eventId: String,
-    val windowsSearched: Int,
-    message: String
-) : RuntimeException(message)
-
-/**
- * Thrown when no active rate limit config can be loaded for the given name.
- */
-class ConfigLoadException(
-    val configName: String,
-    message: String
-) : RuntimeException(message)
+internal data class ClaimResult(
+    val slot: InternalSlot,
+    val isNew: Boolean
+)
