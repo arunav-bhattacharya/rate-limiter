@@ -157,10 +157,10 @@ assignSlot(eventId, configName, requestedTime):
         - SELECT slot_count FROM counter WHERE window_start=? FOR UPDATE NOWAIT
           → catch ORA-00054/ORA-00060 → WindowResult.Contended → next window
         - if slot_count >= maxPerWindow → WindowResult.Full → next window
-        - UPDATE slot_count = slot_count + 1
         - scheduledTime = windowStart + random(0, windowSizeMs)
         - INSERT into rate_limit_event_slot
-          → catch ORA-00001 on event_id → idempotency race → decrement counter, re-read
+          → catch ORA-00001 on event_id → idempotency race → re-read (counter never touched)
+        - UPDATE slot_count = slot_count + 1  (only after INSERT succeeds)
         - return WindowResult.Assigned
      }
      b. On success: furthestAssignedWindow.updateAndGet { max(it, windowStart) }

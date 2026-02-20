@@ -48,15 +48,42 @@ class SlotAssignmentService @Inject constructor(
     }
 
     /**
-     * Tracks the furthest window that has been assigned a slot.
-     * Updated atomically on every successful assignment.
-     * Initialized from DB at startup.
+     * High-water mark: the latest (furthest into the future) window that has ever
+     * had a slot assigned across any thread on this node.
+     *
+     * This drives the **dynamic lookahead** — instead of a fixed MAX_LOOKAHEAD, the
+     * search limit is computed as:
+     *     searchLimit = max(furthestAssignedWindow, requestedWindowStart) + headroom
+     *
+     * Why this matters:
+     * - Eliminates a static ceiling that must be tuned. The frontier advances
+     *   organically with load — after 5,000 windows are filled, the search range
+     *   is 5,000 + headroom, not a fixed 200.
+     * - Prevents unbounded scans on sparse data: headroom caps how far past the
+     *   frontier any single request will search (default 100 windows).
+     * - Each node maintains its own AtomicReference. Inter-node skew is safe because
+     *   the counter table is the source of truth for capacity; this field only bounds
+     *   how far the node is willing to look. Nodes re-sync from DB on restart.
+     *
+     * Lifecycle:
+     * - Initialized from DB at startup via [initFurthestWindow] (survives restarts).
+     * - Advanced atomically on every successful slot assignment (never decremented).
      */
     private val furthestAssignedWindow = AtomicReference<Instant>(Instant.EPOCH)
 
     /**
-     * Initializes `furthestAssignedWindow` from the database to survive restarts.
-     * Queries the maximum window_start in rate_limit_window_counter where slot_count > 0.
+     * Initializes [furthestAssignedWindow] from the database so the dynamic lookahead
+     * survives application restarts.
+     *
+     * Without this, a freshly started node would begin with frontier = EPOCH, meaning
+     * its search limit would be `requestedWindowStart + headroom` — potentially much
+     * tighter than the actual frontier across the cluster. Events that should land in
+     * windows far ahead (because earlier windows are full) could fail with
+     * [SlotAssignmentException] until the node "catches up" by assigning enough slots.
+     *
+     * By reading `MAX(window_start) WHERE slot_count > 0`, we restore the frontier to
+     * the latest window that any node has ever written to, giving this node the same
+     * search range as nodes that were running continuously.
      */
     @PostConstruct
     fun initFurthestWindow() {
@@ -112,10 +139,37 @@ class SlotAssignmentService @Inject constructor(
                 "No active rate limit config found for: $configName"
             )
 
-        // Step 3: Compute starting window and dynamic search limit
+        // Step 3: Compute starting window and dynamic search limit.
+        //
+        // The search limit is: max(frontier, windowStart) + headroom.
+        // - `frontier` (furthestAssignedWindow) is the high-water mark of all
+        //   windows ever assigned on this node. Using it ensures that even if
+        //   requestedTime maps to a window far in the past, the search range
+        //   still extends to where active assignment is happening.
+        // - `headroom` is how many windows beyond the frontier we're willing to
+        //   scan. This prevents infinite search on sparse data while allowing
+        //   the system to absorb bursts that push past the current frontier.
+        //
         var windowStart = alignToWindowBoundary(requestedTime, config.windowSizeSecs)
         val headroomDuration = Duration.ofSeconds(headroomWindows.toLong() * config.windowSizeSecs)
         val frontier = furthestAssignedWindow.get()
+
+        // Why maxOf(frontier, windowStart)?
+        // These two values can diverge in either direction:
+        //
+        // Case 1 — windowStart behind frontier (common bulk-load scenario):
+        //   500K events all target 12:00:00, frontier has advanced to window 4,000.
+        //   windowStart snaps to 12:00:00 (window 0). If we used windowStart alone,
+        //   searchLimit = 12:00:00 + headroom — only 100 windows, but 0..4,000 are
+        //   full. The search would exhaust and fail. Using frontier anchors the limit
+        //   to window 4,000 + headroom, reaching the available empty windows.
+        //
+        // Case 2 — windowStart ahead of frontier (future-targeted event):
+        //   System has been filling windows around 12:00:00 (frontier = window 500),
+        //   but a new event requests 14:00:00. If we used frontier alone,
+        //   searchLimit = 12:00:33 + headroom — far behind 14:00:00, and the loop
+        //   wouldn't start. Using windowStart anchors the limit to 14:00:00 + headroom,
+        //   letting the event land in the empty windows around its requested time.
         val searchLimit = maxOf(frontier, windowStart).plus(headroomDuration)
 
         // Step 4: Walk through windows
@@ -127,20 +181,26 @@ class SlotAssignmentService @Inject constructor(
             when (result) {
                 is WindowResult.Assigned -> {
                     metrics.slotsAssigned.increment()
-                    // Advance the frontier
+                    // Advance the frontier atomically. Uses updateAndGet with a
+                    // monotonic max to ensure the high-water mark only moves forward,
+                    // even under concurrent assignments from multiple threads. This
+                    // widens the search limit for all subsequent calls on this node.
                     furthestAssignedWindow.updateAndGet { current ->
                         if (windowStart.isAfter(current)) windowStart else current
                     }
                     return result.slot
                 }
+
                 is WindowResult.AlreadyAssigned -> {
                     metrics.idempotentHits.increment()
                     return result.existingSlot
                 }
+
                 is WindowResult.Full -> {
                     metrics.windowsFull.increment()
                     logger.debug("Window {} is full, advancing", windowStart)
                 }
+
                 is WindowResult.Contended -> {
                     metrics.windowsContended.increment()
                     logger.debug("Window {} is contended, advancing", windowStart)
@@ -156,7 +216,7 @@ class SlotAssignmentService @Inject constructor(
             eventId = eventId,
             windowsSearched = windowsSearched,
             message = "Could not assign slot for event $eventId after searching $windowsSearched windows " +
-                "(frontier=$frontier, searchLimit=$searchLimit)"
+                    "(frontier=$frontier, searchLimit=$searchLimit)"
         )
     }
 
@@ -205,17 +265,14 @@ class SlotAssignmentService @Inject constructor(
                 return@transaction WindowResult.Full
             }
 
-            // Step 4d: Increment counter
+            // Step 4d: Compute random jitter within the window
             val newSlotIndex = currentCount
-            WindowCounterTable.update({ WindowCounterTable.windowStart eq windowStart }) {
-                it[slotCount] = newSlotIndex + 1
-            }
-
-            // Step 4e: Compute random jitter within the window
             val jitterMillis = ThreadLocalRandom.current().nextLong(0, config.windowSizeMs)
             val scheduledTime = windowStart.plusMillis(jitterMillis)
 
-            // Step 4f: Insert the slot record
+            // Step 4e: Insert the slot record BEFORE incrementing counter.
+            // This way, if the INSERT fails (ORA-00001 idempotency race), the counter
+            // was never touched — no compensating revert needed.
             try {
                 val insertedId = RateLimitEventSlotTable.insert {
                     it[RateLimitEventSlotTable.eventId] = eventId
@@ -226,6 +283,11 @@ class SlotAssignmentService @Inject constructor(
                     it[configId] = config.id
                     it[createdAt] = Instant.now()
                 } get RateLimitEventSlotTable.id
+
+                // Step 4f: Increment counter only after slot row is confirmed inserted
+                WindowCounterTable.update({ WindowCounterTable.windowStart eq windowStart }) {
+                    it[slotCount] = newSlotIndex + 1
+                }
 
                 WindowResult.Assigned(
                     AssignedSlot(
@@ -239,14 +301,10 @@ class SlotAssignmentService @Inject constructor(
                 )
             } catch (e: SQLException) {
                 if (oracleErrorCode(e) == ORA_UNIQUE_CONSTRAINT_VIOLATED) {
-                    // ORA-00001 on event_id unique constraint — concurrent idempotency race
+                    // ORA-00001 on event_id unique constraint — concurrent idempotency race.
+                    // Counter was never incremented, so no revert needed.
                     metrics.idempotencyRaces.increment()
                     logger.info("Idempotency race for eventId={}, re-reading", eventId)
-
-                    // Revert counter since the slot was not actually consumed
-                    WindowCounterTable.update({ WindowCounterTable.windowStart eq windowStart }) {
-                        it[slotCount] = newSlotIndex
-                    }
 
                     val existingSlot = findExistingSlotInTransaction(eventId)
                     if (existingSlot != null) {

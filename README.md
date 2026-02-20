@@ -153,18 +153,18 @@ sequenceDiagram
         else Has capacity
             DB-->>SAS: slot_count
 
-            SAS->>DB: UPDATE rate_limit_window_counter SET slot_count = slot_count + 1
             SAS->>SAS: scheduledTime = windowStart + random(0, windowSizeMs)
             SAS->>DB: INSERT INTO rate_limit_event_slot
 
             alt ORA-00001 on event_id (idempotency race)
-                SAS->>DB: UPDATE rate_limit_window_counter SET slot_count = slot_count - 1
+                Note right of SAS: Counter never touched — no revert needed
                 SAS->>DB: SELECT * FROM rate_limit_event_slot WHERE event_id = ?
                 DB-->>SAS: existing row
                 Note over SAS,DB: End transaction
                 SAS-->>Caller: return AssignedSlot (race resolved)
             else Insert succeeded
                 DB-->>SAS: inserted id
+                SAS->>DB: UPDATE rate_limit_window_counter SET slot_count = slot_count + 1
                 Note over SAS,DB: End transaction (COMMIT)
                 SAS->>SAS: update furthestAssignedWindow
                 SAS-->>Caller: return AssignedSlot
@@ -173,6 +173,55 @@ sequenceDiagram
     end
 
     SAS-->>Caller: throw SlotAssignmentException (search limit exhausted)
+```
+
+### Slot Assignment Flow Diagram
+
+```mermaid
+flowchart TD
+    A([assignSlot called]) --> B{event_id already<br/>in rate_limit_event_slot?}
+    B -- Yes --> C([Return existing AssignedSlot])
+    B -- No --> D[Load RateLimitConfig<br/>from cache or DB]
+    D --> E{Config found?}
+    E -- No --> F([Throw ConfigLoadException])
+    E -- Yes --> G["Compute search range<br/>windowStart = align(requestedTime)<br/>searchLimit = max(frontier, windowStart) + headroom"]
+
+    G --> H{windowStart<br/>> searchLimit?}
+    H -- Yes --> I([Throw SlotAssignmentException<br/>search limit exhausted])
+
+    H -- No --> J["<b>BEGIN TRANSACTION</b><br/>INSERT counter row for windowStart<br/>(catch ORA-00001 if exists)"]
+    J --> K["SELECT slot_count<br/>FOR UPDATE NOWAIT"]
+    K --> L{ORA-00054 /<br/>ORA-00060?}
+
+    L -- Yes --> M[/"WindowResult.Contended<br/>ROLLBACK"/]
+    M --> N["Advance to next window<br/>windowStart += windowSize"]
+    N --> H
+
+    L -- No --> O{slot_count >=<br/>max_per_window?}
+    O -- Yes --> P[/"WindowResult.Full<br/>ROLLBACK"/]
+    P --> N
+
+    O -- No --> Q["Compute jitter<br/>scheduledTime = windowStart + random(0, windowSizeMs)"]
+    Q --> R[INSERT INTO rate_limit_event_slot]
+    R --> S{ORA-00001 on<br/>event_id unique?}
+
+    S -- Yes --> T["Idempotency race detected<br/>Counter never touched — no revert needed<br/>Re-read existing slot"]
+    T --> V["<b>COMMIT</b>"]
+    V --> C
+
+    S -- No --> U["UPDATE slot_count = slot_count + 1"]
+    U --> W["<b>COMMIT</b>"]
+    W --> X["Update furthestAssignedWindow<br/>atomically"]
+    X --> Y([Return new AssignedSlot])
+
+    style A fill:#4a9eff,color:#fff
+    style C fill:#2ecc71,color:#fff
+    style Y fill:#2ecc71,color:#fff
+    style F fill:#e74c3c,color:#fff
+    style I fill:#e74c3c,color:#fff
+    style M fill:#f39c12,color:#fff
+    style P fill:#f39c12,color:#fff
+    style T fill:#e67e22,color:#fff
 ```
 
 ## Prerequisites
