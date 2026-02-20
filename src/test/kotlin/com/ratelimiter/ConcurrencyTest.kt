@@ -14,6 +14,7 @@ import org.jetbrains.exposed.sql.selectAll
 import org.jetbrains.exposed.sql.transactions.transaction
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
+import java.time.Duration
 import java.time.Instant
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ConcurrentLinkedQueue
@@ -48,7 +49,7 @@ class ConcurrencyTest {
         val totalEvents = 100
         val threadCount = 50
 
-        configRepository.createConfig("test-concurrent", maxPerWindow, 4)
+        configRepository.createConfig("test-concurrent", maxPerWindow, Duration.ofSeconds(4))
         val requestedTime = Instant.parse("2025-06-01T12:00:00Z")
 
         val results = ConcurrentHashMap<String, AssignedSlot>()
@@ -113,7 +114,7 @@ class ConcurrencyTest {
 
     @Test
     fun `idempotent concurrent calls return same slot`() {
-        configRepository.createConfig("test-idem-conc", 100, 4)
+        configRepository.createConfig("test-idem-conc", 100, Duration.ofSeconds(4))
         val requestedTime = Instant.parse("2025-06-01T12:00:00Z")
         val eventId = "evt-idem-concurrent"
         val threadCount = 10
@@ -168,7 +169,7 @@ class ConcurrencyTest {
         val totalEvents = 200
         val threadCount = 30
 
-        configRepository.createConfig("test-counter-conc", maxPerWindow, 4)
+        configRepository.createConfig("test-counter-conc", maxPerWindow, Duration.ofSeconds(4))
         val requestedTime = Instant.parse("2025-06-01T12:00:00Z")
 
         val results = ConcurrentHashMap<String, AssignedSlot>()
@@ -226,7 +227,7 @@ class ConcurrencyTest {
         val totalEvents = 500
         val threadCount = 50
 
-        configRepository.createConfig("test-deadlock", 10, 4)
+        configRepository.createConfig("test-deadlock", 10, Duration.ofSeconds(4))
         val requestedTime = Instant.parse("2025-06-01T12:00:00Z")
 
         val successCount = AtomicInteger(0)

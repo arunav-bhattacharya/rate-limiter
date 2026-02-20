@@ -40,7 +40,7 @@ class SlotAssignmentServiceTest {
 
     @Test
     fun `assignSlot assigns first window when capacity available`() {
-        configRepository.createConfig("test-basic", 100, 4)
+        configRepository.createConfig("test-basic", 100, Duration.ofSeconds(4))
         val requestedTime = Instant.parse("2025-06-01T12:00:00Z")
 
         val slot = service.assignSlot("evt-basic-1", "test-basic", requestedTime)
@@ -54,7 +54,7 @@ class SlotAssignmentServiceTest {
 
     @Test
     fun `assignSlot returns existing slot for duplicate eventId (idempotency)`() {
-        configRepository.createConfig("test-idempotent", 100, 4)
+        configRepository.createConfig("test-idempotent", 100, Duration.ofSeconds(4))
         val requestedTime = Instant.parse("2025-06-01T12:00:00Z")
 
         val first = service.assignSlot("evt-idem-1", "test-idempotent", requestedTime)
@@ -75,7 +75,7 @@ class SlotAssignmentServiceTest {
 
     @Test
     fun `assignSlot skips full windows`() {
-        configRepository.createConfig("test-skip", 2, 4)
+        configRepository.createConfig("test-skip", 2, Duration.ofSeconds(4))
         val requestedTime = Instant.parse("2025-06-01T12:00:00Z")
 
         // Fill window 0 (2 slots max)
@@ -90,7 +90,7 @@ class SlotAssignmentServiceTest {
 
     @Test
     fun `assignSlot fills multiple windows sequentially`() {
-        configRepository.createConfig("test-multi", 3, 4)
+        configRepository.createConfig("test-multi", 3, Duration.ofSeconds(4))
         val requestedTime = Instant.parse("2025-06-01T12:00:00Z")
 
         val slots = (1..9).map { i ->
@@ -110,7 +110,7 @@ class SlotAssignmentServiceTest {
 
     @Test
     fun `jitter is within window bounds`() {
-        configRepository.createConfig("test-jitter", 200, 4)
+        configRepository.createConfig("test-jitter", 200, Duration.ofSeconds(4))
         val requestedTime = Instant.parse("2025-06-01T12:00:00Z")
         val windowEnd = requestedTime.plusSeconds(4)
 
@@ -128,7 +128,7 @@ class SlotAssignmentServiceTest {
 
     @Test
     fun `window counter matches actual slot count`() {
-        configRepository.createConfig("test-counter", 100, 4)
+        configRepository.createConfig("test-counter", 100, Duration.ofSeconds(4))
         val requestedTime = Instant.parse("2025-06-01T12:00:00Z")
 
         repeat(10) { i ->
@@ -156,7 +156,7 @@ class SlotAssignmentServiceTest {
     @Test
     fun `dynamic lookahead grows with assigned windows`() {
         // Use a tiny max_per_window to force multiple windows
-        configRepository.createConfig("test-lookahead", 1, 4)
+        configRepository.createConfig("test-lookahead", 1, Duration.ofSeconds(4))
         val requestedTime = Instant.parse("2025-06-01T12:00:00Z")
 
         // Assign 50 events — should fill 50 windows
@@ -173,7 +173,7 @@ class SlotAssignmentServiceTest {
 
     @Test
     fun `delay reflects how far event was pushed from requested time`() {
-        configRepository.createConfig("test-delay", 1, 4)
+        configRepository.createConfig("test-delay", 1, Duration.ofSeconds(4))
         val requestedTime = Instant.parse("2025-06-01T12:00:00Z")
 
         // First event lands in the requested window — delay < windowSize

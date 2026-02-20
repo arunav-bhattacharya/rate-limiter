@@ -24,10 +24,12 @@ CREATE TABLE rate_limit_config (
     -- the window is considered full.
     max_per_window   NUMBER(10)     NOT NULL,
 
-    -- Duration of each time window in seconds (e.g., 4 = 4-second windows).
+    -- Duration of each time window as an ISO-8601 duration string
+    -- (e.g., 'PT4S' = 4 seconds, 'PT1M30S' = 90 seconds, 'PT500MS' = 500ms).
+    -- Stored as a string for flexibility; parsed to java.time.Duration at load time.
     -- Changing this while events are in-flight breaks window alignment —
     -- existing counter rows become meaningless. Only change between quiet periods.
-    window_size_secs NUMBER(5)      NOT NULL,
+    window_size      VARCHAR2(50)   NOT NULL,
 
     -- Timestamp from which this config version takes effect. Used for auditing
     -- when a config change was intended to go live.
@@ -43,8 +45,7 @@ CREATE TABLE rate_limit_config (
 
     -- Guard against misconfiguration: zero or negative values would break
     -- the window walk algorithm (infinite loop or division by zero).
-    CONSTRAINT chk_max_per_window CHECK (max_per_window > 0),
-    CONSTRAINT chk_window_size    CHECK (window_size_secs > 0)
+    CONSTRAINT chk_max_per_window CHECK (max_per_window > 0)
 );
 
 -- Speeds up the hot-path query: loading the active config by name.
@@ -128,7 +129,7 @@ CREATE TABLE rate_limit_event_slot (
 
     -- The rate_limit_config.config_id that was active when this slot was assigned.
     -- Stored for audit purposes — allows reconstructing which max_per_window
-    -- and window_size_secs were in effect for this event.
+    -- and window_size were in effect for this event.
     -- No foreign key constraint: the application guarantees validity by loading
     -- the config before inserting, and decoupling avoids FK check overhead on
     -- every insert.

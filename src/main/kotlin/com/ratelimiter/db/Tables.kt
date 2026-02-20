@@ -8,7 +8,7 @@ object RateLimitConfigTable : Table("rate_limit_config") {
     val configId = long("config_id").autoIncrement()
     val configName = varchar("config_name", 128)
     val maxPerWindow = integer("max_per_window")
-    val windowSizeSecs = integer("window_size_secs")
+    val windowSize = varchar("window_size", 50)
     val effectiveFrom = timestamp("effective_from")
     val isActive = bool("is_active")
     val createdAt = timestamp("created_at")

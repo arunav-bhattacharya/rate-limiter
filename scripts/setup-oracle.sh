@@ -102,6 +102,7 @@ GRANT RESOURCE TO ${APP_USER};
 GRANT CREATE TABLE TO ${APP_USER};
 GRANT CREATE SEQUENCE TO ${APP_USER};
 GRANT CREATE SESSION TO ${APP_USER};
+GRANT EXECUTE ON SYS.DBMS_RANDOM TO ${APP_USER};
 
 EXIT;
 EOF
@@ -131,4 +132,4 @@ log_info "     (Flyway will create the tables automatically)"
 log_info "  2. Seed the default config:"
 log_info "     curl -X POST http://localhost:8080/admin/rate-limit/config \\"
 log_info "       -H 'Content-Type: application/json' \\"
-log_info "       -d '{\"configName\":\"default\",\"maxPerWindow\":100,\"windowSizeSecs\":4}'"
+log_info "       -d '{\"configName\":\"default\",\"maxPerWindow\":100,\"windowSize\":\"PT4S\"}'"

@@ -22,6 +22,19 @@ class OracleTestResource : QuarkusTestResourceLifecycleManager {
 
     override fun start(): Map<String, String> {
         oracle.start()
+
+        // Grant DBMS_RANDOM to the test user — required by the PL/SQL slot assignment block.
+        // Oracle XE's default test user may not have this grant.
+        try {
+            oracle.createConnection("").use { conn ->
+                conn.createStatement().execute(
+                    "GRANT EXECUTE ON SYS.DBMS_RANDOM TO ${oracle.username}"
+                )
+            }
+        } catch (e: Exception) {
+            // Grant may already exist or user may already have access — safe to ignore
+        }
+
         return mapOf(
             "quarkus.datasource.jdbc.url" to oracle.jdbcUrl,
             "quarkus.datasource.username" to oracle.username,

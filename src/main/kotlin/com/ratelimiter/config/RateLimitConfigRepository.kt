@@ -68,13 +68,17 @@ class RateLimitConfigRepository {
     /**
      * Insert a new config version and deactivate all previous active configs
      * for the same name. Returns the newly created config.
+     *
+     * @param windowSize the time window duration (e.g., Duration.ofSeconds(4))
      */
     fun createConfig(
         configName: String,
         maxPerWindow: Int,
-        windowSizeSecs: Int,
+        windowSize: Duration,
         effectiveFrom: Instant = Instant.now()
     ): RateLimitConfig {
+        require(!windowSize.isZero && !windowSize.isNegative) { "windowSize must be positive" }
+
         val now = Instant.now()
         val insertedId = transaction {
             // Deactivate existing active configs for this name
@@ -91,7 +95,7 @@ class RateLimitConfigRepository {
             RateLimitConfigTable.insert {
                 it[RateLimitConfigTable.configName] = configName
                 it[RateLimitConfigTable.maxPerWindow] = maxPerWindow
-                it[RateLimitConfigTable.windowSizeSecs] = windowSizeSecs
+                it[RateLimitConfigTable.windowSize] = windowSize.toString()
                 it[RateLimitConfigTable.effectiveFrom] = effectiveFrom
                 it[isActive] = true
                 it[createdAt] = now
@@ -104,7 +108,7 @@ class RateLimitConfigRepository {
             configId = insertedId,
             configName = configName,
             maxPerWindow = maxPerWindow,
-            windowSizeSecs = windowSizeSecs,
+            windowSize = windowSize,
             effectiveFrom = effectiveFrom,
             isActive = true,
             createdAt = now
@@ -126,7 +130,7 @@ class RateLimitConfigRepository {
         configId = this[RateLimitConfigTable.configId],
         configName = this[RateLimitConfigTable.configName],
         maxPerWindow = this[RateLimitConfigTable.maxPerWindow],
-        windowSizeSecs = this[RateLimitConfigTable.windowSizeSecs],
+        windowSize = Duration.parse(this[RateLimitConfigTable.windowSize]),
         effectiveFrom = this[RateLimitConfigTable.effectiveFrom],
         isActive = this[RateLimitConfigTable.isActive],
         createdAt = this[RateLimitConfigTable.createdAt]

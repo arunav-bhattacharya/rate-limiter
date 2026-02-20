@@ -11,7 +11,9 @@ import jakarta.ws.rs.Produces
 import jakarta.ws.rs.QueryParam
 import jakarta.ws.rs.core.MediaType
 import jakarta.ws.rs.core.Response
+import java.time.Duration
 import java.time.Instant
+import java.time.format.DateTimeParseException
 
 /**
  * Admin REST endpoint for managing rate limit configuration.
@@ -28,7 +30,8 @@ class RateLimitAdminResource @Inject constructor(
     data class ConfigRequest(
         val configName: String,
         val maxPerWindow: Int,
-        val windowSizeSecs: Int
+        /** ISO-8601 duration string, e.g., "PT4S" for 4 seconds. */
+        val windowSize: String
     )
 
     /** Response body for config queries. */
@@ -36,7 +39,8 @@ class RateLimitAdminResource @Inject constructor(
         val configId: Long,
         val configName: String,
         val maxPerWindow: Int,
-        val windowSizeSecs: Int,
+        /** ISO-8601 duration string. */
+        val windowSize: String,
         val effectiveFrom: String,
         val isActive: Boolean,
         val createdAt: String
@@ -66,12 +70,21 @@ class RateLimitAdminResource @Inject constructor(
     @Path("/config")
     fun createConfig(request: ConfigRequest): Response {
         require(request.maxPerWindow > 0) { "maxPerWindow must be positive" }
-        require(request.windowSizeSecs > 0) { "windowSizeSecs must be positive" }
+
+        val windowSize = try {
+            Duration.parse(request.windowSize)
+        } catch (e: DateTimeParseException) {
+            return Response.status(Response.Status.BAD_REQUEST)
+                .entity(mapOf("error" to "Invalid windowSize format. Use ISO-8601 duration (e.g., 'PT4S')"))
+                .build()
+        }
+
+        require(!windowSize.isZero && !windowSize.isNegative) { "windowSize must be positive" }
 
         val config = configRepository.createConfig(
             configName = request.configName,
             maxPerWindow = request.maxPerWindow,
-            windowSizeSecs = request.windowSizeSecs,
+            windowSize = windowSize,
             effectiveFrom = Instant.now()
         )
 
@@ -95,7 +108,7 @@ class RateLimitAdminResource @Inject constructor(
         configId = configId,
         configName = configName,
         maxPerWindow = maxPerWindow,
-        windowSizeSecs = windowSizeSecs,
+        windowSize = windowSize.toString(),
         effectiveFrom = effectiveFrom.toString(),
         isActive = isActive,
         createdAt = createdAt.toString()

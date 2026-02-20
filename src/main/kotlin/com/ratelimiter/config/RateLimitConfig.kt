@@ -11,16 +11,22 @@ data class RateLimitConfig(
     val configId: Long,
     val configName: String,
     val maxPerWindow: Int,
-    val windowSizeSecs: Int,
+
+    /**
+     * Duration of each time window. Stored in the database as an ISO-8601
+     * duration string (e.g., "PT4S") and parsed to [Duration] at load time.
+     */
+    val windowSize: Duration,
+
     val effectiveFrom: Instant,
     val isActive: Boolean,
     val createdAt: Instant
 ) {
-    /** Window size as a Duration for time arithmetic. */
-    val windowDuration: Duration
-        get() = Duration.ofSeconds(windowSizeSecs.toLong())
+    /** Window size in whole seconds (for window boundary alignment and PL/SQL params). */
+    val windowSizeSecs: Long
+        get() = windowSize.toSeconds()
 
-    /** Window size in milliseconds for jitter computation. */
+    /** Window size in milliseconds (for jitter range computation). */
     val windowSizeMs: Long
-        get() = windowSizeSecs * 1000L
+        get() = windowSize.toMillis()
 }

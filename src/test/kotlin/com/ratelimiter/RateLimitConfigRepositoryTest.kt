@@ -7,6 +7,7 @@ import jakarta.inject.Inject
 import org.assertj.core.api.Assertions.assertThat
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
+import java.time.Duration
 import java.time.Instant
 
 @QuarkusTest
@@ -26,13 +27,13 @@ class RateLimitConfigRepositoryTest {
         val config = repository.createConfig(
             configName = "test-create",
             maxPerWindow = 200,
-            windowSizeSecs = 4
+            windowSize = Duration.ofSeconds(4)
         )
 
         assertThat(config.configId).isGreaterThan(0)
         assertThat(config.configName).isEqualTo("test-create")
         assertThat(config.maxPerWindow).isEqualTo(200)
-        assertThat(config.windowSizeSecs).isEqualTo(4)
+        assertThat(config.windowSize).isEqualTo(Duration.ofSeconds(4))
         assertThat(config.isActive).isTrue()
 
         val loaded = repository.loadActiveConfig("test-create")
@@ -52,13 +53,13 @@ class RateLimitConfigRepositoryTest {
         val first = repository.createConfig(
             configName = "test-deactivate",
             maxPerWindow = 100,
-            windowSizeSecs = 4
+            windowSize = Duration.ofSeconds(4)
         )
 
         val second = repository.createConfig(
             configName = "test-deactivate",
             maxPerWindow = 200,
-            windowSizeSecs = 4
+            windowSize = Duration.ofSeconds(4)
         )
 
         val loaded = repository.loadActiveConfig("test-deactivate")
@@ -74,8 +75,8 @@ class RateLimitConfigRepositoryTest {
         val later = Instant.parse("2025-06-01T00:00:00Z")
 
         // Deactivate any existing for this name first
-        repository.createConfig("test-order", 50, 2, earlier)
-        val newest = repository.createConfig("test-order", 100, 4, later)
+        repository.createConfig("test-order", 50, Duration.ofSeconds(2), earlier)
+        val newest = repository.createConfig("test-order", 100, Duration.ofSeconds(4), later)
 
         val loaded = repository.loadActiveConfig("test-order")
         assertThat(loaded).isNotNull
@@ -84,7 +85,7 @@ class RateLimitConfigRepositoryTest {
 
     @Test
     fun `cache returns same config within TTL`() {
-        repository.createConfig("test-cache", 100, 4)
+        repository.createConfig("test-cache", 100, Duration.ofSeconds(4))
 
         val first = repository.loadActiveConfig("test-cache")
         assertThat(first).isNotNull
@@ -98,7 +99,7 @@ class RateLimitConfigRepositoryTest {
 
     @Test
     fun `evictCache forces DB reload`() {
-        repository.createConfig("test-evict", 100, 4)
+        repository.createConfig("test-evict", 100, Duration.ofSeconds(4))
         repository.loadActiveConfig("test-evict")
         assertThat(repository.isCached("test-evict")).isTrue()
 
