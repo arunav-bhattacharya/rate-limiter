@@ -33,7 +33,7 @@ class RateLimitAdminResource @Inject constructor(
 
     /** Response body for config queries. */
     data class ConfigResponse(
-        val id: Long,
+        val configId: Long,
         val configName: String,
         val maxPerWindow: Int,
         val windowSizeSecs: Int,
@@ -92,7 +92,7 @@ class RateLimitAdminResource @Inject constructor(
     }
 
     private fun RateLimitConfig.toResponse() = ConfigResponse(
-        id = id,
+        configId = configId,
         configName = configName,
         maxPerWindow = maxPerWindow,
         windowSizeSecs = windowSizeSecs,

@@ -76,8 +76,11 @@ class ConcurrencyTest {
         assertThat(errors).isEmpty()
         assertThat(results).hasSize(totalEvents)
 
-        // Verify no window exceeds max_per_window
-        val slotsByWindow = results.values.groupBy { it.windowStart }
+        // Verify no window exceeds max_per_window via DB (windowStart is an internal detail)
+        val slotsByWindow = transaction {
+            RateLimitEventSlotTable.selectAll().toList()
+                .groupBy { it[RateLimitEventSlotTable.windowStart] }
+        }
         for ((windowStart, slots) in slotsByWindow) {
             assertThat(slots.size)
                 .describedAs("Window $windowStart should have at most $maxPerWindow slots")
@@ -141,11 +144,14 @@ class ConcurrencyTest {
         assertThat(results).hasSize(threadCount)
 
         // All results should be identical
-        val uniqueSlotIds = results.map { it.slotId }.distinct()
-        assertThat(uniqueSlotIds).hasSize(1)
+        val uniqueEventIds = results.map { it.eventId }.distinct()
+        assertThat(uniqueEventIds).hasSize(1)
 
         val uniqueScheduledTimes = results.map { it.scheduledTime }.distinct()
         assertThat(uniqueScheduledTimes).hasSize(1)
+
+        val uniqueDelays = results.map { it.delay }.distinct()
+        assertThat(uniqueDelays).hasSize(1)
 
         // Only one row should exist in DB
         val dbCount = transaction {

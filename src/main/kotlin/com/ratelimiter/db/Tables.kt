@@ -5,7 +5,7 @@ import org.jetbrains.exposed.sql.javatime.timestamp
 
 /** Rate limit configuration — dynamic, versioned. */
 object RateLimitConfigTable : Table("rate_limit_config") {
-    val id = long("id").autoIncrement()
+    val configId = long("config_id").autoIncrement()
     val configName = varchar("config_name", 128)
     val maxPerWindow = integer("max_per_window")
     val windowSizeSecs = integer("window_size_secs")
@@ -13,7 +13,7 @@ object RateLimitConfigTable : Table("rate_limit_config") {
     val isActive = bool("is_active")
     val createdAt = timestamp("created_at")
 
-    override val primaryKey = PrimaryKey(id)
+    override val primaryKey = PrimaryKey(configId)
 }
 
 /** Per-window slot counter — config-agnostic concurrency control. */
@@ -26,14 +26,13 @@ object WindowCounterTable : Table("rate_limit_window_counter") {
 
 /** Immutable slot assignment record. */
 object RateLimitEventSlotTable : Table("rate_limit_event_slot") {
-    val id = long("id").autoIncrement()
+    val slotId = long("slot_id").autoIncrement()
     val eventId = varchar("event_id", 256)
     val requestedTime = timestamp("requested_time")
     val windowStart = timestamp("window_start")
-    val slotIndex = integer("slot_index")
     val scheduledTime = timestamp("scheduled_time")
     val configId = long("config_id")
     val createdAt = timestamp("created_at")
 
-    override val primaryKey = PrimaryKey(id)
+    override val primaryKey = PrimaryKey(slotId)
 }

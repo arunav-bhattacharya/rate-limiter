@@ -30,12 +30,6 @@ dependencies {
     implementation("org.jetbrains.exposed:exposed-jdbc:0.61.0")
     implementation("org.jetbrains.exposed:exposed-java-time:0.61.0")
 
-    // Temporal
-    implementation("io.temporal:temporal-sdk:1.31.0")
-
-    // Metrics
-    implementation("io.quarkus:quarkus-micrometer-registry-prometheus")
-
     // Kotlin
     implementation("org.jetbrains.kotlin:kotlin-stdlib")
 

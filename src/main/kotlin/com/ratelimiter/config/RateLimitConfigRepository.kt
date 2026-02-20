@@ -95,13 +95,13 @@ class RateLimitConfigRepository {
                 it[RateLimitConfigTable.effectiveFrom] = effectiveFrom
                 it[isActive] = true
                 it[createdAt] = now
-            } get RateLimitConfigTable.id
+            } get RateLimitConfigTable.configId
         }
 
         cache.remove(configName)
 
         return RateLimitConfig(
-            id = insertedId,
+            configId = insertedId,
             configName = configName,
             maxPerWindow = maxPerWindow,
             windowSizeSecs = windowSizeSecs,
@@ -116,14 +116,14 @@ class RateLimitConfigRepository {
         cache.clear()
     }
 
-    /** Check if a config name has a cached entry (for metrics/testing). */
+    /** Check if a config name has a cached entry (for testing). */
     fun isCached(configName: String): Boolean {
         val cached = cache[configName] ?: return false
         return Duration.between(cached.loadedAt, Instant.now()).seconds < CACHE_TTL_SECONDS
     }
 
     private fun ResultRow.toRateLimitConfig(): RateLimitConfig = RateLimitConfig(
-        id = this[RateLimitConfigTable.id],
+        configId = this[RateLimitConfigTable.configId],
         configName = this[RateLimitConfigTable.configName],
         maxPerWindow = this[RateLimitConfigTable.maxPerWindow],
         windowSizeSecs = this[RateLimitConfigTable.windowSizeSecs],

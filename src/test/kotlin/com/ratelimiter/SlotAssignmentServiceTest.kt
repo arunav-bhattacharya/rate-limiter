@@ -15,6 +15,7 @@ import org.jetbrains.exposed.sql.selectAll
 import org.jetbrains.exposed.sql.transactions.transaction
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
+import java.time.Duration
 import java.time.Instant
 
 @QuarkusTest
@@ -45,10 +46,10 @@ class SlotAssignmentServiceTest {
         val slot = service.assignSlot("evt-basic-1", "test-basic", requestedTime)
 
         assertThat(slot.eventId).isEqualTo("evt-basic-1")
-        assertThat(slot.windowStart).isEqualTo(Instant.parse("2025-06-01T12:00:00Z"))
-        assertThat(slot.scheduledTime).isAfterOrEqualTo(slot.windowStart)
-        assertThat(slot.scheduledTime).isBefore(slot.windowStart.plusSeconds(4))
-        assertThat(slot.slotIndex).isEqualTo(0)
+        assertThat(slot.scheduledTime).isAfterOrEqualTo(requestedTime)
+        assertThat(slot.scheduledTime).isBefore(requestedTime.plusSeconds(4))
+        // Event lands in the requested window, so delay is within the window size
+        assertThat(slot.delay).isLessThan(Duration.ofSeconds(4))
     }
 
     @Test
@@ -59,10 +60,9 @@ class SlotAssignmentServiceTest {
         val first = service.assignSlot("evt-idem-1", "test-idempotent", requestedTime)
         val second = service.assignSlot("evt-idem-1", "test-idempotent", requestedTime)
 
-        assertThat(second.slotId).isEqualTo(first.slotId)
+        assertThat(second.eventId).isEqualTo(first.eventId)
         assertThat(second.scheduledTime).isEqualTo(first.scheduledTime)
-        assertThat(second.windowStart).isEqualTo(first.windowStart)
-        assertThat(second.slotIndex).isEqualTo(first.slotIndex)
+        assertThat(second.delay).isEqualTo(first.delay)
 
         // Verify only one row exists in the DB
         val count = transaction {
@@ -82,9 +82,10 @@ class SlotAssignmentServiceTest {
         service.assignSlot("evt-skip-1", "test-skip", requestedTime)
         service.assignSlot("evt-skip-2", "test-skip", requestedTime)
 
-        // Third event should go to window 1
+        // Third event should go to window 1 (4s later), so delay >= 4s
         val third = service.assignSlot("evt-skip-3", "test-skip", requestedTime)
-        assertThat(third.windowStart).isEqualTo(Instant.parse("2025-06-01T12:00:04Z"))
+        assertThat(third.scheduledTime).isAfterOrEqualTo(requestedTime.plusSeconds(4))
+        assertThat(third.delay).isGreaterThanOrEqualTo(Duration.ofSeconds(4))
     }
 
     @Test
@@ -96,8 +97,11 @@ class SlotAssignmentServiceTest {
             service.assignSlot("evt-multi-$i", "test-multi", requestedTime)
         }
 
-        // Should span 3 windows: 0, 4s, 8s
-        val windowStarts = slots.map { it.windowStart }.distinct().sorted()
+        // Should span 3 windows: events should have scheduled times across 12s range
+        // Verify via DB that 3 distinct windows were used
+        val windowStarts = transaction {
+            RateLimitEventSlotTable.selectAll().map { it[RateLimitEventSlotTable.windowStart] }.distinct().sorted()
+        }
         assertThat(windowStarts).hasSize(3)
         assertThat(windowStarts[0]).isEqualTo(Instant.parse("2025-06-01T12:00:00Z"))
         assertThat(windowStarts[1]).isEqualTo(Instant.parse("2025-06-01T12:00:04Z"))
@@ -108,32 +112,18 @@ class SlotAssignmentServiceTest {
     fun `jitter is within window bounds`() {
         configRepository.createConfig("test-jitter", 200, 4)
         val requestedTime = Instant.parse("2025-06-01T12:00:00Z")
-        val windowStart = Instant.parse("2025-06-01T12:00:00Z")
-        val windowEnd = windowStart.plusSeconds(4)
+        val windowEnd = requestedTime.plusSeconds(4)
 
         val slots = (1..100).map { i ->
             service.assignSlot("evt-jitter-$i", "test-jitter", requestedTime)
         }
 
-        // All scheduled times must be within [windowStart, windowStart + 4s)
+        // All scheduled times must be within [requestedTime, requestedTime + 4s)
         for (slot in slots) {
             assertThat(slot.scheduledTime)
-                .isAfterOrEqualTo(windowStart)
+                .isAfterOrEqualTo(requestedTime)
                 .isBefore(windowEnd)
         }
-    }
-
-    @Test
-    fun `slot indices increment correctly within a window`() {
-        configRepository.createConfig("test-index", 10, 4)
-        val requestedTime = Instant.parse("2025-06-01T12:00:00Z")
-
-        val slots = (1..5).map { i ->
-            service.assignSlot("evt-idx-$i", "test-index", requestedTime)
-        }
-
-        val indices = slots.map { it.slotIndex }
-        assertThat(indices).containsExactly(0, 1, 2, 3, 4)
     }
 
     @Test
@@ -175,8 +165,27 @@ class SlotAssignmentServiceTest {
         }
 
         assertThat(slots).hasSize(50)
-        val maxWindow = slots.maxOf { it.windowStart }
-        // With 50 windows at 4s each, the max window should be 196s ahead
-        assertThat(maxWindow).isEqualTo(Instant.parse("2025-06-01T12:00:00Z").plusSeconds(49 * 4L))
+        // Last event should be pushed ~196s ahead (49 windows × 4s + jitter)
+        val maxScheduledTime = slots.maxOf { it.scheduledTime }
+        assertThat(maxScheduledTime).isAfterOrEqualTo(requestedTime.plusSeconds(49 * 4L))
+        assertThat(maxScheduledTime).isBefore(requestedTime.plusSeconds(50 * 4L))
+    }
+
+    @Test
+    fun `delay reflects how far event was pushed from requested time`() {
+        configRepository.createConfig("test-delay", 1, 4)
+        val requestedTime = Instant.parse("2025-06-01T12:00:00Z")
+
+        // First event lands in the requested window — delay < windowSize
+        val first = service.assignSlot("evt-delay-1", "test-delay", requestedTime)
+        assertThat(first.delay).isLessThan(Duration.ofSeconds(4))
+
+        // Second event is pushed to next window — delay >= 4s
+        val second = service.assignSlot("evt-delay-2", "test-delay", requestedTime)
+        assertThat(second.delay).isGreaterThanOrEqualTo(Duration.ofSeconds(4))
+
+        // Third event is pushed to third window — delay >= 8s
+        val third = service.assignSlot("evt-delay-3", "test-delay", requestedTime)
+        assertThat(third.delay).isGreaterThanOrEqualTo(Duration.ofSeconds(8))
     }
 }

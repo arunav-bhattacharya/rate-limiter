@@ -29,7 +29,7 @@ class RateLimitConfigRepositoryTest {
             windowSizeSecs = 4
         )
 
-        assertThat(config.id).isGreaterThan(0)
+        assertThat(config.configId).isGreaterThan(0)
         assertThat(config.configName).isEqualTo("test-create")
         assertThat(config.maxPerWindow).isEqualTo(200)
         assertThat(config.windowSizeSecs).isEqualTo(4)
@@ -37,7 +37,7 @@ class RateLimitConfigRepositoryTest {
 
         val loaded = repository.loadActiveConfig("test-create")
         assertThat(loaded).isNotNull
-        assertThat(loaded?.id).isEqualTo(config.id)
+        assertThat(loaded?.configId).isEqualTo(config.configId)
         assertThat(loaded?.maxPerWindow).isEqualTo(200)
     }
 
@@ -63,9 +63,9 @@ class RateLimitConfigRepositoryTest {
 
         val loaded = repository.loadActiveConfig("test-deactivate")
         assertThat(loaded).isNotNull
-        assertThat(loaded?.id).isEqualTo(second.id)
+        assertThat(loaded?.configId).isEqualTo(second.configId)
         assertThat(loaded?.maxPerWindow).isEqualTo(200)
-        assertThat(loaded?.id).isNotEqualTo(first.id)
+        assertThat(loaded?.configId).isNotEqualTo(first.configId)
     }
 
     @Test
@@ -79,7 +79,7 @@ class RateLimitConfigRepositoryTest {
 
         val loaded = repository.loadActiveConfig("test-order")
         assertThat(loaded).isNotNull
-        assertThat(loaded?.id).isEqualTo(newest.id)
+        assertThat(loaded?.configId).isEqualTo(newest.configId)
     }
 
     @Test
@@ -92,7 +92,7 @@ class RateLimitConfigRepositoryTest {
         // Second call should come from cache
         val second = repository.loadActiveConfig("test-cache")
         assertThat(second).isNotNull
-        assertThat(second?.id).isEqualTo(first?.id)
+        assertThat(second?.configId).isEqualTo(first?.configId)
         assertThat(repository.isCached("test-cache")).isTrue()
     }
 

@@ -1,0 +1,22 @@
+version: "3.8"
+
+services:
+  oracle:
+    image: codeassertion/oracledb-arm64-standalone:19.3.0-enterprise
+    container_name: rate-limiter-oracle
+    ports:
+      - "1521:1521"
+      - "5500:5500"
+    environment:
+      ORACLE_PWD: rate_limiter_pwd
+    volumes:
+      - oracle_data:/opt/oracle/oradata
+    healthcheck:
+      test: ["CMD", "sqlplus", "-L", "sys/rate_limiter_pwd@//localhost:1521/ORCLPDB1 as sysdba", "@/dev/null"]
+      interval: 30s
+      timeout: 10s
+      retries: 30
+      start_period: 120s
+
+volumes:
+  oracle_data:

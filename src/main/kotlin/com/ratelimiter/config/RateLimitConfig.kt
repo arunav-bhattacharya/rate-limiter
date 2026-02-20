@@ -8,7 +8,7 @@ import java.time.Instant
  * Immutable value type — thread-safe for caching without synchronization.
  */
 data class RateLimitConfig(
-    val id: Long,
+    val configId: Long,
     val configName: String,
     val maxPerWindow: Int,
     val windowSizeSecs: Int,

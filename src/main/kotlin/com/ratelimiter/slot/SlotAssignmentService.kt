@@ -4,7 +4,6 @@ import com.ratelimiter.config.RateLimitConfig
 import com.ratelimiter.config.RateLimitConfigRepository
 import com.ratelimiter.db.RateLimitEventSlotTable
 import com.ratelimiter.db.WindowCounterTable
-import com.ratelimiter.metrics.RateLimiterMetrics
 import jakarta.annotation.PostConstruct
 import jakarta.enterprise.context.ApplicationScoped
 import jakarta.inject.Inject
@@ -35,7 +34,6 @@ import java.util.concurrent.atomic.AtomicReference
 @ApplicationScoped
 class SlotAssignmentService @Inject constructor(
     private val configRepository: RateLimitConfigRepository,
-    private val metrics: RateLimiterMetrics,
     @param:ConfigProperty(name = "rate-limiter.headroom-windows", defaultValue = "100")
     private val headroomWindows: Int
 ) {
@@ -113,23 +111,16 @@ class SlotAssignmentService @Inject constructor(
      * @param eventId      unique event identifier (idempotency key)
      * @param configName   the rate limit config to use
      * @param requestedTime when the caller wants the event processed
-     * @return assigned slot with the scheduled execution time
+     * @return assigned slot with event ID, scheduled time, and delay from requested time
      * @throws SlotAssignmentException if no window has capacity within the dynamic lookahead range
      * @throws ConfigLoadException if no active config exists for the given name
      */
     fun assignSlot(eventId: String, configName: String, requestedTime: Instant): AssignedSlot {
-        return metrics.assignmentDuration.recordCallable {
-            doAssignSlot(eventId, configName, requestedTime)
-        }!!
-    }
-
-    private fun doAssignSlot(eventId: String, configName: String, requestedTime: Instant): AssignedSlot {
         // Step 1: Idempotency check
-        val existing = findExistingSlot(eventId)
+        val existing = findExistingSlot(eventId, requestedTime)
         if (existing != null) {
-            metrics.idempotentHits.increment()
             logger.debug("Idempotent hit for eventId={}", eventId)
-            return existing
+            return existing.toAssignedSlot()
         }
 
         // Step 2: Load config (from 5-second cache)
@@ -176,11 +167,10 @@ class SlotAssignmentService @Inject constructor(
         var windowsSearched = 0
         while (!windowStart.isAfter(searchLimit)) {
             windowsSearched++
-            val result = tryClaimSlotInWindow(eventId, windowStart, config)
+            val result = tryClaimSlotInWindow(eventId, windowStart, config, requestedTime)
 
             when (result) {
                 is WindowResult.Assigned -> {
-                    metrics.slotsAssigned.increment()
                     // Advance the frontier atomically. Uses updateAndGet with a
                     // monotonic max to ensure the high-water mark only moves forward,
                     // even under concurrent assignments from multiple threads. This
@@ -188,21 +178,18 @@ class SlotAssignmentService @Inject constructor(
                     furthestAssignedWindow.updateAndGet { current ->
                         if (windowStart.isAfter(current)) windowStart else current
                     }
-                    return result.slot
+                    return result.slot.toAssignedSlot()
                 }
 
                 is WindowResult.AlreadyAssigned -> {
-                    metrics.idempotentHits.increment()
-                    return result.existingSlot
+                    return result.existingSlot.toAssignedSlot()
                 }
 
                 is WindowResult.Full -> {
-                    metrics.windowsFull.increment()
                     logger.debug("Window {} is full, advancing", windowStart)
                 }
 
                 is WindowResult.Contended -> {
-                    metrics.windowsContended.increment()
                     logger.debug("Window {} is contended, advancing", windowStart)
                 }
             }
@@ -211,7 +198,6 @@ class SlotAssignmentService @Inject constructor(
         }
 
         // All windows within dynamic lookahead exhausted
-        metrics.assignmentFailures.increment()
         throw SlotAssignmentException(
             eventId = eventId,
             windowsSearched = windowsSearched,
@@ -230,7 +216,8 @@ class SlotAssignmentService @Inject constructor(
     private fun tryClaimSlotInWindow(
         eventId: String,
         windowStart: Instant,
-        config: RateLimitConfig
+        config: RateLimitConfig,
+        requestedTime: Instant
     ): WindowResult {
         return transaction {
             // Step 4a: Ensure counter row exists (plain INSERT, catch ORA-00001 if already exists)
@@ -266,7 +253,6 @@ class SlotAssignmentService @Inject constructor(
             }
 
             // Step 4d: Compute random jitter within the window
-            val newSlotIndex = currentCount
             val jitterMillis = ThreadLocalRandom.current().nextLong(0, config.windowSizeMs)
             val scheduledTime = windowStart.plusMillis(jitterMillis)
 
@@ -276,37 +262,35 @@ class SlotAssignmentService @Inject constructor(
             try {
                 val insertedId = RateLimitEventSlotTable.insert {
                     it[RateLimitEventSlotTable.eventId] = eventId
-                    it[requestedTime] = Instant.now()
+                    it[RateLimitEventSlotTable.requestedTime] = requestedTime
                     it[RateLimitEventSlotTable.windowStart] = windowStart
-                    it[RateLimitEventSlotTable.slotIndex] = newSlotIndex
                     it[RateLimitEventSlotTable.scheduledTime] = scheduledTime
-                    it[configId] = config.id
-                    it[createdAt] = Instant.now()
-                } get RateLimitEventSlotTable.id
+                    it[RateLimitEventSlotTable.configId] = config.configId
+                    it[RateLimitEventSlotTable.createdAt] = Instant.now()
+                } get RateLimitEventSlotTable.slotId
 
                 // Step 4f: Increment counter only after slot row is confirmed inserted
                 WindowCounterTable.update({ WindowCounterTable.windowStart eq windowStart }) {
-                    it[slotCount] = newSlotIndex + 1
+                    it[slotCount] = currentCount + 1
                 }
 
                 WindowResult.Assigned(
-                    AssignedSlot(
+                    InternalSlot(
                         slotId = insertedId,
                         eventId = eventId,
                         windowStart = windowStart,
-                        slotIndex = newSlotIndex,
                         scheduledTime = scheduledTime,
-                        configId = config.id
+                        configId = config.configId,
+                        requestedTime = requestedTime
                     )
                 )
             } catch (e: SQLException) {
                 if (oracleErrorCode(e) == ORA_UNIQUE_CONSTRAINT_VIOLATED) {
                     // ORA-00001 on event_id unique constraint — concurrent idempotency race.
                     // Counter was never incremented, so no revert needed.
-                    metrics.idempotencyRaces.increment()
                     logger.info("Idempotency race for eventId={}, re-reading", eventId)
 
-                    val existingSlot = findExistingSlotInTransaction(eventId)
+                    val existingSlot = findExistingSlotInTransaction(eventId, requestedTime)
                     if (existingSlot != null) {
                         WindowResult.AlreadyAssigned(existingSlot)
                     } else {
@@ -323,29 +307,35 @@ class SlotAssignmentService @Inject constructor(
 
     /**
      * Look up an existing slot by event_id (separate transaction for idempotency check).
+     *
+     * @param requestedTime the caller's original requested time, needed to compute
+     *        the delay field when converting to the public [AssignedSlot].
      */
-    private fun findExistingSlot(eventId: String): AssignedSlot? {
+    private fun findExistingSlot(eventId: String, requestedTime: Instant): InternalSlot? {
         return transaction {
-            findExistingSlotInTransaction(eventId)
+            findExistingSlotInTransaction(eventId, requestedTime)
         }
     }
 
     /**
      * Look up an existing slot by event_id within an existing transaction.
+     *
+     * @param requestedTime the caller's original requested time, stored in the
+     *        [InternalSlot] for delay computation at the public API boundary.
      */
-    private fun findExistingSlotInTransaction(eventId: String): AssignedSlot? {
+    private fun findExistingSlotInTransaction(eventId: String, requestedTime: Instant): InternalSlot? {
         return RateLimitEventSlotTable
             .selectAll()
             .where { RateLimitEventSlotTable.eventId eq eventId }
             .firstOrNull()
             ?.let { row ->
-                AssignedSlot(
-                    slotId = row[RateLimitEventSlotTable.id],
+                InternalSlot(
+                    slotId = row[RateLimitEventSlotTable.slotId],
                     eventId = row[RateLimitEventSlotTable.eventId],
                     windowStart = row[RateLimitEventSlotTable.windowStart],
-                    slotIndex = row[RateLimitEventSlotTable.slotIndex],
                     scheduledTime = row[RateLimitEventSlotTable.scheduledTime],
-                    configId = row[RateLimitEventSlotTable.configId]
+                    configId = row[RateLimitEventSlotTable.configId],
+                    requestedTime = requestedTime
                 )
             }
     }
