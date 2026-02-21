@@ -27,7 +27,7 @@ internal object SlotAssignmentSql {
      *
      * Parameter positions:
      *   IN:  1=event_id, 2=window_start, 3=requested_time, 4=config_id,
-     *        5=max_per_window, 6=window_size_secs, 7=effective_max,
+     *        5=max_per_window, 6=window_size_secs, 7=max_first_window,
      *        8=first_jitter_ms, 9=full_jitter_ms, 10=headroom_secs
      *   OUT: 11=status, 12=slot_id, 13=scheduled_time, 14=window_start_out,
      *        15=windows_searched
@@ -41,7 +41,7 @@ internal object SlotAssignmentSql {
             in_config_id        NUMBER        := ?;  /* 4  */
             in_max_per_window   NUMBER        := ?;  /* 5  */
             in_window_size_secs NUMBER        := ?;  /* 6  */
-            in_effective_max    NUMBER        := ?;  /* 7  */
+            in_max_first_window NUMBER        := ?;  /* 7  */
             in_first_jitter_ms  NUMBER        := ?;  /* 8  */
             in_full_jitter_ms   NUMBER        := ?;  /* 9  */
             in_headroom_secs    NUMBER        := ?;  /* 10 */
@@ -54,11 +54,13 @@ internal object SlotAssignmentSql {
             ou_windows_searched NUMBER := 0;
 
             -- Working state
+            window_size      INTERVAL DAY TO SECOND := NUMTODSINTERVAL(in_window_size_secs, 'SECOND');
+            headroom         INTERVAL DAY TO SECOND := NUMTODSINTERVAL(in_headroom_secs, 'SECOND');
             current_window   TIMESTAMP;
             current_count    NUMBER;
             windows_searched NUMBER := 0;
             slot_claimed     BOOLEAN := FALSE;
-            skip_target      TIMESTAMP;
+            first_open_window TIMESTAMP;
             search_limit     TIMESTAMP;
 
             STATUS_NEW       CONSTANT NUMBER := 1;
@@ -99,8 +101,8 @@ internal object SlotAssignmentSql {
                 END;
 
                 SELECT slot_count INTO locked_count
-                FROM rate_limit_window_counter
-                WHERE window_start = window_ts
+                FROM   rate_limit_window_counter
+                WHERE  window_start = window_ts
                 FOR UPDATE NOWAIT;
 
                 RETURN locked_count;
@@ -123,9 +125,10 @@ internal object SlotAssignmentSql {
                 slot_count   IN NUMBER,
                 p_jitter_ms  IN NUMBER
             ) RETURN BOOLEAN IS
+                jitter     INTERVAL DAY TO SECOND := NUMTODSINTERVAL(p_jitter_ms / 1000, 'SECOND');
                 sched_time TIMESTAMP;
             BEGIN
-                sched_time := window_ts + NUMTODSINTERVAL(p_jitter_ms / 1000, 'SECOND');
+                sched_time := window_ts + jitter;
 
                 INSERT INTO rate_limit_event_slot(
                     event_id, requested_time, window_start,
@@ -150,9 +153,9 @@ internal object SlotAssignmentSql {
             EXCEPTION
                 WHEN DUP_VAL_ON_INDEX THEN
                     SELECT slot_id, scheduled_time, window_start
-                    INTO ou_slot_id, ou_scheduled_time, ou_window_start
-                    FROM rate_limit_event_slot
-                    WHERE event_id = in_event_id;
+                    INTO   ou_slot_id, ou_scheduled_time, ou_window_start
+                    FROM   rate_limit_event_slot
+                    WHERE  event_id = in_event_id;
                     ou_status           := STATUS_EXISTING;
                     ou_windows_searched := windows_searched;
                     RETURN TRUE;
@@ -170,9 +173,9 @@ internal object SlotAssignmentSql {
             BEGIN
                 -- Single indexed query: find first OPEN window after start_ts
                 SELECT MIN(window_start) INTO open_ts
-                FROM rate_limit_window_counter
-                WHERE status = 'OPEN'
-                  AND window_start > start_ts;
+                FROM   rate_limit_window_counter
+                WHERE  status = 'OPEN'
+                  AND  window_start > start_ts;
 
                 IF open_ts IS NOT NULL THEN
                     RETURN open_ts;
@@ -180,14 +183,14 @@ internal object SlotAssignmentSql {
 
                 -- No OPEN rows found. Jump past the last counter row.
                 SELECT MAX(window_start) INTO max_ts
-                FROM rate_limit_window_counter
-                WHERE window_start > start_ts;
+                FROM   rate_limit_window_counter
+                WHERE  window_start > start_ts;
 
                 IF max_ts IS NOT NULL THEN
-                    RETURN max_ts + NUMTODSINTERVAL(in_window_size_secs, 'SECOND');
+                    RETURN max_ts + window_size;
                 ELSE
                     -- Returning the next window after start_ts, as the first window was already checked in Phase 1
-                    RETURN start_ts + NUMTODSINTERVAL(in_window_size_secs, 'SECOND');
+                    RETURN start_ts + window_size;
                 END IF;
             END find_first_open_window;
 
@@ -203,15 +206,15 @@ internal object SlotAssignmentSql {
                 windows_searched := windows_searched + 1;
 
                 current_count := try_lock_window(current_window);
-                IF current_count >= 0 AND current_count < in_effective_max THEN
+                IF current_count >= 0 AND current_count < in_max_first_window THEN
                     slot_claimed := claim_slot_in_window(current_window, current_count, in_first_jitter_ms);
                 END IF;
 
                 -- Phase 2: Skip to first OPEN window, compute search limit, walk
                 IF NOT slot_claimed THEN
-                    skip_target  := find_first_open_window(in_window_start);
-                    search_limit := skip_target + NUMTODSINTERVAL(in_headroom_secs, 'SECOND');
-                    current_window := skip_target;
+                    first_open_window  := find_first_open_window(in_window_start);
+                    search_limit := first_open_window + headroom;
+                    current_window := first_open_window;
 
                     WHILE current_window <= search_limit AND NOT slot_claimed LOOP
                         windows_searched := windows_searched + 1;
@@ -222,8 +225,7 @@ internal object SlotAssignmentSql {
                         END IF;
 
                         IF NOT slot_claimed THEN
-                            current_window := current_window
-                                + NUMTODSINTERVAL(in_window_size_secs, 'SECOND');
+                            current_window := current_window + window_size;
                         END IF;
                     END LOOP;
                 END IF;

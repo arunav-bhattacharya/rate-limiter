@@ -679,25 +679,25 @@
                 </div>
                 <div class="range-marker above" id="marker-elapsed" style="left: 50%;">
                     <div class="marker-label" style="color: var(--primary);">elapsedMs = 1500<br>proportional max = 62</div>
-                    <div class="marker-desc">effectiveMax = floor(100 &times; 2500 / 4000)</div>
+                    <div class="marker-desc">maxFirstWindow = floor(100 &times; 2500 / 4000)</div>
                     <div class="marker-pin" style="background: var(--primary);"></div>
                 </div>
                 <div class="range-marker above" id="marker-search-limit" style="left: 90%;">
-                    <div class="marker-label" style="color: var(--error);">searchLimit<br>skipTarget + 400s</div>
+                    <div class="marker-label" style="color: var(--error);">searchLimit<br>firstOpenWindow + 400s</div>
                     <div class="marker-desc">Per-request, computed in PL/SQL</div>
                     <div class="marker-pin" style="background: var(--error);"></div>
                 </div>
                 <div class="range-bracket" id="headroom-bracket" style="left: 50%; width: 40%;">
-                    <div class="bracket-label">headroom: 100 windows x 4s = 400s from skip target</div>
+                    <div class="bracket-label">headroom: 100 windows x 4s = 400s from first open window</div>
                 </div>
             </div>
             <div class="step-desc" id="s6-desc"></div>
             <div class="snap-formula" id="snap-formula-6">
                 <span class="keyword">windowStart</span> = requestedTime - (requestedTime <span class="keyword">%</span> windowSizeSecs)
                 &nbsp;&nbsp;|&nbsp;&nbsp;
-                <span class="keyword">effectiveMax</span> = maxPerWindow &times; remainingMs / windowSizeMs
+                <span class="keyword">maxFirstWindow</span> = maxPerWindow &times; remainingMs / windowSizeMs
                 &nbsp;&nbsp;|&nbsp;&nbsp;
-                <span class="keyword">searchLimit</span> = skipTarget + (headroomWindows &times; windowSizeSecs)
+                <span class="keyword">searchLimit</span> = firstOpenWindow + headroom
             </div>
         </div>
         <div class="db-tables-panel" id="db-tables-6"></div>
@@ -1224,8 +1224,8 @@
                 'The incoming API call carries requestedTime = 12:00:01.500',
                 'Snap to window boundary: epoch - (epoch % 4s) = 12:00:00.000',
                 'elapsedMs = 1500ms into window. First window gets proportional capacity: floor(100 × 2500 / 4000) = 62',
-                'Headroom = 100 windows × 4s = 400s. Search limit computed per-request in PL/SQL from skip target.',
-                'searchLimit = skipTarget + headroomSecs. PL/SQL skips to first OPEN window, then walks from there.'
+                'Headroom = 100 windows × 4s = 400s. Search limit computed per-request in PL/SQL from first open window.',
+                'searchLimit = firstOpenWindow + headroom. PL/SQL skips to first OPEN window, then walks from there.'
             ];
             function applyStep(step) {
                 ids.forEach((id, i) => {

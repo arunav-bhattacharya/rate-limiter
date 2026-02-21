@@ -21,7 +21,7 @@ A bulk payments processing platform needs an Oracle-based rate limiter to enforc
 5. **5-second in-memory config cache** via `ConcurrentHashMap`
 6. **Random-only jitter** — uniform distribution within each window
 7. **INSERT + catch ORA-00001** for window counter row creation (not MERGE/insertIgnore) — INSERT is lighter than MERGE; conflict only on first event per window; Oracle detects duplicates at index level cheaply
-8. **Dynamic per-request search limit** — no global frontier or fixed MAX_LOOKAHEAD; PL/SQL skip query finds first OPEN window, search limit = `skipTarget + headroom`
+8. **Dynamic per-request search limit** — no global frontier or fixed MAX_LOOKAHEAD; PL/SQL skip query finds first OPEN window, search limit = `firstOpenWindow + headroom`
 9. **Window status column** (`OPEN`/`CLOSED`) on `rate_limit_window_counter` — enables O(log N) indexed skip queries via composite index `(status, window_start)`
 10. **Proportional first-window capacity** — when `requestedTime` falls mid-window, first window's effective max = `floor(maxPerWindow * remainingTime / windowSize)` with constrained jitter `[elapsedMs, windowSizeMs)`
 
@@ -32,13 +32,13 @@ dynamically per request inside the PL/SQL block:
 
 ```
 Phase 1: Try first window with proportional capacity
-  effectiveMax = floor(maxPerWindow * remainingMs / windowSizeMs)
+  maxFirstWindow = floor(maxPerWindow * remainingMs / windowSizeMs)
   jitter constrained to [elapsedMs, windowSizeMs) so scheduledTime >= requestedTime
 
 Phase 2 (if Phase 1 fails):
-  skipTarget   = find_first_open_window(windowStart)  -- O(log N) indexed query
-  searchLimit  = skipTarget + headroomSecs
-  Walk from skipTarget to searchLimit
+  firstOpenWindow = find_first_open_window(windowStart)  -- O(log N) indexed query
+  searchLimit     = firstOpenWindow + headroom
+  Walk from firstOpenWindow to searchLimit
 ```
 
 - **No global state**: No `AtomicReference`, no `@PostConstruct` initialization, no cross-request interference.
@@ -166,7 +166,7 @@ assignSlot(eventId, configName, requestedTime):
   1. loadActiveConfig(configName) -> from cache or DB
   2. windowStart = alignToWindowBoundary(requestedTime, config.windowSizeSecs)
      elapsedMs = Duration.between(windowStart, requestedTime).toMillis()
-     effectiveMax = computeEffectiveMax(maxPerWindow, elapsedMs, windowSizeMs)
+     maxFirstWindow = computeEffectiveMax(maxPerWindow, elapsedMs, windowSizeMs)
      firstJitterMs = ThreadLocalRandom.nextLong(elapsedMs or 0, windowSizeMs)
      fullJitterMs = ThreadLocalRandom.nextLong(0, windowSizeMs)
      headroomSecs = headroomWindows * config.windowSizeSecs
@@ -174,12 +174,12 @@ assignSlot(eventId, configName, requestedTime):
      -- Server-side (inside PL/SQL anonymous block):
      a. check_existing_slot: SELECT by event_id -> if found, ou_status = EXISTING
      b. Phase 1: Try first window with pre-computed proportional capacity
-        - try_lock_window(windowStart) -> if count < in_effective_max:
+        - try_lock_window(windowStart) -> if count < in_max_first_window:
           claim_slot_in_window(windowStart, count, in_first_jitter_ms)
      c. Phase 2 (if Phase 1 fails): Skip to first OPEN window
-        - skipTarget = find_first_open_window(windowStart) -> O(log N) indexed query
-        - searchLimit = skipTarget + headroomSecs
-        - Walk loop (current_window from skipTarget to searchLimit):
+        - firstOpenWindow = find_first_open_window(windowStart) -> O(log N) indexed query
+        - searchLimit = firstOpenWindow + headroom
+        - Walk loop (current_window from firstOpenWindow to searchLimit):
           try_lock_window -> SELECT FOR UPDATE NOWAIT
           -> SQLCODE -54/-60 -> skip to next window
           -> if slot_count >= max_per_window -> skip
@@ -197,9 +197,9 @@ assignSlot(eventId, configName, requestedTime):
 **Key design features**:
 - Entire slot assignment (idempotency check + two-phase window search + lock + insert + counter update) in a **single PL/SQL anonymous block** — one JDBC round trip
 - **Two-phase approach**: Phase 1 tries first window with proportional capacity; Phase 2 skips to first OPEN window
-- **No global frontier**: Search limit computed per-request inside PL/SQL (`skipTarget + headroom`)
+- **No global frontier**: Search limit computed per-request inside PL/SQL (`firstOpenWindow + headroom`)
 - **Status-based skip query**: `find_first_open_window()` uses composite index `(status, window_start)` for O(log N) lookups
-- **Proportional first-window**: `effectiveMax = floor(maxPerWindow * remainingMs / windowSizeMs)` pre-computed in Kotlin
+- **Proportional first-window**: `maxFirstWindow = floor(maxPerWindow * remainingMs / windowSizeMs)` pre-computed in Kotlin
 - **Pre-computed jitter**: Both jitter values computed in Kotlin via `ThreadLocalRandom` and passed as IN params — no `DBMS_RANDOM` in PL/SQL
 - **Constrained first-window jitter**: `firstJitterMs = ThreadLocalRandom.nextLong(elapsedMs, windowSizeMs)` ensures `scheduledTime >= requestedTime`
 - **Atomic status transition**: `claim_slot_in_window` sets `status = CLOSED` when `slot_count + 1 >= maxPerWindow`

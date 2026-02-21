@@ -27,7 +27,7 @@ import java.util.concurrent.ThreadLocalRandom
  *
  * The search limit is computed dynamically within the PL/SQL block: after a skip
  * query finds the first available window, the search limit is set to
- * `skip_target + headroom`. This is request-scoped — each invocation computes its
+ * `first_open_window + headroom`. This is request-scoped — each invocation computes its
  * own limit relative to the requested time's neighborhood, so events at different
  * time horizons never interfere with each other.
  */
@@ -69,7 +69,7 @@ class SlotAssignmentService @Inject constructor(
         // Step 2: Compute starting window, jitter, and proportional capacity
         val windowStart = alignToWindowBoundary(requestedTime, config.windowSizeSecs)
         val elapsedMs = elapsedInWindowMs(windowStart, requestedTime)
-        val effectiveMax = computeEffectiveMax(config.maxPerWindow, elapsedMs, config.windowSizeMs)
+        val maxFirstWindow = computeEffectiveMax(config.maxPerWindow, elapsedMs, config.windowSizeMs)
         val firstJitterMs = computeFirstWindowJitterMs(elapsedMs, config.windowSizeMs)
         val fullJitterMs = computeFullWindowJitterMs(config.windowSizeMs)
         val headroomSecs = headroomWindows.toLong() * config.windowSizeSecs
@@ -77,7 +77,7 @@ class SlotAssignmentService @Inject constructor(
         // Step 3: Single round trip — PL/SQL block does everything
         val result = executeSlotAssignment(
             eventId, windowStart, requestedTime, config,
-            effectiveMax, firstJitterMs, fullJitterMs, headroomSecs
+            maxFirstWindow, firstJitterMs, fullJitterMs, headroomSecs
         )
 
         // Step 4: Interpret result (no DB, pure Kotlin)
@@ -129,7 +129,7 @@ class SlotAssignmentService @Inject constructor(
         windowStart: Instant,
         requestedTime: Instant,
         config: RateLimitConfig,
-        effectiveMax: Int,
+        maxFirstWindow: Int,
         firstJitterMs: Long,
         fullJitterMs: Long,
         headroomSecs: Long
@@ -144,7 +144,7 @@ class SlotAssignmentService @Inject constructor(
                 cs.setLong(4, config.configId)                        // in_config_id
                 cs.setInt(5, config.maxPerWindow)                     // in_max_per_window
                 cs.setLong(6, config.windowSizeSecs)                  // in_window_size_secs
-                cs.setInt(7, effectiveMax)                            // in_effective_max
+                cs.setInt(7, maxFirstWindow)                          // in_max_first_window
                 cs.setLong(8, firstJitterMs)                          // in_first_jitter_ms
                 cs.setLong(9, fullJitterMs)                           // in_full_jitter_ms
                 cs.setLong(10, headroomSecs)                          // in_headroom_secs

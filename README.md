@@ -167,7 +167,7 @@ capacity (default: 100 events). When an event requests execution at time T:
 1. **Snap** T to the epoch-aligned window boundary (floor): `windowStart = T - (T % windowSize)`
 2. **Proportional capacity**: if T is mid-window, the first window's effective max = `floor(maxPerWindow * remainingTime / windowSize)`. Jitter is constrained to `[elapsedMs, windowSizeMs)` so `scheduledTime >= T`. Subsequent windows use full `maxPerWindow`.
 3. **Lock** the window counter row with `SELECT FOR UPDATE NOWAIT`
-4. **Check** if `slot_count < effective_max`
+4. **Check** if `slot_count < max_first_window`
 5. **If yes**: insert slot record, increment counter, set status to `CLOSED` if full, compute `scheduled_time = windowStart + jitter`
 6. **If no (full)** or **contended (NOWAIT bounce)**: skip to the first `OPEN` window via indexed query, then walk from there
 7. **Return** the `AssignedSlot` with `scheduledTime` and `delay`
@@ -186,7 +186,7 @@ The PL/SQL block contains four local functions:
 
 The main block uses a two-phase approach:
 - **Phase 1**: Try the first (floor-aligned) window with proportional capacity and constrained jitter
-- **Phase 2**: If Phase 1 fails, skip to the first OPEN window via indexed query, compute a dynamic per-request search limit (`skipTarget + headroom`), then walk sequentially
+- **Phase 2**: If Phase 1 fails, skip to the first OPEN window via indexed query, compute a dynamic per-request search limit (`firstOpenWindow + headroom`), then walk sequentially
 
 Threads that lose the lock race (`NOWAIT` bounce) skip to the next window inside
 the PL/SQL loop — zero additional network hops for window skipping.
@@ -276,12 +276,12 @@ sequenceDiagram
     Cache-->>SAS: RateLimitConfig
 
     Note over SAS: Step 2 — Compute search params + jitter
-    SAS->>SAS: windowStart = align(requestedTime)<br/>effectiveMax = proportional capacity<br/>firstJitterMs, fullJitterMs = ThreadLocalRandom<br/>headroomSecs = headroomWindows × windowSizeSecs
+    SAS->>SAS: windowStart = align(requestedTime)<br/>maxFirstWindow = proportional capacity<br/>firstJitterMs, fullJitterMs = ThreadLocalRandom<br/>headroomSecs = headroomWindows × windowSizeSecs
 
     Note over SAS: Step 3 — Single PL/SQL round trip
     SAS->>DB: CallableStatement: anonymous PL/SQL block<br/>(10 IN params, 5 OUT params)
 
-    Note over DB: PL/SQL block executes server-side:<br/>1. Idempotency pre-check (check_existing_slot)<br/>2. Phase 1: Try first window with pre-computed effectiveMax<br/>   - Uses firstJitterMs (constrained by Kotlin)<br/>3. Phase 2 (if Phase 1 fails):<br/>   - find_first_open_window (indexed skip query)<br/>   - searchLimit = skipTarget + headroomSecs<br/>   - Walk loop with try_lock_window + claim_slot_in_window<br/>   - Uses fullJitterMs<br/>4. Marshal results to OUT params
+    Note over DB: PL/SQL block executes server-side:<br/>1. Idempotency pre-check (check_existing_slot)<br/>2. Phase 1: Try first window with pre-computed maxFirstWindow<br/>   - Uses firstJitterMs (constrained by Kotlin)<br/>3. Phase 2 (if Phase 1 fails):<br/>   - find_first_open_window (indexed skip query)<br/>   - searchLimit = firstOpenWindow + headroom<br/>   - Walk loop with try_lock_window + claim_slot_in_window<br/>   - Uses fullJitterMs<br/>4. Marshal results to OUT params
 
     DB-->>SAS: ou_status, ou_slot_id, ou_scheduled_time,<br/>ou_window_start, ou_windows_searched
 
@@ -302,7 +302,7 @@ flowchart TD
     A([assignSlot called]) --> D[Load RateLimitConfig<br/>from cache or DB]
     D --> E{Config found?}
     E -- No --> F([Throw ConfigLoadException])
-    E -- Yes --> G["Compute search params + jitter<br/>windowStart = align(requestedTime)<br/>effectiveMax, firstJitterMs, fullJitterMs<br/>headroomSecs = headroomWindows × windowSizeSecs"]
+    E -- Yes --> G["Compute search params + jitter<br/>windowStart = align(requestedTime)<br/>maxFirstWindow, firstJitterMs, fullJitterMs<br/>headroomSecs = headroomWindows × windowSizeSecs"]
 
     G --> PL["<b>Execute PL/SQL block</b><br/>(single JDBC round trip)"]
 
@@ -310,8 +310,8 @@ flowchart TD
         B{check_existing_slot#colon;<br/>event_id already exists?}
         B -- Yes --> C2[/"ou_status = EXISTING"/]
 
-        B -- No --> P1["Phase 1: Try first window<br/>effectiveMax = maxPerWindow × remainingMs / windowSizeMs<br/>try_lock_window(windowStart)"]
-        P1 --> P1C{slot_count < effectiveMax<br/>and lock acquired?}
+        B -- No --> P1["Phase 1: Try first window<br/>maxFirstWindow = maxPerWindow × remainingMs / windowSizeMs<br/>try_lock_window(windowStart)"]
+        P1 --> P1C{slot_count < maxFirstWindow<br/>and lock acquired?}
         P1C -- Yes --> P1Q["claim_slot_in_window(firstWindow, firstJitterMs)<br/>jitter pre-computed in Kotlin"]
         P1Q --> P1S{DUP_VAL_ON_INDEX?}
         P1S -- Yes --> T[/"Idempotency race<br/>ou_status = EXISTING"/]
@@ -319,7 +319,7 @@ flowchart TD
 
         P1C -- No --> SKIP["find_first_open_window(windowStart)<br/>SELECT MIN(window_start)<br/>WHERE status = 'OPEN'"]
 
-        SKIP --> SL["searchLimit = skipTarget + headroomSecs"]
+        SKIP --> SL["searchLimit = firstOpenWindow + headroom"]
         SL --> H{current_window<br/>> search_limit?}
         H -- Yes --> I2[/"ou_status = EXHAUSTED"/]
 
