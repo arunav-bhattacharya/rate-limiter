@@ -1,0 +1,1635 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Slot Assignment Service - Animated Presentation</title>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+    <style>
+        /* ===== RESET & BASE ===== */
+        *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+        html, body { width: 100%; height: 100%; overflow: hidden; }
+        body {
+            font-family: 'Inter', system-ui, -apple-system, sans-serif;
+            background: #0a0e1a;
+            color: #e8eaf6;
+            line-height: 1.6;
+        }
+
+        /* ===== CSS VARIABLES ===== */
+        :root {
+            --bg: #0a0e1a;
+            --bg2: #131a2e;
+            --primary: #4a9eff;
+            --success: #2ecc71;
+            --warning: #f39c12;
+            --error: #e74c3c;
+            --text: #e8eaf6;
+            --text-muted: #8892b0;
+            --surface: rgba(255, 255, 255, 0.05);
+            --border: rgba(255, 255, 255, 0.1);
+            --code-bg: #1a1e2e;
+            --mono: 'JetBrains Mono', 'Fira Code', monospace;
+        }
+
+        /* ===== PROGRESS BAR ===== */
+        #progress-bar {
+            position: fixed; top: 0; left: 0; width: 100%; height: 4px;
+            background: rgba(255,255,255,0.05); z-index: 100;
+        }
+        #progress-fill {
+            height: 100%; width: 10%; background: var(--primary);
+            transition: width 0.4s ease; border-radius: 0 2px 2px 0;
+        }
+
+        /* ===== SCENE LAYOUT ===== */
+        #presentation {
+            width: 100%; height: 100%;
+            position: relative;
+        }
+        .scene {
+            position: absolute; top: 0; left: 0;
+            width: 100%; height: 100%;
+            display: flex; flex-direction: column;
+            align-items: center; justify-content: center;
+            padding: 60px 80px;
+            opacity: 0; pointer-events: none;
+            transition: opacity 0.5s ease, transform 0.5s ease;
+            transform: translateX(40px);
+            background: radial-gradient(ellipse at center, var(--bg2) 0%, var(--bg) 70%);
+        }
+        .scene.active {
+            opacity: 1; pointer-events: auto;
+            transform: translateX(0);
+        }
+        .scene.exit-left {
+            opacity: 0; transform: translateX(-40px);
+        }
+
+        /* ===== NAVIGATION ===== */
+        #controls {
+            position: fixed; bottom: 0; left: 0; width: 100%;
+            display: flex; align-items: center; justify-content: center;
+            gap: 24px; padding: 16px; z-index: 100;
+            background: linear-gradient(transparent, rgba(10,14,26,0.95));
+        }
+        #controls button {
+            background: var(--surface); border: 1px solid var(--border);
+            color: var(--text); padding: 8px 20px; border-radius: 8px;
+            font-family: inherit; font-size: 14px; cursor: pointer;
+            transition: all 0.2s ease;
+        }
+        #controls button:hover { background: rgba(74,158,255,0.15); border-color: var(--primary); }
+        #controls button:disabled { opacity: 0.3; cursor: default; }
+        #scene-dots { display: flex; gap: 8px; }
+        .scene-dot {
+            width: 10px; height: 10px; border-radius: 50%;
+            background: rgba(255,255,255,0.15); cursor: pointer;
+            transition: all 0.3s ease;
+        }
+        .scene-dot.active { background: var(--primary); box-shadow: 0 0 8px var(--primary); }
+        .scene-dot.visited { background: rgba(74,158,255,0.4); }
+
+        /* ===== KEYBOARD HINT ===== */
+        #keyboard-hint {
+            position: fixed; bottom: 70px; left: 50%; transform: translateX(-50%);
+            background: var(--surface); border: 1px solid var(--border);
+            padding: 8px 16px; border-radius: 8px; font-size: 13px;
+            color: var(--text-muted); z-index: 100;
+            animation: fadeOut 3s 3s forwards;
+        }
+        kbd {
+            background: rgba(255,255,255,0.1); border: 1px solid var(--border);
+            padding: 2px 6px; border-radius: 4px; font-size: 12px;
+            font-family: var(--mono);
+        }
+
+        /* ===== REUSABLE ANIMATIONS ===== */
+        @keyframes fadeInUp {
+            from { opacity: 0; transform: translateY(30px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+        @keyframes fadeIn {
+            from { opacity: 0; }
+            to { opacity: 1; }
+        }
+        @keyframes fadeOut {
+            from { opacity: 1; }
+            to { opacity: 0; pointer-events: none; }
+        }
+        @keyframes popIn {
+            0% { opacity: 0; transform: scale(0); }
+            70% { transform: scale(1.1); }
+            100% { opacity: 1; transform: scale(1); }
+        }
+        @keyframes slideInLeft {
+            from { opacity: 0; transform: translateX(-40px); }
+            to { opacity: 1; transform: translateX(0); }
+        }
+        @keyframes slideInRight {
+            from { opacity: 0; transform: translateX(40px); }
+            to { opacity: 1; transform: translateX(0); }
+        }
+        @keyframes pulse {
+            0%, 100% { box-shadow: 0 0 0 0 rgba(74,158,255,0.4); }
+            50% { box-shadow: 0 0 0 10px rgba(74,158,255,0); }
+        }
+        @keyframes drawLine {
+            from { stroke-dashoffset: var(--line-length); }
+            to { stroke-dashoffset: 0; }
+        }
+        @keyframes blink {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0; }
+        }
+        @keyframes bounceArc {
+            0% { transform: translate(0, 0); }
+            30% { transform: translate(40px, -60px); }
+            60% { transform: translate(80px, -40px); }
+            100% { transform: translate(120px, 0); }
+        }
+        @keyframes numberFlip {
+            0% { transform: rotateX(0deg); }
+            50% { transform: rotateX(90deg); }
+            100% { transform: rotateX(0deg); }
+        }
+        @keyframes glowPulse {
+            0%, 100% { box-shadow: 0 0 5px rgba(74,158,255,0.3); }
+            50% { box-shadow: 0 0 20px rgba(74,158,255,0.6); }
+        }
+        @keyframes typewriterCursor {
+            0%, 100% { border-right-color: var(--primary); }
+            50% { border-right-color: transparent; }
+        }
+        @keyframes fillUp {
+            from { width: 0%; }
+            to { width: var(--target-width); }
+        }
+
+        /* ===== COMPONENT STYLES ===== */
+
+        /* Glass card */
+        .glass-card {
+            background: var(--surface);
+            backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px);
+            border: 1px solid var(--border);
+            border-radius: 12px; padding: 24px;
+        }
+
+        /* Code block */
+        .code-block {
+            background: var(--code-bg); border-radius: 8px;
+            padding: 16px 20px; font-family: var(--mono); font-size: 13px;
+            line-height: 1.7; overflow-x: auto;
+            border: 1px solid var(--border);
+        }
+        .code-block .keyword { color: #c792ea; }
+        .code-block .string { color: #c3e88d; }
+        .code-block .number { color: #f78c6c; }
+        .code-block .comment { color: #546e7a; font-style: italic; }
+        .code-block .function { color: #82aaff; }
+        .code-block .type { color: #ffcb6b; }
+        .code-block .highlight-line {
+            background: rgba(74,158,255,0.1);
+            display: block; margin: 0 -20px; padding: 0 20px;
+            border-left: 3px solid var(--primary);
+        }
+
+        /* Badge */
+        .badge {
+            display: inline-block; padding: 6px 14px; border-radius: 20px;
+            font-size: 13px; font-weight: 600;
+            background: var(--surface); border: 1px solid var(--border);
+        }
+        .badge-blue { border-color: var(--primary); color: var(--primary); }
+        .badge-green { border-color: var(--success); color: var(--success); }
+        .badge-orange { border-color: var(--warning); color: var(--warning); }
+        .badge-red { border-color: var(--error); color: var(--error); }
+
+        /* Architecture box */
+        .arch-box {
+            display: inline-flex; align-items: center; gap: 8px;
+            padding: 12px 20px; border-radius: 10px;
+            background: var(--surface); border: 1px solid var(--border);
+            font-size: 14px; font-weight: 600;
+            opacity: 0; transform: scale(0);
+        }
+        .arch-box.visible {
+            animation: popIn 0.4s ease forwards;
+        }
+        .arch-box.highlight { border-color: var(--primary); box-shadow: 0 0 15px rgba(74,158,255,0.2); }
+
+        /* Scene title */
+        .scene-title {
+            font-size: 32px; font-weight: 700; margin-bottom: 8px;
+            background: linear-gradient(135deg, var(--text) 0%, var(--primary) 100%);
+            -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+            background-clip: text;
+        }
+        .scene-subtitle {
+            font-size: 16px; color: var(--text-muted); margin-bottom: 32px;
+        }
+
+        /* Animated element container */
+        .anim-item {
+            opacity: 0;
+        }
+        .anim-item.show {
+            animation: fadeInUp 0.5s ease forwards;
+        }
+
+        /* ===== SCENE 1: TITLE ===== */
+        #scene-1 .main-title {
+            font-size: 56px; font-weight: 700;
+            background: linear-gradient(135deg, #fff 0%, var(--primary) 100%);
+            -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+            background-clip: text; text-align: center;
+        }
+        #scene-1 .main-subtitle {
+            font-size: 22px; color: var(--text-muted); margin-top: 12px;
+            text-align: center;
+        }
+        #scene-1 .badge-row {
+            display: flex; gap: 12px; margin-top: 40px; flex-wrap: wrap;
+            justify-content: center;
+        }
+        #scene-1 .tech-badge {
+            padding: 8px 18px; border-radius: 24px;
+            font-size: 14px; font-weight: 600;
+            background: var(--surface); border: 1px solid var(--border);
+            opacity: 0;
+        }
+
+        /* ===== SCENE 2: ARCHITECTURE ===== */
+        #scene-2 .arch-container {
+            display: flex; flex-direction: column; align-items: center; gap: 0;
+            position: relative; width: 700px;
+        }
+        #scene-2 .arch-row {
+            display: flex; align-items: center; justify-content: center;
+            gap: 20px; position: relative; z-index: 2;
+        }
+        #scene-2 .arch-arrow {
+            width: 2px; height: 40px; position: relative;
+            overflow: visible; z-index: 1;
+        }
+        #scene-2 .arch-arrow-line {
+            width: 2px; height: 0; background: var(--primary);
+            transition: height 0.4s ease; margin: 0 auto;
+        }
+        #scene-2 .arch-arrow-line.drawn { height: 100%; }
+        #scene-2 .branch-container {
+            display: flex; gap: 40px; align-items: flex-start; position: relative;
+        }
+        #scene-2 .branch-line {
+            position: absolute; top: -20px; left: 50%;
+            width: 0; height: 2px; background: var(--primary);
+            transition: width 0.4s ease; transform: translateX(-50%);
+        }
+        #scene-2 .branch-line.drawn { width: 100%; }
+        #scene-2 .db-tables {
+            display: flex; flex-direction: column; gap: 6px; margin-top: 8px;
+        }
+        #scene-2 .db-table-name {
+            font-family: var(--mono); font-size: 11px; color: var(--text-muted);
+            padding: 4px 10px; background: rgba(255,255,255,0.03);
+            border-radius: 4px; border-left: 2px solid var(--warning);
+        }
+
+        /* ===== SCENE 3: TIME WINDOW ===== */
+        #scene-3 .timeline-container {
+            width: 90%; max-width: 900px; position: relative; margin-top: 24px;
+        }
+        #scene-3 .timeline-axis {
+            height: 3px; background: var(--border); width: 0;
+            transition: width 1s ease; border-radius: 2px;
+        }
+        #scene-3 .timeline-axis.drawn { width: 100%; }
+        #scene-3 .windows-row {
+            display: flex; gap: 8px; margin-top: 16px; justify-content: center;
+        }
+        #scene-3 .window-box {
+            width: 160px; min-height: 120px; border-radius: 8px;
+            border: 1px solid var(--border); background: var(--surface);
+            padding: 8px; position: relative; opacity: 0;
+            transform: scaleX(0); transform-origin: left center;
+            transition: all 0.4s ease;
+        }
+        #scene-3 .window-box.visible {
+            opacity: 1; transform: scaleX(1);
+        }
+        #scene-3 .window-box.full { border-color: var(--error); }
+        #scene-3 .window-label {
+            font-family: var(--mono); font-size: 11px; color: var(--text-muted);
+            text-align: center; margin-bottom: 4px;
+        }
+        #scene-3 .window-capacity {
+            font-family: var(--mono); font-size: 12px; text-align: center;
+            font-weight: 600; margin-bottom: 6px;
+        }
+        #scene-3 .window-capacity .count { transition: color 0.3s; }
+        #scene-3 .slots-area {
+            height: 60px; position: relative;
+        }
+        #scene-3 .slot-dot {
+            position: absolute; width: 5px; height: 5px; border-radius: 50%;
+            background: var(--primary); opacity: 0;
+            transition: opacity 0.2s ease;
+        }
+        #scene-3 .slot-dot.visible { opacity: 0.7; }
+        #scene-3 .jitter-label {
+            text-align: center; margin-top: 16px; font-size: 14px;
+            color: var(--text-muted); opacity: 0;
+            transition: opacity 0.5s ease;
+        }
+        #scene-3 .jitter-label.visible { opacity: 1; }
+
+        /* ===== SCENE 4: 4-STEP OVERVIEW ===== */
+        #scene-4 .steps-container {
+            display: flex; flex-direction: column; gap: 16px;
+            width: 600px;
+        }
+        #scene-4 .step-card {
+            display: flex; align-items: center; gap: 16px;
+            padding: 20px; border-radius: 12px;
+            background: var(--surface); border: 1px solid var(--border);
+            opacity: 0; transform: translateX(-30px);
+        }
+        #scene-4 .step-card.visible {
+            animation: slideInLeft 0.5s ease forwards;
+        }
+        #scene-4 .step-card.active-step {
+            border-color: var(--primary); animation: glowPulse 2s infinite;
+        }
+        #scene-4 .step-number {
+            width: 40px; height: 40px; border-radius: 50%;
+            display: flex; align-items: center; justify-content: center;
+            font-weight: 700; font-size: 18px; flex-shrink: 0;
+            background: rgba(74,158,255,0.15); color: var(--primary);
+            border: 2px solid var(--primary);
+        }
+        #scene-4 .step-content h3 {
+            font-size: 16px; font-weight: 600; margin-bottom: 4px;
+        }
+        #scene-4 .step-content p {
+            font-size: 13px; color: var(--text-muted);
+        }
+        #scene-4 .step-connector {
+            width: 2px; height: 16px; background: var(--border);
+            margin-left: 38px; opacity: 0;
+            transition: opacity 0.3s ease;
+        }
+        #scene-4 .step-connector.visible { opacity: 1; }
+
+        /* ===== SCENE 5: LOAD CONFIG ===== */
+        #scene-5 .config-flow {
+            display: flex; flex-direction: column; align-items: center; gap: 20px;
+            width: 700px;
+        }
+        #scene-5 .flow-row {
+            display: flex; align-items: center; gap: 16px; justify-content: center;
+            width: 100%;
+        }
+        #scene-5 .flow-box {
+            padding: 14px 22px; border-radius: 10px;
+            background: var(--surface); border: 1px solid var(--border);
+            font-size: 14px; font-weight: 600; text-align: center;
+            opacity: 0; transition: all 0.4s ease;
+        }
+        #scene-5 .flow-box.visible { opacity: 1; }
+        #scene-5 .flow-box.cache-hit {
+            border-color: var(--success); box-shadow: 0 0 15px rgba(46,204,113,0.2);
+        }
+        #scene-5 .flow-box.cache-miss {
+            border-color: var(--error); box-shadow: 0 0 15px rgba(231,76,60,0.2);
+        }
+        #scene-5 .flow-arrow-h {
+            font-size: 20px; color: var(--primary); opacity: 0;
+            transition: opacity 0.3s ease;
+        }
+        #scene-5 .flow-arrow-h.visible { opacity: 1; }
+        #scene-5 .config-card {
+            font-family: var(--mono); font-size: 13px; width: 100%;
+            max-width: 400px;
+        }
+        #scene-5 .config-card .key { color: var(--primary); }
+        #scene-5 .config-card .val { color: #c3e88d; }
+        #scene-5 .path-label {
+            font-size: 12px; font-weight: 600; padding: 4px 10px;
+            border-radius: 4px; margin-bottom: 8px; display: inline-block;
+        }
+        #scene-5 .path-label.fast { background: rgba(46,204,113,0.15); color: var(--success); }
+        #scene-5 .path-label.slow { background: rgba(231,76,60,0.15); color: var(--error); }
+        #scene-5 .ttl-badge {
+            display: inline-flex; align-items: center; gap: 6px;
+            font-family: var(--mono); font-size: 12px;
+            padding: 4px 10px; border-radius: 4px;
+            background: rgba(74,158,255,0.1); color: var(--primary);
+        }
+
+        /* ===== SCENE 6: SEARCH RANGE ===== */
+        #scene-6 .range-container {
+            width: 90%; max-width: 850px;
+        }
+        #scene-6 .range-timeline {
+            height: 4px; background: var(--border); border-radius: 2px;
+            position: relative; margin: 60px 0 40px 0;
+        }
+        #scene-6 .range-marker {
+            position: absolute; top: -40px;
+            display: flex; flex-direction: column; align-items: center;
+            opacity: 0; transition: all 0.5s ease;
+        }
+        #scene-6 .range-marker.visible { opacity: 1; }
+        #scene-6 .range-marker .marker-pin {
+            width: 3px; height: 24px; border-radius: 1px;
+        }
+        #scene-6 .range-marker .marker-label {
+            font-family: var(--mono); font-size: 11px; white-space: nowrap;
+            margin-bottom: 4px;
+        }
+        #scene-6 .range-bracket {
+            position: absolute; top: 12px; height: 20px;
+            border: 2px solid var(--warning); border-top: none;
+            border-radius: 0 0 6px 6px; opacity: 0;
+            transition: all 0.6s ease;
+        }
+        #scene-6 .range-bracket.visible { opacity: 1; }
+        #scene-6 .range-bracket .bracket-label {
+            position: absolute; bottom: -22px; left: 50%;
+            transform: translateX(-50%); white-space: nowrap;
+            font-family: var(--mono); font-size: 11px; color: var(--warning);
+        }
+        #scene-6 .snap-formula {
+            font-family: var(--mono); font-size: 14px;
+            padding: 12px 20px; border-radius: 8px;
+            background: var(--code-bg); border: 1px solid var(--border);
+            margin-top: 24px; text-align: center;
+            opacity: 0; transition: opacity 0.5s ease;
+        }
+        #scene-6 .snap-formula.visible { opacity: 1; }
+
+        /* ===== SCENE 7: IDEMPOTENCY ===== */
+        #scene-7 .idem-container { width: 800px; }
+        #scene-7 .jdbc-banner {
+            text-align: center; margin-bottom: 24px;
+            padding: 10px 24px; border-radius: 8px;
+            background: rgba(74,158,255,0.1); border: 1px solid rgba(74,158,255,0.3);
+            font-weight: 600; font-size: 15px; color: var(--primary);
+            opacity: 0; transition: opacity 0.5s ease;
+        }
+        #scene-7 .jdbc-banner.visible { opacity: 1; }
+        #scene-7 .plsql-functions {
+            display: flex; gap: 12px; margin-bottom: 24px; justify-content: center;
+        }
+        #scene-7 .plsql-func {
+            padding: 10px 16px; border-radius: 8px;
+            background: var(--surface); border: 1px solid var(--border);
+            font-family: var(--mono); font-size: 12px;
+            opacity: 0; transition: all 0.3s ease;
+        }
+        #scene-7 .plsql-func.visible { opacity: 1; }
+        #scene-7 .plsql-func.active { border-color: var(--primary); background: rgba(74,158,255,0.1); }
+        #scene-7 .idem-paths {
+            display: grid; grid-template-columns: 1fr 1fr; gap: 20px;
+        }
+        #scene-7 .idem-path {
+            padding: 20px; border-radius: 10px;
+            background: var(--surface); border: 1px solid var(--border);
+            opacity: 0; transition: all 0.4s ease;
+        }
+        #scene-7 .idem-path.visible { opacity: 1; }
+        #scene-7 .idem-path h4 {
+            font-size: 14px; margin-bottom: 12px;
+            display: flex; align-items: center; gap: 8px;
+        }
+        #scene-7 .idem-step {
+            font-size: 13px; color: var(--text-muted); margin-bottom: 8px;
+            padding-left: 12px; border-left: 2px solid var(--border);
+            opacity: 0; transition: opacity 0.3s ease;
+        }
+        #scene-7 .idem-step.visible { opacity: 1; }
+        #scene-7 .status-badge {
+            display: inline-block; padding: 4px 10px; border-radius: 4px;
+            font-family: var(--mono); font-size: 11px; font-weight: 600;
+        }
+
+        /* ===== SCENE 8: WINDOW WALK ===== */
+        #scene-8 .walk-container { width: 90%; max-width: 900px; }
+        #scene-8 .thread-legend {
+            display: flex; gap: 16px; margin-bottom: 20px; justify-content: center;
+        }
+        #scene-8 .thread-tag {
+            display: flex; align-items: center; gap: 6px;
+            font-size: 13px; font-weight: 600;
+        }
+        #scene-8 .thread-dot {
+            width: 12px; height: 12px; border-radius: 50%;
+        }
+        #scene-8 .walk-timeline {
+            display: flex; gap: 12px; justify-content: center;
+            margin-bottom: 24px; position: relative;
+        }
+        #scene-8 .walk-window {
+            width: 180px; min-height: 100px; border-radius: 8px;
+            border: 1px solid var(--border); background: var(--surface);
+            padding: 12px; text-align: center; position: relative;
+            opacity: 0; transition: all 0.4s ease;
+        }
+        #scene-8 .walk-window.visible { opacity: 1; }
+        #scene-8 .walk-window .win-time {
+            font-family: var(--mono); font-size: 12px; color: var(--text-muted);
+            margin-bottom: 6px;
+        }
+        #scene-8 .walk-window .win-lock {
+            font-size: 18px; margin: 6px 0;
+            opacity: 0; transition: opacity 0.3s ease;
+        }
+        #scene-8 .walk-window .win-lock.visible { opacity: 1; }
+        #scene-8 .walk-window .win-status {
+            font-size: 12px; font-weight: 600;
+            opacity: 0; transition: opacity 0.3s ease;
+        }
+        #scene-8 .walk-window .win-status.visible { opacity: 1; }
+        #scene-8 .thread-anim-area {
+            height: 100px; position: relative; margin-bottom: 16px;
+        }
+        #scene-8 .thread-circle {
+            width: 28px; height: 28px; border-radius: 50%;
+            position: absolute; display: flex; align-items: center;
+            justify-content: center; font-size: 11px; font-weight: 700;
+            color: #fff; transition: all 0.6s ease;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.3);
+        }
+        #scene-8 .thread-circle.bounce {
+            transition: all 0.8s cubic-bezier(0.25, -0.5, 0.25, 1.5);
+        }
+        #scene-8 .nowait-label {
+            text-align: center; font-size: 20px; font-weight: 700;
+            color: var(--warning); opacity: 0;
+            transition: opacity 0.5s ease;
+        }
+        #scene-8 .nowait-label.visible { opacity: 1; }
+        #scene-8 .sql-caption {
+            text-align: center; margin-top: 12px;
+            font-family: var(--mono); font-size: 12px; color: var(--text-muted);
+            opacity: 0; transition: opacity 0.5s ease;
+        }
+        #scene-8 .sql-caption.visible { opacity: 1; }
+
+        /* ===== SCENE 9: CLAIM SLOT ===== */
+        #scene-9 .claim-container { width: 800px; }
+        #scene-9 .jitter-box {
+            text-align: center; margin-bottom: 24px; padding: 20px;
+            border-radius: 10px; background: var(--surface); border: 1px solid var(--border);
+            opacity: 0; transition: opacity 0.5s ease;
+        }
+        #scene-9 .jitter-box.visible { opacity: 1; }
+        #scene-9 .jitter-formula {
+            font-family: var(--mono); font-size: 14px; color: var(--text-muted);
+            margin-bottom: 12px;
+        }
+        #scene-9 .jitter-reel {
+            font-family: var(--mono); font-size: 48px; font-weight: 700;
+            color: var(--primary); height: 60px; overflow: hidden;
+            display: inline-block;
+        }
+        #scene-9 .jitter-reel .reel-value {
+            transition: transform 0.1s ease;
+        }
+        #scene-9 .sched-calc {
+            font-family: var(--mono); font-size: 15px; margin: 16px 0;
+            text-align: center; opacity: 0; transition: opacity 0.5s ease;
+        }
+        #scene-9 .sched-calc.visible { opacity: 1; }
+        #scene-9 .sched-calc .time-val { color: var(--success); font-weight: 600; }
+        #scene-9 .insert-card {
+            display: grid; grid-template-columns: 1fr 1fr; gap: 16px;
+            margin-top: 16px;
+        }
+        #scene-9 .insert-panel {
+            padding: 16px; border-radius: 10px;
+            background: var(--surface); border: 1px solid var(--border);
+            opacity: 0; transition: all 0.4s ease;
+        }
+        #scene-9 .insert-panel.visible { opacity: 1; }
+        #scene-9 .insert-panel h4 {
+            font-size: 13px; color: var(--text-muted);
+            margin-bottom: 10px; text-transform: uppercase; letter-spacing: 0.5px;
+        }
+        #scene-9 .counter-display {
+            font-family: var(--mono); font-size: 36px; font-weight: 700;
+            text-align: center; color: var(--success);
+            perspective: 200px;
+        }
+        #scene-9 .counter-display .counter-val {
+            display: inline-block;
+            transition: transform 0.4s ease;
+        }
+        #scene-9 .counter-display .counter-val.flipping {
+            animation: numberFlip 0.4s ease;
+        }
+        #scene-9 .row-data {
+            font-family: var(--mono); font-size: 12px; line-height: 1.8;
+        }
+        #scene-9 .row-data .field-name { color: var(--text-muted); }
+        #scene-9 .row-data .field-val { color: #c3e88d; }
+
+        /* ===== SCENE 10: RESULTS ===== */
+        #scene-10 .results-container { width: 800px; }
+        #scene-10 .result-paths {
+            display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 16px;
+            margin-bottom: 24px;
+        }
+        #scene-10 .result-card {
+            padding: 20px; border-radius: 10px; text-align: center;
+            background: var(--surface); border: 1px solid var(--border);
+            opacity: 0; transition: all 0.4s ease;
+        }
+        #scene-10 .result-card.visible { opacity: 1; }
+        #scene-10 .result-card.active-result {
+            transform: scale(1.05);
+        }
+        #scene-10 .result-card h4 { font-size: 14px; margin-bottom: 8px; }
+        #scene-10 .result-card .http-badge {
+            display: inline-block; padding: 4px 12px; border-radius: 4px;
+            font-family: var(--mono); font-size: 13px; font-weight: 700;
+            margin: 8px 0;
+        }
+        #scene-10 .result-card .result-desc {
+            font-size: 12px; color: var(--text-muted);
+        }
+        #scene-10 .response-json {
+            max-width: 450px; margin: 0 auto;
+        }
+        #scene-10 .summary-replay {
+            margin-top: 24px; text-align: center;
+        }
+        #scene-10 .replay-flow {
+            display: flex; align-items: center; justify-content: center;
+            gap: 8px; flex-wrap: wrap; margin-top: 12px;
+        }
+        #scene-10 .replay-node {
+            padding: 6px 14px; border-radius: 6px; font-size: 12px;
+            background: var(--surface); border: 1px solid var(--border);
+            opacity: 0; transition: all 0.3s ease;
+        }
+        #scene-10 .replay-node.visible {
+            opacity: 1;
+        }
+        #scene-10 .replay-node.active-node {
+            border-color: var(--primary); background: rgba(74,158,255,0.15);
+        }
+        #scene-10 .replay-arrow {
+            color: var(--primary); font-size: 14px;
+            opacity: 0; transition: opacity 0.2s ease;
+        }
+        #scene-10 .replay-arrow.visible { opacity: 1; }
+    </style>
+</head>
+<body>
+
+<!-- Progress Bar -->
+<div id="progress-bar"><div id="progress-fill"></div></div>
+
+<!-- Presentation -->
+<div id="presentation">
+
+    <!-- ===== SCENE 1: TITLE ===== -->
+    <section class="scene active" id="scene-1">
+        <div class="main-title anim-item">Slot Assignment Service</div>
+        <div class="main-subtitle anim-item">Oracle-based Rate Limiter for High-Throughput Event Scheduling</div>
+        <div style="margin-top: 4px; font-size: 15px; color: var(--text-muted);" class="anim-item">
+            Supports up to <span style="color: var(--primary); font-weight: 700;">1,000,000</span> events / day
+        </div>
+        <div class="badge-row">
+            <div class="tech-badge badge-blue">Quarkus 3.x</div>
+            <div class="tech-badge badge-green">Kotlin</div>
+            <div class="tech-badge badge-orange">Oracle 19c</div>
+            <div class="tech-badge badge-red">PL/SQL</div>
+        </div>
+    </section>
+
+    <!-- ===== SCENE 2: ARCHITECTURE ===== -->
+    <section class="scene" id="scene-2">
+        <div class="scene-title anim-item">Architecture</div>
+        <div class="scene-subtitle anim-item">Component flow from API to database</div>
+        <div class="arch-container">
+            <div class="arch-row"><div class="arch-box" id="arch-client">Client</div></div>
+            <div class="arch-arrow"><div class="arch-arrow-line" id="arrow-1"></div></div>
+            <div class="arch-row"><div class="arch-box" id="arch-api" style="font-family: var(--mono); font-size: 12px;">POST /api/v1/slots</div></div>
+            <div class="arch-arrow"><div class="arch-arrow-line" id="arrow-2"></div></div>
+            <div class="arch-row"><div class="arch-box" id="arch-resource">SlotAssignmentResource</div></div>
+            <div class="arch-arrow"><div class="arch-arrow-line" id="arrow-3"></div></div>
+            <div class="arch-row"><div class="arch-box highlight" id="arch-service">SlotAssignmentService</div></div>
+            <div class="arch-arrow"><div class="arch-arrow-line" id="arrow-4"></div></div>
+            <div class="branch-container">
+                <div class="arch-box" id="arch-config">
+                    RateLimitConfigRepository
+                    <br><span class="ttl-badge" style="margin-top: 6px;">TTL: 5s cache</span>
+                </div>
+                <div class="arch-box" id="arch-sql">
+                    SlotAssignmentSql
+                    <br><span style="font-size: 11px; color: var(--text-muted);">PL/SQL execution</span>
+                </div>
+            </div>
+            <div class="arch-arrow"><div class="arch-arrow-line" id="arrow-5"></div></div>
+            <div class="arch-row">
+                <div class="arch-box" id="arch-db" style="flex-direction: column; align-items: center;">
+                    <span>Oracle Database</span>
+                    <div class="db-tables">
+                        <div class="db-table-name">rate_limit_config</div>
+                        <div class="db-table-name">rate_limit_window_counter</div>
+                        <div class="db-table-name">rate_limit_event_slot</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <!-- ===== SCENE 3: TIME WINDOW MODEL ===== -->
+    <section class="scene" id="scene-3">
+        <div class="scene-title anim-item">The Time Window Model</div>
+        <div class="scene-subtitle anim-item">Events are distributed across fixed-size time windows with random jitter</div>
+        <div class="timeline-container">
+            <div class="timeline-axis" id="timeline-axis-3"></div>
+            <div class="windows-row" id="windows-row-3">
+                <!-- JS generates 5 windows -->
+            </div>
+            <div class="jitter-label" id="jitter-label-3">
+                Each dot = one event. Random jitter spreads events uniformly within each <span style="color: var(--primary); font-weight: 600;">4-second</span> window
+            </div>
+        </div>
+    </section>
+
+    <!-- ===== SCENE 4: 4-STEP OVERVIEW ===== -->
+    <section class="scene" id="scene-4">
+        <div class="scene-title anim-item">The 4-Step Core Flow</div>
+        <div class="scene-subtitle anim-item">Every slot assignment follows this path</div>
+        <div class="steps-container">
+            <div class="step-card" id="step-1">
+                <div class="step-number">1</div>
+                <div class="step-content">
+                    <h3>Load Configuration</h3>
+                    <p>Check cached config (5s TTL), fallback to DB query</p>
+                </div>
+            </div>
+            <div class="step-connector" id="conn-1"></div>
+            <div class="step-card" id="step-2">
+                <div class="step-number">2</div>
+                <div class="step-content">
+                    <h3>Compute Search Range</h3>
+                    <p>Align to window boundary, compute dynamic lookahead</p>
+                </div>
+            </div>
+            <div class="step-connector" id="conn-2"></div>
+            <div class="step-card" id="step-3">
+                <div class="step-number">3</div>
+                <div class="step-content">
+                    <h3>Single PL/SQL Round Trip</h3>
+                    <p>Idempotency check, window walk, lock, insert with jitter &mdash; all in one JDBC call</p>
+                </div>
+            </div>
+            <div class="step-connector" id="conn-3"></div>
+            <div class="step-card" id="step-4">
+                <div class="step-number">4</div>
+                <div class="step-content">
+                    <h3>Interpret Results</h3>
+                    <p>Return scheduled time with delay to caller</p>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <!-- ===== SCENE 5: LOAD CONFIG ===== -->
+    <section class="scene" id="scene-5">
+        <div class="scene-title anim-item">Step 1: Load Configuration</div>
+        <div class="scene-subtitle anim-item">In-memory cache with 5-second TTL minimizes DB hits on the hot path</div>
+        <div class="config-flow">
+            <!-- Cache hit path -->
+            <div style="opacity: 0; transition: opacity 0.5s;" id="path-hit-container">
+                <div class="path-label fast">CACHE HIT (fast path)</div>
+                <div class="flow-row">
+                    <div class="flow-box visible">SlotAssignment<br>Service</div>
+                    <div class="flow-arrow-h visible">&#8594;</div>
+                    <div class="flow-box cache-hit">ConcurrentHashMap<br><span class="ttl-badge">TTL 5s</span></div>
+                    <div class="flow-arrow-h visible">&#8594;</div>
+                    <div class="flow-box visible" style="border-color: var(--success);">RateLimitConfig</div>
+                </div>
+            </div>
+            <!-- Cache miss path -->
+            <div style="opacity: 0; transition: opacity 0.5s;" id="path-miss-container">
+                <div class="path-label slow">CACHE MISS (cold path)</div>
+                <div class="flow-row">
+                    <div class="flow-box visible">SlotAssignment<br>Service</div>
+                    <div class="flow-arrow-h visible">&#8594;</div>
+                    <div class="flow-box cache-miss">Cache<br><span style="color: var(--error);">MISS</span></div>
+                    <div class="flow-arrow-h visible">&#8594;</div>
+                    <div class="flow-box visible" style="border-color: var(--warning);">Oracle DB<br><span style="font-size: 11px; color: var(--text-muted);">SELECT ... WHERE is_active = 1</span></div>
+                    <div class="flow-arrow-h visible">&#8594;</div>
+                    <div class="flow-box visible" style="border-color: var(--success);">Cache + Return</div>
+                </div>
+            </div>
+            <!-- Config card -->
+            <div class="glass-card config-card" id="config-result-card" style="opacity: 0; transition: opacity 0.5s;">
+                <div style="font-weight: 600; margin-bottom: 8px; color: var(--text);">Loaded Configuration</div>
+                <div class="row-data">
+                    <span class="field-name">configName:</span> <span class="field-val">"default"</span><br>
+                    <span class="field-name">maxPerWindow:</span> <span class="field-val">100</span><br>
+                    <span class="field-name">windowSize:</span> <span class="field-val">"PT4S"</span> <span style="color: var(--text-muted);">// 4 seconds</span><br>
+                    <span class="field-name">isActive:</span> <span class="field-val">true</span>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <!-- ===== SCENE 6: COMPUTE SEARCH RANGE ===== -->
+    <section class="scene" id="scene-6">
+        <div class="scene-title anim-item">Step 2: Compute Search Range</div>
+        <div class="scene-subtitle anim-item">Align to window boundary and calculate dynamic lookahead</div>
+        <div class="range-container">
+            <div class="range-timeline" id="range-timeline-6">
+                <!-- requestedTime marker -->
+                <div class="range-marker" id="marker-requested" style="left: 15%;">
+                    <div class="marker-label" style="color: var(--warning);">requestedTime<br>12:00:01.500</div>
+                    <div class="marker-pin" style="background: var(--warning);"></div>
+                </div>
+                <!-- windowStart marker -->
+                <div class="range-marker" id="marker-window-start" style="left: 12%;">
+                    <div class="marker-label" style="color: var(--success);">windowStart<br>12:00:00.000</div>
+                    <div class="marker-pin" style="background: var(--success);"></div>
+                </div>
+                <!-- frontier marker -->
+                <div class="range-marker" id="marker-frontier" style="left: 45%;">
+                    <div class="marker-label" style="color: var(--primary);">frontier<br><span style="font-size: 10px;">AtomicReference</span><br>12:01:20</div>
+                    <div class="marker-pin" style="background: var(--primary);"></div>
+                </div>
+                <!-- searchLimit marker -->
+                <div class="range-marker" id="marker-search-limit" style="left: 88%;">
+                    <div class="marker-label" style="color: var(--error);">searchLimit</div>
+                    <div class="marker-pin" style="background: var(--error);"></div>
+                </div>
+                <!-- headroom bracket -->
+                <div class="range-bracket" id="headroom-bracket" style="left: 45%; width: 43%;">
+                    <div class="bracket-label">headroom: 100 windows (400s)</div>
+                </div>
+            </div>
+            <div class="snap-formula" id="snap-formula-6">
+                <span class="keyword">windowStart</span> = requestedTime - (requestedTime <span class="keyword">%</span> windowSizeSecs)
+                &nbsp;&nbsp;|&nbsp;&nbsp;
+                <span class="keyword">searchLimit</span> = max(frontier, windowStart) + headroom
+            </div>
+        </div>
+    </section>
+
+    <!-- ===== SCENE 7: IDEMPOTENCY ===== -->
+    <section class="scene" id="scene-7">
+        <div class="scene-title anim-item">Step 3a: Idempotency Check</div>
+        <div class="scene-subtitle anim-item">Same event_id always returns the same slot</div>
+        <div class="idem-container">
+            <div class="jdbc-banner" id="jdbc-banner-7">Single JDBC Round Trip &mdash; 1 network hop to Oracle</div>
+            <div class="plsql-functions" id="plsql-funcs-7">
+                <div class="plsql-func" id="func-check">check_existing_slot()</div>
+                <div class="plsql-func" id="func-lock">try_lock_window()</div>
+                <div class="plsql-func" id="func-claim">claim_slot_in_window()</div>
+            </div>
+            <div class="idem-paths">
+                <div class="idem-path" id="idem-first-call">
+                    <h4><span style="color: var(--warning);">First Call</span> &mdash; event_id = "pay-123"</h4>
+                    <div class="idem-step" id="idem-s1">SELECT ... WHERE event_id = 'pay-123'</div>
+                    <div class="idem-step" id="idem-s2" style="border-left-color: var(--error);">
+                        NO_DATA_FOUND
+                        <span style="display: block; color: var(--error);">&#10007; Not in DB yet</span>
+                    </div>
+                    <div class="idem-step" id="idem-s3" style="border-left-color: var(--primary);">
+                        &#8594; Proceed to window walk...
+                    </div>
+                </div>
+                <div class="idem-path" id="idem-second-call">
+                    <h4><span style="color: var(--success);">Second Call</span> &mdash; same event_id</h4>
+                    <div class="idem-step" id="idem-s4">SELECT ... WHERE event_id = 'pay-123'</div>
+                    <div class="idem-step" id="idem-s5" style="border-left-color: var(--success);">
+                        ROW FOUND!
+                        <span style="display: block; color: var(--success);">&#10003; scheduledTime = 12:00:02.371</span>
+                    </div>
+                    <div class="idem-step" id="idem-s6" style="border-left-color: var(--success);">
+                        Return immediately
+                        <span class="status-badge" style="background: rgba(46,204,113,0.15); color: var(--success);">STATUS_EXISTING = 0</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <!-- ===== SCENE 8: WINDOW WALK ===== -->
+    <section class="scene" id="scene-8">
+        <div class="scene-title anim-item">Step 3b: Window Walk &amp; NOWAIT Locking</div>
+        <div class="scene-subtitle anim-item">Threads race for windows &mdash; losers skip instead of blocking</div>
+        <div class="walk-container">
+            <div class="thread-legend">
+                <div class="thread-tag"><div class="thread-dot" style="background: #4a9eff;"></div> Thread 1</div>
+                <div class="thread-tag"><div class="thread-dot" style="background: #f39c12;"></div> Thread 2</div>
+                <div class="thread-tag"><div class="thread-dot" style="background: #2ecc71;"></div> Thread 3</div>
+            </div>
+            <div class="thread-anim-area" id="thread-area-8">
+                <div class="thread-circle" id="t1" style="background: #4a9eff; left: 60px; top: 36px;">T1</div>
+                <div class="thread-circle" id="t2" style="background: #f39c12; left: 60px; top: 36px;">T2</div>
+                <div class="thread-circle" id="t3" style="background: #2ecc71; left: 60px; top: 36px;">T3</div>
+            </div>
+            <div class="walk-timeline" id="walk-timeline-8">
+                <div class="walk-window" id="ww-0">
+                    <div class="win-time">12:00:00</div>
+                    <div class="win-lock" id="lock-0">&#128274;</div>
+                    <div class="win-status" id="status-0"></div>
+                </div>
+                <div class="walk-window" id="ww-1">
+                    <div class="win-time">12:00:04</div>
+                    <div class="win-lock" id="lock-1">&#128274;</div>
+                    <div class="win-status" id="status-1"></div>
+                </div>
+                <div class="walk-window" id="ww-2">
+                    <div class="win-time">12:00:08</div>
+                    <div class="win-lock" id="lock-2">&#128274;</div>
+                    <div class="win-status" id="status-2"></div>
+                </div>
+                <div class="walk-window" id="ww-3">
+                    <div class="win-time">12:00:12</div>
+                    <div class="win-lock" id="lock-3">&#128274;</div>
+                    <div class="win-status" id="status-3"></div>
+                </div>
+            </div>
+            <div class="sql-caption" id="sql-caption-8">
+                SELECT slot_count FROM rate_limit_window_counter WHERE window_start = ? <span style="color: var(--warning); font-weight: 600;">FOR UPDATE NOWAIT</span>
+            </div>
+            <div class="nowait-label" id="nowait-label-8">Skip, don't block!</div>
+        </div>
+    </section>
+
+    <!-- ===== SCENE 9: CLAIM SLOT ===== -->
+    <section class="scene" id="scene-9">
+        <div class="scene-title anim-item">Step 3c: Claim Slot with Jitter</div>
+        <div class="scene-subtitle anim-item">Random jitter distributes events uniformly within each window</div>
+        <div class="claim-container">
+            <div class="jitter-box" id="jitter-box-9">
+                <div class="jitter-formula">DBMS_RANDOM.VALUE(0, <span style="color: var(--primary);">4000</span>)</div>
+                <div class="jitter-reel" id="jitter-reel-9">0000</div>
+                <div style="font-size: 13px; color: var(--text-muted); margin-top: 8px;">milliseconds</div>
+            </div>
+            <div class="sched-calc" id="sched-calc-9">
+                <span style="color: var(--text-muted);">12:00:00.000</span>
+                &nbsp;+&nbsp;
+                <span style="color: var(--primary);">2.371s</span>
+                &nbsp;=&nbsp;
+                <span class="time-val">12:00:02.371</span>
+            </div>
+            <div class="insert-card">
+                <div class="insert-panel" id="insert-row-9">
+                    <h4>INSERT &rarr; rate_limit_event_slot</h4>
+                    <div class="row-data">
+                        <span class="field-name">slot_id:</span> <span class="field-val">42</span><br>
+                        <span class="field-name">event_id:</span> <span class="field-val">"pay-456"</span><br>
+                        <span class="field-name">window_start:</span> <span class="field-val">12:00:00</span><br>
+                        <span class="field-name">scheduled_time:</span> <span class="field-val">12:00:02.371</span><br>
+                        <span class="field-name">config_id:</span> <span class="field-val">1</span>
+                    </div>
+                </div>
+                <div class="insert-panel" id="update-counter-9">
+                    <h4>UPDATE &rarr; window_counter</h4>
+                    <div style="text-align: center; margin-bottom: 8px; font-size: 12px; color: var(--text-muted);">
+                        slot_count = slot_count + 1
+                    </div>
+                    <div class="counter-display">
+                        <span class="counter-val" id="counter-val-9">50</span>
+                        <span style="font-size: 16px; color: var(--text-muted);"> / 100</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <!-- ===== SCENE 10: RESULTS ===== -->
+    <section class="scene" id="scene-10">
+        <div class="scene-title anim-item">Step 4: Interpret Results</div>
+        <div class="scene-subtitle anim-item">Three possible outcomes from the PL/SQL block</div>
+        <div class="results-container">
+            <div class="result-paths">
+                <div class="result-card" id="result-new">
+                    <h4 style="color: var(--success);">STATUS_NEW = 1</h4>
+                    <div class="http-badge" style="background: rgba(46,204,113,0.15); color: var(--success);">200 OK</div>
+                    <div class="result-desc">
+                        Slot freshly assigned.<br>
+                        Update AtomicReference frontier.<br>
+                        Return AssignedSlot.
+                    </div>
+                </div>
+                <div class="result-card" id="result-existing">
+                    <h4 style="color: var(--primary);">STATUS_EXISTING = 0</h4>
+                    <div class="http-badge" style="background: rgba(74,158,255,0.15); color: var(--primary);">200 OK</div>
+                    <div class="result-desc">
+                        Idempotent hit.<br>
+                        Same event_id returns<br>
+                        same slot instantly.
+                    </div>
+                </div>
+                <div class="result-card" id="result-exhausted">
+                    <h4 style="color: var(--error);">STATUS_EXHAUSTED = -1</h4>
+                    <div class="http-badge" style="background: rgba(231,76,60,0.15); color: var(--error);">503</div>
+                    <div class="result-desc">
+                        All windows exhausted<br>
+                        within search limit.<br>
+                        Throw exception.
+                    </div>
+                </div>
+            </div>
+            <div class="glass-card response-json" id="response-json-10" style="opacity: 0; transition: opacity 0.5s;">
+                <div style="font-weight: 600; margin-bottom: 8px; color: var(--success);">Response (200 OK)</div>
+                <div class="row-data">
+                    {<br>
+                    &nbsp;&nbsp;<span class="field-name">"eventId":</span> <span class="field-val">"pay-456"</span>,<br>
+                    &nbsp;&nbsp;<span class="field-name">"scheduledTime":</span> <span class="field-val">"12:00:02.371Z"</span>,<br>
+                    &nbsp;&nbsp;<span class="field-name">"delayMs":</span> <span class="field-val">2371</span><br>
+                    }
+                </div>
+            </div>
+            <div class="summary-replay">
+                <div style="font-size: 14px; color: var(--text-muted); margin-bottom: 8px;">End-to-end flow</div>
+                <div class="replay-flow" id="replay-flow-10">
+                    <div class="replay-node" id="rn-0">Client</div>
+                    <div class="replay-arrow" id="ra-0">&#8594;</div>
+                    <div class="replay-node" id="rn-1">Resource</div>
+                    <div class="replay-arrow" id="ra-1">&#8594;</div>
+                    <div class="replay-node" id="rn-2">Service</div>
+                    <div class="replay-arrow" id="ra-2">&#8594;</div>
+                    <div class="replay-node" id="rn-3">Cache</div>
+                    <div class="replay-arrow" id="ra-3">&#8594;</div>
+                    <div class="replay-node" id="rn-4">PL/SQL</div>
+                    <div class="replay-arrow" id="ra-4">&#8594;</div>
+                    <div class="replay-node" id="rn-5">Oracle</div>
+                    <div class="replay-arrow" id="ra-5">&#8594;</div>
+                    <div class="replay-node" id="rn-6">Response</div>
+                </div>
+            </div>
+        </div>
+    </section>
+
+</div>
+
+<!-- Navigation Controls -->
+<nav id="controls">
+    <button id="prev-btn" disabled>&larr; Previous</button>
+    <div id="scene-dots"></div>
+    <button id="next-btn">Next &rarr;</button>
+</nav>
+
+<!-- Keyboard Hint -->
+<div id="keyboard-hint">
+    Use <kbd>&larr;</kbd> <kbd>&rarr;</kbd> arrow keys or click <kbd>Next</kbd> to navigate
+</div>
+
+<script>
+(function() {
+    'use strict';
+
+    const TOTAL_SCENES = 10;
+    let currentScene = 0;
+    let animationTimeouts = [];
+
+    // ===== NAVIGATION =====
+    const progressFill = document.getElementById('progress-fill');
+    const prevBtn = document.getElementById('prev-btn');
+    const nextBtn = document.getElementById('next-btn');
+    const dotsContainer = document.getElementById('scene-dots');
+    const scenes = document.querySelectorAll('.scene');
+
+    // Create dots
+    for (let i = 0; i < TOTAL_SCENES; i++) {
+        const dot = document.createElement('div');
+        dot.className = 'scene-dot' + (i === 0 ? ' active' : '');
+        dot.addEventListener('click', () => goToScene(i));
+        dotsContainer.appendChild(dot);
+    }
+
+    function updateUI() {
+        progressFill.style.width = ((currentScene + 1) / TOTAL_SCENES * 100) + '%';
+        prevBtn.disabled = currentScene === 0;
+        nextBtn.disabled = currentScene === TOTAL_SCENES - 1;
+        const dots = dotsContainer.children;
+        for (let i = 0; i < dots.length; i++) {
+            dots[i].className = 'scene-dot';
+            if (i === currentScene) dots[i].classList.add('active');
+            else if (i < currentScene) dots[i].classList.add('visited');
+        }
+    }
+
+    function clearTimeouts() {
+        animationTimeouts.forEach(t => clearTimeout(t));
+        animationTimeouts = [];
+    }
+
+    function schedule(fn, delay) {
+        animationTimeouts.push(setTimeout(fn, delay));
+    }
+
+    function goToScene(index) {
+        if (index < 0 || index >= TOTAL_SCENES || index === currentScene) return;
+        clearTimeouts();
+
+        // Exit current scene
+        const exitScene = scenes[currentScene];
+        sceneHandlers[currentScene].exit();
+        exitScene.classList.remove('active');
+        if (index > currentScene) {
+            exitScene.classList.add('exit-left');
+        }
+        setTimeout(() => exitScene.classList.remove('exit-left'), 500);
+
+        // Enter new scene
+        currentScene = index;
+        const enterScene = scenes[currentScene];
+        enterScene.classList.add('active');
+        updateUI();
+
+        // Run enter animation after a brief delay
+        schedule(() => sceneHandlers[currentScene].enter(), 100);
+    }
+
+    prevBtn.addEventListener('click', () => goToScene(currentScene - 1));
+    nextBtn.addEventListener('click', () => goToScene(currentScene + 1));
+    document.addEventListener('keydown', (e) => {
+        if (e.key === 'ArrowRight' || e.key === ' ') { e.preventDefault(); goToScene(currentScene + 1); }
+        if (e.key === 'ArrowLeft') { e.preventDefault(); goToScene(currentScene - 1); }
+    });
+
+    // ===== ANIMATION UTILITIES =====
+    function showElement(id, delay) {
+        schedule(() => {
+            const el = typeof id === 'string' ? document.getElementById(id) : id;
+            if (el) el.classList.add('visible', 'show');
+        }, delay);
+    }
+
+    function showElements(selector, staggerMs, baseDelay) {
+        const els = document.querySelectorAll(selector);
+        els.forEach((el, i) => {
+            schedule(() => el.classList.add('visible', 'show'), baseDelay + i * staggerMs);
+        });
+    }
+
+    function hideElement(id) {
+        const el = typeof id === 'string' ? document.getElementById(id) : id;
+        if (el) el.classList.remove('visible', 'show');
+    }
+
+    function resetScene(sceneId) {
+        const scene = document.getElementById(sceneId);
+        scene.querySelectorAll('.visible, .show, .drawn, .active, .active-step, .active-result, .active-node, .bounce, .full, .flipping')
+            .forEach(el => el.classList.remove('visible', 'show', 'drawn', 'active', 'active-step', 'active-result', 'active-node', 'bounce', 'full', 'flipping'));
+    }
+
+    function animateCounter(elementId, from, to, durationMs, delay) {
+        schedule(() => {
+            const el = document.getElementById(elementId);
+            if (!el) return;
+            const startTime = performance.now();
+            function tick(now) {
+                const progress = Math.min((now - startTime) / durationMs, 1);
+                const val = Math.round(from + (to - from) * progress);
+                el.textContent = val;
+                if (progress < 1) requestAnimationFrame(tick);
+            }
+            requestAnimationFrame(tick);
+        }, delay);
+    }
+
+    // ===== SCENE HANDLERS =====
+    const sceneHandlers = {
+        // Scene 1: Title
+        0: {
+            enter() {
+                const items = scenes[0].querySelectorAll('.anim-item');
+                items.forEach((el, i) => {
+                    schedule(() => el.classList.add('show'), i * 200);
+                });
+                const badges = scenes[0].querySelectorAll('.tech-badge');
+                badges.forEach((b, i) => {
+                    schedule(() => {
+                        b.style.animation = `popIn 0.4s ease ${i * 0.15}s forwards`;
+                    }, 600);
+                });
+            },
+            exit() {
+                resetScene('scene-1');
+                scenes[0].querySelectorAll('.tech-badge').forEach(b => { b.style.animation = ''; b.style.opacity = 0; });
+            }
+        },
+
+        // Scene 2: Architecture
+        1: {
+            enter() {
+                const items = scenes[1].querySelectorAll('.anim-item');
+                items.forEach((el, i) => schedule(() => el.classList.add('show'), i * 150));
+
+                const order = ['arch-client', 'arrow-1', 'arch-api', 'arrow-2', 'arch-resource', 'arrow-3', 'arch-service', 'arrow-4', 'arch-config', 'arch-sql', 'arrow-5', 'arch-db'];
+                let d = 400;
+                order.forEach(id => {
+                    const el = document.getElementById(id);
+                    if (el.classList.contains('arch-arrow-line')) {
+                        schedule(() => el.classList.add('drawn'), d);
+                    } else {
+                        showElement(id, d);
+                    }
+                    d += 250;
+                });
+            },
+            exit() {
+                resetScene('scene-2');
+                ['arrow-1','arrow-2','arrow-3','arrow-4','arrow-5'].forEach(id => {
+                    document.getElementById(id).classList.remove('drawn');
+                    document.getElementById(id).style.height = '0';
+                });
+            }
+        },
+
+        // Scene 3: Time Window Model
+        2: {
+            enter() {
+                const items = scenes[2].querySelectorAll('.anim-item');
+                items.forEach((el, i) => schedule(() => el.classList.add('show'), i * 150));
+
+                // Draw timeline axis
+                schedule(() => document.getElementById('timeline-axis-3').classList.add('drawn'), 300);
+
+                // Generate windows
+                const windowsRow = document.getElementById('windows-row-3');
+                windowsRow.innerHTML = '';
+                const windowTimes = ['12:00:00', '12:00:04', '12:00:08', '12:00:12', '12:00:16'];
+                const fills = [85, 100, 42, 67, 15];
+
+                windowTimes.forEach((time, wi) => {
+                    const box = document.createElement('div');
+                    box.className = 'window-box';
+                    box.id = 'win-box-' + wi;
+
+                    let capacityColor = fills[wi] < 70 ? 'var(--success)' : fills[wi] < 100 ? 'var(--warning)' : 'var(--error)';
+
+                    box.innerHTML = `
+                        <div class="window-label">${time}</div>
+                        <div class="window-capacity"><span class="count" id="win-count-${wi}" style="color:${capacityColor}">0</span> / 100</div>
+                        <div class="slots-area" id="slots-area-${wi}"></div>
+                    `;
+                    windowsRow.appendChild(box);
+
+                    // Show window with stagger
+                    schedule(() => box.classList.add('visible'), 800 + wi * 200);
+
+                    // Animate counter
+                    animateCounter('win-count-' + wi, 0, fills[wi], 1200, 1000 + wi * 200);
+
+                    // Add slot dots
+                    const slotCount = Math.min(fills[wi], 40); // cap visual dots
+                    for (let s = 0; s < slotCount; s++) {
+                        const dot = document.createElement('div');
+                        dot.className = 'slot-dot';
+                        dot.style.left = (Math.random() * 90 + 2) + '%';
+                        dot.style.top = (Math.random() * 80 + 5) + '%';
+                        dot.style.background = wi === 1 ? 'var(--error)' : 'var(--primary)';
+                        schedule(() => {
+                            const area = document.getElementById('slots-area-' + wi);
+                            if (area) { area.appendChild(dot); dot.classList.add('visible'); }
+                        }, 1200 + wi * 200 + s * 30);
+                    }
+
+                    // Mark full window
+                    if (fills[wi] >= 100) {
+                        schedule(() => box.classList.add('full'), 2000 + wi * 200);
+                    }
+                });
+
+                // Show jitter label
+                schedule(() => document.getElementById('jitter-label-3').classList.add('visible'), 3000);
+            },
+            exit() {
+                resetScene('scene-3');
+                document.getElementById('timeline-axis-3').classList.remove('drawn');
+                document.getElementById('jitter-label-3').classList.remove('visible');
+            }
+        },
+
+        // Scene 4: 4-Step Overview
+        3: {
+            enter() {
+                const items = scenes[3].querySelectorAll('.anim-item');
+                items.forEach((el, i) => schedule(() => el.classList.add('show'), i * 150));
+
+                for (let i = 1; i <= 4; i++) {
+                    showElement('step-' + i, 300 + (i - 1) * 300);
+                    if (i < 4) {
+                        showElement('conn-' + i, 300 + (i - 1) * 300 + 200);
+                    }
+                }
+                // Highlight step 3 as the most important
+                schedule(() => document.getElementById('step-3').classList.add('active-step'), 1800);
+            },
+            exit() { resetScene('scene-4'); }
+        },
+
+        // Scene 5: Load Configuration
+        4: {
+            enter() {
+                const items = scenes[4].querySelectorAll('.anim-item');
+                items.forEach((el, i) => schedule(() => el.classList.add('show'), i * 150));
+
+                schedule(() => document.getElementById('path-hit-container').style.opacity = '1', 400);
+                schedule(() => document.getElementById('path-miss-container').style.opacity = '1', 1200);
+                schedule(() => document.getElementById('config-result-card').style.opacity = '1', 2000);
+            },
+            exit() {
+                document.getElementById('path-hit-container').style.opacity = '0';
+                document.getElementById('path-miss-container').style.opacity = '0';
+                document.getElementById('config-result-card').style.opacity = '0';
+                resetScene('scene-5');
+            }
+        },
+
+        // Scene 6: Compute Search Range
+        5: {
+            enter() {
+                const items = scenes[5].querySelectorAll('.anim-item');
+                items.forEach((el, i) => schedule(() => el.classList.add('show'), i * 150));
+
+                // Show markers sequentially
+                showElement('marker-requested', 500);
+                // Snap: move requested to window start position
+                schedule(() => {
+                    showElement('marker-window-start', 0);
+                }, 1200);
+                showElement('marker-frontier', 1800);
+                showElement('headroom-bracket', 2400);
+                showElement('marker-search-limit', 3000);
+                schedule(() => document.getElementById('snap-formula-6').classList.add('visible'), 3500);
+            },
+            exit() {
+                resetScene('scene-6');
+                document.getElementById('snap-formula-6').classList.remove('visible');
+            }
+        },
+
+        // Scene 7: Idempotency Check
+        6: {
+            enter() {
+                const items = scenes[6].querySelectorAll('.anim-item');
+                items.forEach((el, i) => schedule(() => el.classList.add('show'), i * 150));
+
+                schedule(() => document.getElementById('jdbc-banner-7').classList.add('visible'), 300);
+
+                // Show PL/SQL functions
+                ['func-check', 'func-lock', 'func-claim'].forEach((id, i) => {
+                    showElement(id, 600 + i * 200);
+                });
+                // Highlight check function
+                schedule(() => document.getElementById('func-check').classList.add('active'), 1200);
+
+                // Show first call path
+                showElement('idem-first-call', 1500);
+                showElement('idem-s1', 1800);
+                showElement('idem-s2', 2200);
+                showElement('idem-s3', 2600);
+
+                // Show second call path
+                showElement('idem-second-call', 3000);
+                showElement('idem-s4', 3300);
+                showElement('idem-s5', 3700);
+                showElement('idem-s6', 4100);
+            },
+            exit() {
+                resetScene('scene-7');
+                document.getElementById('jdbc-banner-7').classList.remove('visible');
+                ['func-check', 'func-lock', 'func-claim'].forEach(id => {
+                    document.getElementById(id).classList.remove('active');
+                });
+            }
+        },
+
+        // Scene 8: Window Walk & NOWAIT Locking
+        7: {
+            enter() {
+                const items = scenes[7].querySelectorAll('.anim-item');
+                items.forEach((el, i) => schedule(() => el.classList.add('show'), i * 150));
+
+                // Show windows
+                ['ww-0', 'ww-1', 'ww-2', 'ww-3'].forEach((id, i) => {
+                    showElement(id, 300 + i * 150);
+                });
+
+                // Calculate positions based on walk-window positions
+                const threadArea = document.getElementById('thread-area-8');
+                const areaRect = threadArea.getBoundingClientRect;
+
+                // All threads start at same position (above window 0)
+                const t1 = document.getElementById('t1');
+                const t2 = document.getElementById('t2');
+                const t3 = document.getElementById('t3');
+
+                // Initial positions - stacked at start
+                t1.style.left = '70px'; t1.style.top = '36px';
+                t2.style.left = '80px'; t2.style.top = '36px';
+                t3.style.left = '90px'; t3.style.top = '36px';
+
+                // All threads move to window 0 area
+                schedule(() => {
+                    t1.style.transition = 'all 0.6s ease';
+                    t2.style.transition = 'all 0.6s ease';
+                    t3.style.transition = 'all 0.6s ease';
+                    t1.style.left = '85px'; t1.style.top = '10px';
+                    t2.style.left = '85px'; t2.style.top = '40px';
+                    t3.style.left = '85px'; t3.style.top = '70px';
+                }, 1000);
+
+                // T1 wins lock on window 0
+                schedule(() => {
+                    document.getElementById('lock-0').classList.add('visible');
+                    document.getElementById('lock-0').style.color = '#4a9eff';
+                    document.getElementById('status-0').textContent = 'LOCKED by T1';
+                    document.getElementById('status-0').style.color = '#4a9eff';
+                    document.getElementById('status-0').classList.add('visible');
+                }, 1800);
+
+                // T2 bounces to window 1
+                schedule(() => {
+                    t2.classList.add('bounce');
+                    t2.style.left = '290px'; t2.style.top = '10px';
+                    document.getElementById('sql-caption-8').classList.add('visible');
+                }, 2300);
+
+                // T3 bounces to window 1 too
+                schedule(() => {
+                    t3.classList.add('bounce');
+                    t3.style.left = '290px'; t3.style.top = '50px';
+                }, 2600);
+
+                // T2 wins lock on window 1, T3 bounces to window 2
+                schedule(() => {
+                    document.getElementById('lock-1').classList.add('visible');
+                    document.getElementById('lock-1').style.color = '#f39c12';
+                    document.getElementById('status-1').textContent = 'LOCKED by T2';
+                    document.getElementById('status-1').style.color = '#f39c12';
+                    document.getElementById('status-1').classList.add('visible');
+                }, 3200);
+
+                schedule(() => {
+                    t3.style.left = '500px'; t3.style.top = '30px';
+                }, 3500);
+
+                // T3 gets window 2
+                schedule(() => {
+                    document.getElementById('lock-2').classList.add('visible');
+                    document.getElementById('lock-2').style.color = '#2ecc71';
+                    document.getElementById('status-2').textContent = 'LOCKED by T3';
+                    document.getElementById('status-2').style.color = '#2ecc71';
+                    document.getElementById('status-2').classList.add('visible');
+                }, 4000);
+
+                // Show NOWAIT label
+                schedule(() => {
+                    document.getElementById('nowait-label-8').classList.add('visible');
+                }, 4500);
+            },
+            exit() {
+                resetScene('scene-8');
+                document.getElementById('sql-caption-8').classList.remove('visible');
+                document.getElementById('nowait-label-8').classList.remove('visible');
+                ['lock-0','lock-1','lock-2','lock-3'].forEach(id => {
+                    const el = document.getElementById(id);
+                    el.style.color = '';
+                });
+                ['status-0','status-1','status-2','status-3'].forEach(id => {
+                    const el = document.getElementById(id);
+                    el.textContent = '';
+                    el.style.color = '';
+                });
+                const t1 = document.getElementById('t1');
+                const t2 = document.getElementById('t2');
+                const t3 = document.getElementById('t3');
+                t1.style.transition = 'none'; t2.style.transition = 'none'; t3.style.transition = 'none';
+                t1.style.left = '60px'; t1.style.top = '36px';
+                t2.style.left = '60px'; t2.style.top = '36px';
+                t3.style.left = '60px'; t3.style.top = '36px';
+                t1.classList.remove('bounce'); t2.classList.remove('bounce'); t3.classList.remove('bounce');
+            }
+        },
+
+        // Scene 9: Claim Slot with Jitter
+        8: {
+            enter() {
+                const items = scenes[8].querySelectorAll('.anim-item');
+                items.forEach((el, i) => schedule(() => el.classList.add('show'), i * 150));
+
+                // Show jitter box
+                schedule(() => document.getElementById('jitter-box-9').classList.add('visible'), 300);
+
+                // Slot machine animation
+                const reel = document.getElementById('jitter-reel-9');
+                let reelInterval;
+                schedule(() => {
+                    reelInterval = setInterval(() => {
+                        reel.textContent = String(Math.floor(Math.random() * 4000)).padStart(4, '0');
+                    }, 50);
+                }, 600);
+
+                // Slow down and land on 2371
+                schedule(() => {
+                    clearInterval(reelInterval);
+                    let slowCount = 0;
+                    const values = [3814, 1247, 982, 3501, 2819, 2371];
+                    const slowInterval = setInterval(() => {
+                        reel.textContent = String(values[slowCount]).padStart(4, '0');
+                        slowCount++;
+                        if (slowCount >= values.length) {
+                            clearInterval(slowInterval);
+                            reel.style.color = 'var(--success)';
+                        }
+                    }, 150);
+                }, 1800);
+
+                // Show scheduled time calc
+                schedule(() => document.getElementById('sched-calc-9').classList.add('visible'), 2800);
+
+                // Show INSERT panel
+                showElement('insert-row-9', 3400);
+
+                // Show UPDATE panel with counter flip
+                showElement('update-counter-9', 3800);
+                schedule(() => {
+                    const counter = document.getElementById('counter-val-9');
+                    counter.classList.add('flipping');
+                    setTimeout(() => {
+                        counter.textContent = '51';
+                        setTimeout(() => counter.classList.remove('flipping'), 200);
+                    }, 200);
+                }, 4200);
+            },
+            exit() {
+                resetScene('scene-9');
+                document.getElementById('jitter-box-9').classList.remove('visible');
+                document.getElementById('sched-calc-9').classList.remove('visible');
+                const reel = document.getElementById('jitter-reel-9');
+                reel.textContent = '0000';
+                reel.style.color = '';
+                document.getElementById('counter-val-9').textContent = '50';
+            }
+        },
+
+        // Scene 10: Results & Summary
+        9: {
+            enter() {
+                const items = scenes[9].querySelectorAll('.anim-item');
+                items.forEach((el, i) => schedule(() => el.classList.add('show'), i * 150));
+
+                // Show result cards
+                showElement('result-new', 400);
+                showElement('result-existing', 700);
+                showElement('result-exhausted', 1000);
+
+                // Highlight NEW path
+                schedule(() => document.getElementById('result-new').classList.add('active-result'), 1400);
+
+                // Show response JSON
+                schedule(() => document.getElementById('response-json-10').style.opacity = '1', 1800);
+
+                // Replay flow animation
+                const nodeCount = 7;
+                for (let i = 0; i < nodeCount; i++) {
+                    schedule(() => {
+                        const node = document.getElementById('rn-' + i);
+                        node.classList.add('visible');
+                        // Highlight current node
+                        node.classList.add('active-node');
+                        // Remove highlight from previous
+                        if (i > 0) {
+                            document.getElementById('rn-' + (i - 1)).classList.remove('active-node');
+                        }
+                    }, 2400 + i * 300);
+
+                    if (i < nodeCount - 1) {
+                        schedule(() => {
+                            document.getElementById('ra-' + i).classList.add('visible');
+                        }, 2400 + i * 300 + 150);
+                    }
+                }
+            },
+            exit() {
+                resetScene('scene-10');
+                document.getElementById('response-json-10').style.opacity = '0';
+            }
+        }
+    };
+
+    // ===== INIT =====
+    updateUI();
+    // Start Scene 1 animation
+    setTimeout(() => sceneHandlers[0].enter(), 300);
+})();
+</script>
+
+</body>
+</html>

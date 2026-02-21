@@ -271,8 +271,7 @@ flowchart TD
     G --> PL["<b>Execute PL/SQL block</b><br/>(single JDBC round trip)"]
 
     subgraph PLSQL ["PL/SQL Block (server-side)"]
-        direction TD
-        B{check_existing_slot:<br/>event_id already exists?}
+        B{check_existing_slot#colon;<br/>event_id already exists?}
         B -- Yes --> C2[/"ou_status = EXISTING"/]
         B -- No --> H{current_window<br/>> search_limit?}
         H -- Yes --> I2[/"ou_status = EXHAUSTED"/]
