@@ -137,7 +137,7 @@
         .arch-box.visible { animation: popIn 0.4s ease forwards; }
         .arch-box.highlight { border-color: var(--primary); box-shadow: 0 0 15px rgba(74,158,255,0.2); }
 
-        /* ===== STEP CONTROLS (shared across scenes 5-9) ===== */
+        /* ===== STEP CONTROLS (shared across scenes) ===== */
         .step-controls {
             display: flex; align-items: center; justify-content: center;
             gap: 16px; margin-top: 12px;
@@ -155,7 +155,7 @@
             min-width: 100px; text-align: center;
         }
 
-        /* ===== SHARED PL/SQL BAR (scenes 7, 8, 9) ===== */
+        /* ===== SHARED PL/SQL BAR (scenes 7-10) ===== */
         .plsql-bar {
             display: flex; gap: 12px; margin-bottom: 12px; justify-content: center;
         }
@@ -189,7 +189,7 @@
             background: rgba(74,158,255,0.1); color: var(--primary);
         }
 
-        /* ===== DB TABLES PANEL (scenes 5-9) ===== */
+        /* ===== DB TABLES PANEL (scenes 5, 7-10) ===== */
         .db-tables-panel {
             display: flex; gap: 12px; margin-top: 12px; width: 100%;
             justify-content: center; flex-shrink: 0;
@@ -340,50 +340,37 @@
             padding: 2px 6px; border-radius: 3px; margin-top: 4px;
         }
 
-        /* ===== SCENE 6: SEARCH RANGE ===== */
-        #scene-6 .range-container { width: 90%; max-width: 850px; }
-        #scene-6 .range-timeline { height: 4px; background: var(--border); border-radius: 2px; position: relative; margin: 70px 0 50px 0; }
-        #scene-6 .range-marker {
-            position: absolute; display: flex; flex-direction: column; align-items: center;
-            opacity: 0; transition: all 0.5s ease;
+        /* ===== SCENE 6: SEARCH PARAMS ===== */
+        #scene-6 .params-container { width: 100%; max-width: 780px; margin-top: 8px; }
+        #scene-6 .param-row {
+            display: flex; align-items: flex-start; gap: 16px;
+            padding: 12px 16px; border-radius: 10px;
+            background: var(--surface); border: 1px solid var(--border);
+            margin-bottom: 10px;
+            opacity: 0; transition: all 0.4s ease;
         }
-        #scene-6 .range-marker.visible { opacity: 1; }
-        #scene-6 .range-marker.above { top: -65px; }
-        #scene-6 .range-marker.below { top: 14px; }
-        #scene-6 .range-marker .marker-pin { width: 3px; height: 24px; border-radius: 1px; }
-        #scene-6 .range-marker .marker-label {
-            font-family: var(--mono); font-size: 10px; white-space: nowrap;
-            padding: 3px 8px; border-radius: 4px; background: rgba(10,14,26,0.9);
-            border: 1px solid var(--border);
+        #scene-6 .param-row.visible { opacity: 1; }
+        #scene-6 .param-name {
+            font-family: var(--mono); font-size: 13px; font-weight: 600;
+            min-width: 180px; flex-shrink: 0;
         }
-        #scene-6 .range-marker .marker-desc {
-            font-size: 10px; color: var(--text-muted); white-space: nowrap;
-            margin-top: 2px; font-family: 'Inter', sans-serif;
+        #scene-6 .param-value {
+            font-family: var(--mono); font-size: 13px; font-weight: 600;
+            min-width: 200px; flex-shrink: 0;
         }
-        #scene-6 .range-marker.above .marker-label { margin-bottom: 4px; }
-        #scene-6 .range-marker.below .marker-label { margin-top: 4px; }
-        #scene-6 .range-bracket {
-            position: absolute; top: 14px; height: 24px;
-            border: 2px solid var(--warning); border-top: none;
-            border-radius: 0 0 6px 6px; opacity: 0; transition: all 0.6s ease;
+        #scene-6 .param-desc {
+            font-size: 12px; color: var(--text-muted); line-height: 1.5;
         }
-        #scene-6 .range-bracket.visible { opacity: 1; }
-        #scene-6 .range-bracket .bracket-label {
-            position: absolute; bottom: -22px; left: 50%; transform: translateX(-50%);
-            white-space: nowrap; font-family: var(--mono); font-size: 10px; color: var(--warning);
-        }
-        #scene-6 .snap-formula {
-            font-family: var(--mono); font-size: 13px;
-            padding: 10px 16px; border-radius: 8px;
+        #scene-6 .param-formula {
+            font-family: var(--mono); font-size: 11px;
+            padding: 4px 8px; border-radius: 4px;
             background: var(--code-bg); border: 1px solid var(--border);
-            margin-top: 8px; text-align: center;
-            opacity: 0; transition: opacity 0.5s ease;
+            display: inline-block; margin-top: 4px;
         }
-        #scene-6 .snap-formula.visible { opacity: 1; }
-        #scene-6 .snap-formula .keyword { color: #c792ea; }
+        #scene-6 .param-formula .kw { color: #c792ea; }
         #scene-6 .step-desc {
             text-align: center; font-size: 12px; color: var(--text-muted);
-            margin-top: 8px; min-height: 18px;
+            margin-top: 12px; min-height: 18px;
             transition: opacity 0.3s ease;
         }
 
@@ -444,69 +431,102 @@
         }
         #scene-8 .sql-caption.visible { opacity: 1; }
 
-        /* ===== SCENE 9: CLAIM SLOT ===== */
-        #scene-9 .claim-container { width: 100%; max-width: 820px; }
-        #scene-9 .jitter-box {
+        /* ===== SCENE 9: FIND FIRST OPEN WINDOW ===== */
+        #scene-9 .skip-container { width: 100%; max-width: 820px; }
+        #scene-9 .skip-paths { display: flex; gap: 14px; flex-wrap: wrap; justify-content: center; }
+        #scene-9 .skip-path { flex: 1; min-width: 200px; max-width: 260px; }
+        #scene-9 .skip-path {
+            padding: 14px; border-radius: 10px;
+            background: var(--surface); border: 1px solid var(--border);
+            opacity: 0; transition: all 0.4s ease;
+        }
+        #scene-9 .skip-path.visible { opacity: 1; }
+        #scene-9 .skip-path h4 { font-size: 12px; margin-bottom: 10px; color: var(--text); }
+        #scene-9 .skip-step {
+            font-size: 11px; color: var(--text-muted); margin-bottom: 6px;
+            padding-left: 10px; border-left: 2px solid var(--border);
+            opacity: 0; transition: opacity 0.3s ease;
+        }
+        #scene-9 .skip-step.visible { opacity: 1; }
+        #scene-9 .skip-sql {
+            font-family: var(--mono); font-size: 11px;
+            padding: 10px 14px; border-radius: 8px;
+            background: var(--code-bg); border: 1px solid var(--border);
+            margin-bottom: 12px; text-align: center;
+            opacity: 0; transition: opacity 0.5s ease;
+        }
+        #scene-9 .skip-sql.visible { opacity: 1; }
+        #scene-9 .skip-result {
+            text-align: center; font-size: 13px; font-weight: 600;
+            padding: 8px 16px; border-radius: 8px;
+            background: var(--surface); border: 1px solid var(--border);
+            opacity: 0; transition: opacity 0.5s ease;
+        }
+        #scene-9 .skip-result.visible { opacity: 1; }
+
+        /* ===== SCENE 10: CLAIM SLOT ===== */
+        #scene-10 .claim-container { width: 100%; max-width: 820px; }
+        #scene-10 .jitter-box {
             text-align: center; margin-bottom: 12px; padding: 14px;
             border-radius: 10px; background: var(--surface); border: 1px solid var(--border);
             opacity: 0; transition: opacity 0.5s ease;
         }
-        #scene-9 .jitter-box.visible { opacity: 1; }
-        #scene-9 .jitter-formula { font-family: var(--mono); font-size: 13px; color: var(--text-muted); margin-bottom: 8px; }
-        #scene-9 .jitter-reel { font-family: var(--mono); font-size: 40px; font-weight: 700; color: var(--primary); height: 50px; overflow: hidden; display: inline-block; }
-        #scene-9 .sched-calc {
+        #scene-10 .jitter-box.visible { opacity: 1; }
+        #scene-10 .jitter-formula { font-family: var(--mono); font-size: 13px; color: var(--text-muted); margin-bottom: 8px; }
+        #scene-10 .jitter-reel { font-family: var(--mono); font-size: 40px; font-weight: 700; color: var(--primary); height: 50px; overflow: hidden; display: inline-block; }
+        #scene-10 .sched-calc {
             font-family: var(--mono); font-size: 14px; margin: 8px 0;
             text-align: center; opacity: 0; transition: opacity 0.5s ease;
         }
-        #scene-9 .sched-calc.visible { opacity: 1; }
-        #scene-9 .sched-calc .time-val { color: var(--success); font-weight: 600; }
-        #scene-9 .insert-card { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 8px; }
-        #scene-9 .insert-panel {
+        #scene-10 .sched-calc.visible { opacity: 1; }
+        #scene-10 .sched-calc .time-val { color: var(--success); font-weight: 600; }
+        #scene-10 .insert-card { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 8px; }
+        #scene-10 .insert-panel {
             padding: 12px; border-radius: 10px;
             background: var(--surface); border: 1px solid var(--border);
             opacity: 0; transition: all 0.4s ease;
         }
-        #scene-9 .insert-panel.visible { opacity: 1; }
-        #scene-9 .insert-panel h4 { font-size: 12px; color: var(--text-muted); margin-bottom: 8px; text-transform: uppercase; letter-spacing: 0.5px; }
-        #scene-9 .counter-display { font-family: var(--mono); font-size: 32px; font-weight: 700; text-align: center; color: var(--success); perspective: 200px; }
-        #scene-9 .counter-display .counter-val { display: inline-block; transition: transform 0.4s ease; }
-        #scene-9 .counter-display .counter-val.flipping { animation: numberFlip 0.4s ease; }
+        #scene-10 .insert-panel.visible { opacity: 1; }
+        #scene-10 .insert-panel h4 { font-size: 12px; color: var(--text-muted); margin-bottom: 8px; text-transform: uppercase; letter-spacing: 0.5px; }
+        #scene-10 .counter-display { font-family: var(--mono); font-size: 32px; font-weight: 700; text-align: center; color: var(--success); perspective: 200px; }
+        #scene-10 .counter-display .counter-val { display: inline-block; transition: transform 0.4s ease; }
+        #scene-10 .counter-display .counter-val.flipping { animation: numberFlip 0.4s ease; }
 
-        /* ===== SCENE 10: RESULTS ===== */
-        #scene-10 { justify-content: center; }
-        #scene-10 .results-container { width: 800px; }
-        #scene-10 .result-paths { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 16px; margin-bottom: 24px; }
-        #scene-10 .result-card {
+        /* ===== SCENE 11: RESULTS ===== */
+        #scene-11 { justify-content: center; }
+        #scene-11 .results-container { width: 800px; }
+        #scene-11 .result-paths { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 16px; margin-bottom: 24px; }
+        #scene-11 .result-card {
             padding: 20px; border-radius: 10px; text-align: center;
             background: var(--surface); border: 2px solid var(--border);
             opacity: 0; transition: all 0.3s ease; cursor: pointer;
         }
-        #scene-10 .result-card.visible { opacity: 1; }
-        #scene-10 .result-card:hover { border-color: rgba(255,255,255,0.25); transform: translateY(-2px); }
-        #scene-10 .result-card.active-result { transform: scale(1.05); }
-        #scene-10 .result-card.active-result.result-new-card { border-color: var(--success); box-shadow: 0 0 15px rgba(46,204,113,0.3); }
-        #scene-10 .result-card.active-result.result-existing-card { border-color: var(--primary); box-shadow: 0 0 15px rgba(74,158,255,0.3); }
-        #scene-10 .result-card.active-result.result-exhausted-card { border-color: var(--error); box-shadow: 0 0 15px rgba(231,76,60,0.3); }
-        #scene-10 .result-card h4 { font-size: 14px; margin-bottom: 8px; }
-        #scene-10 .result-card .http-badge {
+        #scene-11 .result-card.visible { opacity: 1; }
+        #scene-11 .result-card:hover { border-color: rgba(255,255,255,0.25); transform: translateY(-2px); }
+        #scene-11 .result-card.active-result { transform: scale(1.05); }
+        #scene-11 .result-card.active-result.result-new-card { border-color: var(--success); box-shadow: 0 0 15px rgba(46,204,113,0.3); }
+        #scene-11 .result-card.active-result.result-existing-card { border-color: var(--primary); box-shadow: 0 0 15px rgba(74,158,255,0.3); }
+        #scene-11 .result-card.active-result.result-exhausted-card { border-color: var(--error); box-shadow: 0 0 15px rgba(231,76,60,0.3); }
+        #scene-11 .result-card h4 { font-size: 14px; margin-bottom: 8px; }
+        #scene-11 .result-card .http-badge {
             display: inline-block; padding: 4px 12px; border-radius: 4px;
             font-family: var(--mono); font-size: 13px; font-weight: 700; margin: 8px 0;
         }
-        #scene-10 .result-card .result-desc { font-size: 12px; color: var(--text-muted); }
-        #scene-10 .response-json { max-width: 500px; margin: 0 auto; transition: all 0.3s ease; }
-        #scene-10 .response-json .resp-header { font-weight: 600; margin-bottom: 8px; }
-        #scene-10 .response-json .resp-note { font-size: 12px; margin-top: 8px; font-style: italic; }
-        #scene-10 .summary-replay { margin-top: 20px; text-align: center; }
-        #scene-10 .replay-flow { display: flex; align-items: center; justify-content: center; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
-        #scene-10 .replay-node {
+        #scene-11 .result-card .result-desc { font-size: 12px; color: var(--text-muted); }
+        #scene-11 .response-json { max-width: 500px; margin: 0 auto; transition: all 0.3s ease; }
+        #scene-11 .response-json .resp-header { font-weight: 600; margin-bottom: 8px; }
+        #scene-11 .response-json .resp-note { font-size: 12px; margin-top: 8px; font-style: italic; }
+        #scene-11 .summary-replay { margin-top: 20px; text-align: center; }
+        #scene-11 .replay-flow { display: flex; align-items: center; justify-content: center; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
+        #scene-11 .replay-node {
             padding: 6px 14px; border-radius: 6px; font-size: 12px;
             background: var(--surface); border: 1px solid var(--border);
             opacity: 0; transition: all 0.3s ease;
         }
-        #scene-10 .replay-node.visible { opacity: 1; }
-        #scene-10 .replay-node.active-node { border-color: var(--primary); background: rgba(74,158,255,0.15); }
-        #scene-10 .replay-arrow { color: var(--primary); font-size: 14px; opacity: 0; transition: opacity 0.2s ease; }
-        #scene-10 .replay-arrow.visible { opacity: 1; }
+        #scene-11 .replay-node.visible { opacity: 1; }
+        #scene-11 .replay-node.active-node { border-color: var(--primary); background: rgba(74,158,255,0.15); }
+        #scene-11 .replay-arrow { color: var(--primary); font-size: 14px; opacity: 0; transition: opacity 0.2s ease; }
+        #scene-11 .replay-arrow.visible { opacity: 1; }
     </style>
 </head>
 <body>
@@ -611,8 +631,8 @@
 
     <!-- ===== SCENE 5: LOAD CONFIG ===== -->
     <section class="scene" id="scene-5">
-        <div class="scene-title anim-item">Step 1: Load Configuration</div>
-        <div class="scene-subtitle anim-item">In-memory cache with 5-second TTL minimizes DB hits on the hot path</div>
+        <div class="scene-title">Step 1: Load Configuration</div>
+        <div class="scene-subtitle">In-memory cache with 5-second TTL minimizes DB hits on the hot path</div>
         <div class="config-flow">
             <div class="narrative" id="s5-narrative" style="opacity: 0; transition: opacity 0.5s;">
                 The service calls <code style="color: var(--primary);">RateLimitConfigRepository.loadActiveConfig(configName)</code>.
@@ -661,64 +681,87 @@
         </div>
     </section>
 
-    <!-- ===== SCENE 6: COMPUTE SEARCH RANGE ===== -->
+    <!-- ===== SCENE 6: COMPUTE SEARCH PARAMS ===== -->
     <section class="scene" id="scene-6">
-        <div class="scene-title anim-item">Step 2: Compute Search Params</div>
-        <div class="scene-subtitle anim-item">Align to window boundary, compute elapsed time and headroom</div>
-        <div class="range-container">
-            <div class="range-timeline" id="range-timeline-6">
-                <div class="range-marker above" id="marker-requested" style="left: 20%;">
-                    <div class="marker-label" style="color: var(--warning);">requestedTime<br>12:00:01.500</div>
-                    <div class="marker-desc">Timestamp from incoming API call</div>
-                    <div class="marker-pin" style="background: var(--warning);"></div>
-                </div>
-                <div class="range-marker below" id="marker-window-start" style="left: 8%;">
-                    <div class="marker-pin" style="background: var(--success);"></div>
-                    <div class="marker-label" style="color: var(--success);">windowStart<br>12:00:00.000</div>
-                    <div class="marker-desc">Snapped via epoch % windowSizeSecs</div>
-                </div>
-                <div class="range-marker above" id="marker-elapsed" style="left: 50%;">
-                    <div class="marker-label" style="color: var(--primary);">elapsedMs = 1500<br>proportional max = 62</div>
-                    <div class="marker-desc">maxFirstWindow = floor(100 &times; 2500 / 4000)</div>
-                    <div class="marker-pin" style="background: var(--primary);"></div>
-                </div>
-                <div class="range-marker above" id="marker-search-limit" style="left: 90%;">
-                    <div class="marker-label" style="color: var(--error);">searchLimit<br>firstOpenWindow + 400s</div>
-                    <div class="marker-desc">Per-request, computed in PL/SQL</div>
-                    <div class="marker-pin" style="background: var(--error);"></div>
-                </div>
-                <div class="range-bracket" id="headroom-bracket" style="left: 50%; width: 40%;">
-                    <div class="bracket-label">headroom: 100 windows x 4s = 400s from first open window</div>
+        <div class="scene-title">Step 2: Compute Search Parameters</div>
+        <div class="scene-subtitle">Kotlin pre-computes these values before the single PL/SQL call</div>
+        <div class="params-container">
+            <div class="param-row" id="param-1">
+                <div class="param-name" style="color: var(--warning);">requestedTime</div>
+                <div class="param-value" style="color: #c3e88d;">12:00:01.500</div>
+                <div class="param-desc">
+                    Timestamp from the incoming API call.
+                    <br><span style="color: var(--text-muted); font-style: italic;">Input to the algorithm &mdash; when the caller wants the event processed.</span>
                 </div>
             </div>
-            <div class="step-desc" id="s6-desc"></div>
-            <div class="snap-formula" id="snap-formula-6">
-                <span class="keyword">windowStart</span> = requestedTime - (requestedTime <span class="keyword">%</span> windowSizeSecs)
-                &nbsp;&nbsp;|&nbsp;&nbsp;
-                <span class="keyword">maxFirstWindow</span> = maxPerWindow &times; remainingMs / windowSizeMs
-                &nbsp;&nbsp;|&nbsp;&nbsp;
-                <span class="keyword">searchLimit</span> = firstOpenWindow + headroom
+            <div class="param-row" id="param-2">
+                <div class="param-name" style="color: var(--success);">windowStart</div>
+                <div class="param-value" style="color: #c3e88d;">12:00:00.000</div>
+                <div class="param-desc">
+                    Snap requestedTime down to the nearest window boundary.
+                    <div class="param-formula"><span class="kw">epochSecond</span> - (epochSecond <span class="kw">%</span> windowSizeSecs)</div>
+                </div>
+            </div>
+            <div class="param-row" id="param-3">
+                <div class="param-name" style="color: var(--primary);">elapsedMs</div>
+                <div class="param-value" style="color: #c3e88d;">1500</div>
+                <div class="param-desc">
+                    Milliseconds elapsed between windowStart and requestedTime. Used to constrain jitter so <code style="color:var(--primary);">scheduledTime &ge; requestedTime</code>.
+                    <div class="param-formula"><span class="kw">Duration</span>.between(windowStart, requestedTime).toMillis()</div>
+                </div>
+            </div>
+            <div class="param-row" id="param-4">
+                <div class="param-name" style="color: var(--primary);">maxFirstWindow</div>
+                <div class="param-value" style="color: #c3e88d;">62</div>
+                <div class="param-desc">
+                    Proportional capacity for the partial first window. Since 1500ms has elapsed, only 2500ms remain &mdash; capacity is scaled down.
+                    <div class="param-formula"><span class="kw">floor</span>(100 &times; 2500 / 4000) = 62</div>
+                </div>
+            </div>
+            <div class="param-row" id="param-5">
+                <div class="param-name" style="color: var(--primary);">firstJitterMs</div>
+                <div class="param-value" style="color: #c3e88d;">random(1500, 4000)</div>
+                <div class="param-desc">
+                    Jitter for the first window, constrained to <code style="color:var(--primary);">[elapsedMs, windowSizeMs)</code> so scheduled time is never in the past.
+                    <div class="param-formula"><span class="kw">ThreadLocalRandom</span>.nextLong(elapsedMs, windowSizeMs)</div>
+                </div>
+            </div>
+            <div class="param-row" id="param-6">
+                <div class="param-name" style="color: var(--primary);">fullJitterMs</div>
+                <div class="param-value" style="color: #c3e88d;">random(0, 4000)</div>
+                <div class="param-desc">
+                    Jitter for subsequent full windows. Spans the entire window range.
+                    <div class="param-formula"><span class="kw">ThreadLocalRandom</span>.nextLong(0, windowSizeMs)</div>
+                </div>
+            </div>
+            <div class="param-row" id="param-7">
+                <div class="param-name" style="color: var(--error);">headroomSecs</div>
+                <div class="param-value" style="color: #c3e88d;">400</div>
+                <div class="param-desc">
+                    How far ahead to search. PL/SQL computes <code style="color:var(--error);">searchLimit = firstOpenWindow + headroom</code> per-request.
+                    <div class="param-formula"><span class="kw">headroomWindows</span>(100) &times; windowSizeSecs(4) = 400s</div>
+                </div>
             </div>
         </div>
-        <div class="db-tables-panel" id="db-tables-6"></div>
+        <div class="step-desc" id="s6-desc"></div>
         <div class="step-controls" id="step-controls-6">
             <button class="step-btn" id="s6-prev" disabled>&#9664; Prev</button>
-            <span class="step-indicator" id="s6-indicator">Step 1 / 5</span>
+            <span class="step-indicator" id="s6-indicator">Step 1 / 7</span>
             <button class="step-btn" id="s6-next">Next &#9654;</button>
         </div>
     </section>
 
     <!-- ===== SCENE 7: IDEMPOTENCY ===== -->
     <section class="scene" id="scene-7">
-        <div class="scene-title anim-item">Step 3: Single PL/SQL Round Trip</div>
-        <div class="scene-subtitle anim-item">Step 3.a &mdash; check_existing_slot() &mdash; Same event_id always returns the same slot</div>
+        <div class="scene-title">Step 3: Single PL/SQL Round Trip</div>
+        <div class="scene-subtitle">Step 3.a &mdash; check_existing_slot() &mdash; Same event_id always returns the same slot</div>
         <div class="idem-container">
             <div class="jdbc-banner" id="jdbc-banner-7">Single JDBC Round Trip &mdash; 1 network hop to Oracle</div>
             <div class="plsql-bar" id="plsql-bar-7">
                 <div class="plsql-func active" id="func-check-7">check_existing_slot()</div>
                 <div class="plsql-func" id="func-lock-7">try_lock_window()</div>
-                <div class="plsql-func" id="func-claim-7">claim_slot_in_window()</div>
                 <div class="plsql-func" id="func-skip-7">find_first_open_window()</div>
+                <div class="plsql-func" id="func-claim-7">claim_slot_in_window()</div>
             </div>
             <div class="idem-paths">
                 <div class="idem-path" id="idem-first-call">
@@ -756,15 +799,15 @@
 
     <!-- ===== SCENE 8: WINDOW WALK ===== -->
     <section class="scene" id="scene-8">
-        <div class="scene-title anim-item">Step 3: Single PL/SQL Round Trip</div>
-        <div class="scene-subtitle anim-item">Step 3.b &mdash; try_lock_window() &mdash; Threads race for windows, losers skip</div>
+        <div class="scene-title">Step 3: Single PL/SQL Round Trip</div>
+        <div class="scene-subtitle">Step 3.b &mdash; try_lock_window() &mdash; Threads race for windows, losers skip</div>
         <div class="walk-container">
             <div class="jdbc-banner">Single JDBC Round Trip &mdash; 1 network hop to Oracle</div>
             <div class="plsql-bar" id="plsql-bar-8">
                 <div class="plsql-func done">check_existing_slot()</div>
                 <div class="plsql-func active" id="func-lock-8">try_lock_window()</div>
-                <div class="plsql-func" id="func-claim-8">claim_slot_in_window()</div>
                 <div class="plsql-func" id="func-skip-8">find_first_open_window()</div>
+                <div class="plsql-func" id="func-claim-8">claim_slot_in_window()</div>
             </div>
             <div class="thread-legend">
                 <div class="thread-tag"><div class="thread-dot" style="background: #4a9eff;"></div> Thread 1</div>
@@ -795,24 +838,88 @@
         </div>
     </section>
 
-    <!-- ===== SCENE 9: CLAIM SLOT ===== -->
+    <!-- ===== SCENE 9: FIND FIRST OPEN WINDOW ===== -->
     <section class="scene" id="scene-9">
-        <div class="scene-title anim-item">Step 3: Single PL/SQL Round Trip</div>
-        <div class="scene-subtitle anim-item">Step 3.c &mdash; claim_slot_in_window() &mdash; Insert with jitter, increment counter</div>
-        <div class="claim-container">
+        <div class="scene-title">Step 3: Single PL/SQL Round Trip</div>
+        <div class="scene-subtitle">Step 3.c &mdash; find_first_open_window() &mdash; Skip to first available window via index scan</div>
+        <div class="skip-container">
             <div class="jdbc-banner">Single JDBC Round Trip &mdash; 1 network hop to Oracle</div>
             <div class="plsql-bar" id="plsql-bar-9">
                 <div class="plsql-func done">check_existing_slot()</div>
                 <div class="plsql-func done">try_lock_window()</div>
-                <div class="plsql-func active" id="func-claim-9">claim_slot_in_window()</div>
-                <div class="plsql-func done">find_first_open_window()</div>
+                <div class="plsql-func active" id="func-skip-9">find_first_open_window()</div>
+                <div class="plsql-func" id="func-claim-9">claim_slot_in_window()</div>
             </div>
-            <div class="jitter-box" id="jitter-box-9">
+            <div class="skip-sql" id="skip-sql-9">
+                <span style="color: #c792ea;">SELECT</span> MIN(window_start) <span style="color: #c792ea;">INTO</span> open_ts
+                <span style="color: #c792ea;">FROM</span> rate_limit_window_counter
+                <span style="color: #c792ea;">WHERE</span> status = <span style="color: #c3e88d;">'OPEN'</span>
+                <span style="color: #c792ea;">AND</span> window_start &gt; start_ts
+            </div>
+            <div class="skip-paths" id="skip-paths-9">
+                <div class="skip-path" id="skip-case-1">
+                    <h4 style="color: var(--success);">Case 1: OPEN row found</h4>
+                    <div class="skip-step" id="skip-s1a">MIN(window_start) WHERE status = 'OPEN'<br>returns a timestamp</div>
+                    <div class="skip-step" id="skip-s1b" style="border-left-color: var(--success);">
+                        &#10003; Return open_ts directly<br>
+                        <span style="color: var(--success);">Skip all CLOSED windows!</span>
+                    </div>
+                </div>
+                <div class="skip-path" id="skip-case-2">
+                    <h4 style="color: var(--warning);">Case 2: No OPEN, but rows exist</h4>
+                    <div class="skip-step" id="skip-s2a">open_ts IS NULL<br>SELECT MAX(window_start) INTO max_ts</div>
+                    <div class="skip-step" id="skip-s2b" style="border-left-color: var(--warning);">
+                        Return max_ts + window_size<br>
+                        <span style="color: var(--warning);">Jump past all counter rows</span>
+                    </div>
+                </div>
+                <div class="skip-path" id="skip-case-2b" style="display: none;">
+                    <h4 style="color: var(--warning);">Case 2 &mdash; DB State</h4>
+                    <div class="skip-step" id="skip-s2c" style="border-left-color: var(--warning);">
+                        All windows are CLOSED.<br>
+                        max_ts = 12:00:08<br>
+                        <span style="color: var(--warning);">Return 12:00:08 + 4s = 12:00:12</span>
+                    </div>
+                </div>
+                <div class="skip-path" id="skip-case-3">
+                    <h4 style="color: var(--primary);">Case 3: No rows at all</h4>
+                    <div class="skip-step" id="skip-s3a">open_ts IS NULL, max_ts IS NULL<br>No counter rows after start_ts</div>
+                    <div class="skip-step" id="skip-s3b" style="border-left-color: var(--primary);">
+                        Return start_ts + window_size<br>
+                        <span style="color: var(--primary);">Next window after first</span>
+                    </div>
+                </div>
+            </div>
+            <div class="skip-result" id="skip-result-9">
+                <span style="color: var(--text-muted);">Result:</span> searchLimit = first_open_window + headroom &rarr; walk from there
+            </div>
+        </div>
+        <div class="db-tables-panel" id="db-tables-9"></div>
+        <div class="step-controls" id="step-controls-9">
+            <button class="step-btn" id="s9-prev" disabled>&#9664; Prev</button>
+            <span class="step-indicator" id="s9-indicator">Step 1 / 5</span>
+            <button class="step-btn" id="s9-next">Next &#9654;</button>
+        </div>
+    </section>
+
+    <!-- ===== SCENE 10: CLAIM SLOT ===== -->
+    <section class="scene" id="scene-10">
+        <div class="scene-title">Step 3: Single PL/SQL Round Trip</div>
+        <div class="scene-subtitle">Step 3.d &mdash; claim_slot_in_window() &mdash; Insert with jitter, increment counter</div>
+        <div class="claim-container">
+            <div class="jdbc-banner">Single JDBC Round Trip &mdash; 1 network hop to Oracle</div>
+            <div class="plsql-bar" id="plsql-bar-10">
+                <div class="plsql-func done">check_existing_slot()</div>
+                <div class="plsql-func done">try_lock_window()</div>
+                <div class="plsql-func done">find_first_open_window()</div>
+                <div class="plsql-func active" id="func-claim-10">claim_slot_in_window()</div>
+            </div>
+            <div class="jitter-box" id="jitter-box-10">
                 <div class="jitter-formula">jitter_ms := ThreadLocalRandom.nextLong(<span style="color: var(--warning);">elapsedMs</span>, <span style="color: var(--primary);">4000</span>)&nbsp;&nbsp;<span style="color: var(--text-muted); font-size: 11px;">// pre-computed in Kotlin, passed to PL/SQL</span></div>
-                <div class="jitter-reel" id="jitter-reel-9">0000</div>
+                <div class="jitter-reel" id="jitter-reel-10">0000</div>
                 <div style="font-size: 12px; color: var(--text-muted); margin-top: 6px;">milliseconds</div>
             </div>
-            <div class="sched-calc" id="sched-calc-9">
+            <div class="sched-calc" id="sched-calc-10">
                 <span style="color: var(--text-muted);">windowStart 12:00:04.000</span>
                 &nbsp;+&nbsp;
                 <span style="color: var(--primary);">2.371s jitter</span>
@@ -820,7 +927,7 @@
                 <span class="time-val">12:00:06.371</span>
             </div>
             <div class="insert-card">
-                <div class="insert-panel" id="insert-row-9">
+                <div class="insert-panel" id="insert-row-10">
                     <h4>INSERT &rarr; rate_limit_event_slot</h4>
                     <div class="row-data">
                         <span class="field-name">event_id:</span> <span class="field-val">"pay-456"</span><br>
@@ -829,28 +936,28 @@
                         <span class="field-name">config_id:</span> <span class="field-val">1</span>
                     </div>
                 </div>
-                <div class="insert-panel" id="update-counter-9">
+                <div class="insert-panel" id="update-counter-10">
                     <h4>UPDATE &rarr; window_counter</h4>
                     <div style="text-align: center; margin-bottom: 6px; font-size: 11px; color: var(--text-muted);">slot_count = slot_count + 1, status = CASE WHEN full THEN 'CLOSED' ELSE 'OPEN' END</div>
                     <div class="counter-display">
-                        <span class="counter-val" id="counter-val-9">0</span>
+                        <span class="counter-val" id="counter-val-10">0</span>
                         <span style="font-size: 16px; color: var(--text-muted);"> / 100</span>
                     </div>
                 </div>
             </div>
         </div>
-        <div class="db-tables-panel" id="db-tables-9"></div>
-        <div class="step-controls" id="step-controls-9">
-            <button class="step-btn" id="s9-prev" disabled>&#9664; Prev</button>
-            <span class="step-indicator" id="s9-indicator">Step 1 / 4</span>
-            <button class="step-btn" id="s9-next">Next &#9654;</button>
+        <div class="db-tables-panel" id="db-tables-10"></div>
+        <div class="step-controls" id="step-controls-10">
+            <button class="step-btn" id="s10-prev" disabled>&#9664; Prev</button>
+            <span class="step-indicator" id="s10-indicator">Step 1 / 4</span>
+            <button class="step-btn" id="s10-next">Next &#9654;</button>
         </div>
     </section>
 
-    <!-- ===== SCENE 10: RESULTS ===== -->
-    <section class="scene" id="scene-10">
-        <div class="scene-title anim-item">Step 4: Interpret Results</div>
-        <div class="scene-subtitle anim-item">Click a status card to see its response</div>
+    <!-- ===== SCENE 11: RESULTS ===== -->
+    <section class="scene" id="scene-11">
+        <div class="scene-title">Step 4: Interpret Results</div>
+        <div class="scene-subtitle">Click a status card to see its response</div>
         <div class="results-container">
             <div class="result-paths">
                 <div class="result-card result-new-card" id="result-new">
@@ -869,14 +976,14 @@
                     <div class="result-desc">All windows exhausted<br>within search limit.<br>Throw exception.</div>
                 </div>
             </div>
-            <div class="glass-card response-json" id="response-json-10" style="opacity: 0; transition: opacity 0.3s;">
-                <div class="resp-header" id="resp-header-10" style="color: var(--success);">Response (200 OK)</div>
-                <div class="row-data" id="resp-body-10"></div>
-                <div class="resp-note" id="resp-note-10" style="color: var(--text-muted);"></div>
+            <div class="glass-card response-json" id="response-json-11" style="opacity: 0; transition: opacity 0.3s;">
+                <div class="resp-header" id="resp-header-11" style="color: var(--success);">Response (200 OK)</div>
+                <div class="row-data" id="resp-body-11"></div>
+                <div class="resp-note" id="resp-note-11" style="color: var(--text-muted);"></div>
             </div>
             <div class="summary-replay">
                 <div style="font-size: 14px; color: var(--text-muted); margin-bottom: 8px;">End-to-end flow</div>
-                <div class="replay-flow" id="replay-flow-10">
+                <div class="replay-flow" id="replay-flow-11">
                     <div class="replay-node" id="rn-0">Client</div>
                     <div class="replay-arrow" id="ra-0">&#8594;</div>
                     <div class="replay-node" id="rn-1">Resource</div>
@@ -913,11 +1020,11 @@
 (function() {
     'use strict';
 
-    const TOTAL_SCENES = 10;
+    const TOTAL_SCENES = 11;
     let currentScene = 0;
     let animationTimeouts = [];
 
-    // ===== DB STATE (shared across scenes 5-9) =====
+    // ===== DB STATE (shared across scenes 5, 7-10) =====
     const dbState = {
         windowCounter: [],  // [{windowStart, slotCount, status, cssClass}]
         eventSlot: [],      // [{eventId, windowStart, scheduledTime, cssClass}]
@@ -1202,7 +1309,6 @@
             const ctrl = makeStepController(5, 3, applyStep);
             return {
                 enter() {
-                    scenes[4].querySelectorAll('.anim-item').forEach((el, i) => schedule(() => el.classList.add('show'), i * 150));
                     ctrl.enter();
                 },
                 exit() {
@@ -1217,45 +1323,33 @@
             };
         })(),
 
-        // Scene 6: Compute Search Range (step controls + DB tables)
+        // Scene 6: Compute Search Params (step controls, card per variable)
         5: (() => {
-            const ids = ['marker-requested', 'marker-window-start', 'marker-elapsed', 'headroom-bracket', 'marker-search-limit'];
+            const paramIds = ['param-1','param-2','param-3','param-4','param-5','param-6','param-7'];
             const descriptions = [
-                'The incoming API call carries requestedTime = 12:00:01.500',
-                'Snap to window boundary: epoch - (epoch % 4s) = 12:00:00.000',
-                'elapsedMs = 1500ms into window. First window gets proportional capacity: floor(100 × 2500 / 4000) = 62',
-                'Headroom = 100 windows × 4s = 400s. Search limit computed per-request in PL/SQL from first open window.',
-                'searchLimit = firstOpenWindow + headroom. PL/SQL skips to first OPEN window, then walks from there.'
+                'requestedTime: the timestamp from the incoming API call',
+                'windowStart: snap to the nearest window boundary (floor alignment)',
+                'elapsedMs: how far into the current window the request lands',
+                'maxFirstWindow: proportional capacity for the partial first window',
+                'firstJitterMs: constrained jitter so scheduledTime \u2265 requestedTime',
+                'fullJitterMs: unconstrained jitter for subsequent full windows',
+                'headroomSecs: how far ahead to search. All 7 values are now ready for the PL/SQL call.'
             ];
             function applyStep(step) {
-                ids.forEach((id, i) => {
+                paramIds.forEach((id, i) => {
                     const el = document.getElementById(id);
                     if (i <= step) el.classList.add('visible');
                     else el.classList.remove('visible');
                 });
-                const formula = document.getElementById('snap-formula-6');
-                if (step >= 4) formula.classList.add('visible');
-                else formula.classList.remove('visible');
-
-                const desc = document.getElementById('s6-desc');
-                desc.textContent = descriptions[step] || '';
-
-                resetDbState();
-                dbState.label = 'No DB writes in this step — computing search bounds only';
-                renderDbTables(6);
+                document.getElementById('s6-desc').textContent = descriptions[step] || '';
             }
-            const ctrl = makeStepController(6, 5, applyStep);
+            const ctrl = makeStepController(6, 7, applyStep);
             return {
-                enter() {
-                    scenes[5].querySelectorAll('.anim-item').forEach((el, i) => schedule(() => el.classList.add('show'), i * 150));
-                    ctrl.enter();
-                },
+                enter() { ctrl.enter(); },
                 exit() {
                     resetScene('scene-6');
-                    document.getElementById('snap-formula-6').classList.remove('visible');
-                    ids.forEach(id => document.getElementById(id).classList.remove('visible'));
+                    paramIds.forEach(id => document.getElementById(id).classList.remove('visible'));
                     document.getElementById('s6-desc').textContent = '';
-                    resetDbState();
                     ctrl.reset();
                 }
             };
@@ -1273,14 +1367,14 @@
                 resetDbState();
 
                 // Step 0: JDBC banner + functions bar
-                dbState.label = 'PL/SQL block begins — check_existing_slot()';
+                dbState.label = 'PL/SQL block begins \u2014 check_existing_slot()';
 
                 if (step >= 1) {
                     // First call: SELECT, NO_DATA_FOUND
                     fc.classList.add('visible');
                     ['idem-s1','idem-s2','idem-s3'].forEach(id => document.getElementById(id).classList.add('visible'));
                     dbState.label = 'SELECT from event_slot WHERE event_id = \'pay-456\'';
-                    dbState.sqlHint = 'SELECT ... WHERE event_id = \'pay-456\' → NO_DATA_FOUND';
+                    dbState.sqlHint = 'SELECT ... WHERE event_id = \'pay-456\' \u2192 NO_DATA_FOUND';
                 }
                 if (step >= 2) {
                     // Second call scenario: row found (pre-existing from earlier assignment)
@@ -1293,12 +1387,12 @@
                         { eventId: 'pay-456', windowStart: '12:00:04', scheduledTime: '12:00:06.371', cssClass: 'row-highlight' }
                     ];
                     dbState.label = 'Second call: event_id found! Return existing slot.';
-                    dbState.sqlHint = 'SELECT ... WHERE event_id = \'pay-456\' → ROW FOUND';
+                    dbState.sqlHint = 'SELECT ... WHERE event_id = \'pay-456\' \u2192 ROW FOUND';
                 }
                 if (step >= 3) {
                     document.getElementById('idem-s6').classList.add('visible');
                     dbState.eventSlot[0].cssClass = 'row-insert';
-                    dbState.label = 'STATUS_EXISTING = 0 — same slot returned to caller instantly';
+                    dbState.label = 'STATUS_EXISTING = 0 \u2014 same slot returned to caller instantly';
                     dbState.sqlHint = '';
                 }
                 renderDbTables(7);
@@ -1306,7 +1400,6 @@
             const ctrl = makeStepController(7, 4, applyStep);
             return {
                 enter() {
-                    scenes[6].querySelectorAll('.anim-item').forEach((el, i) => schedule(() => el.classList.add('show'), i * 150));
                     ctrl.enter();
                 },
                 exit() {
@@ -1349,70 +1442,86 @@
                 ['ww-0','ww-1','ww-2','ww-3'].forEach(id => document.getElementById(id).classList.add('visible'));
                 resetThreads();
 
-                // DB state: start with window 0 full
                 resetDbState();
                 dbState.windowCounter = [
                     { windowStart: '12:00:00', slotCount: 100, status: 'CLOSED', cssClass: 'row-full' }
                 ];
-                dbState.label = 'Window walk begins — try_lock_window()';
+                dbState.label = 'Phase 1: All threads try the first window (12:00:00)';
 
                 if (step >= 1) {
+                    // Phase 1: All threads race for window 12:00:00
                     t1.style.transition = 'all 0.5s ease';
                     t2.style.transition = 'all 0.5s ease';
                     t3.style.transition = 'all 0.5s ease';
                     t1.style.left = '75px'; t1.style.top = '8px';
                     t2.style.left = '75px'; t2.style.top = '32px';
                     t3.style.left = '75px'; t3.style.top = '56px';
-                    dbState.label = 'All 3 threads target window 12:00:00';
-                    dbState.sqlHint = 'INSERT INTO window_counter(window_start, slot_count) VALUES(?, 0) — DUP ignored';
-                }
-                if (step >= 2) {
                     document.getElementById('lock-0').classList.add('visible');
                     document.getElementById('lock-0').style.color = '#4a9eff';
-                    document.getElementById('status-0').textContent = 'LOCKED by T1';
-                    document.getElementById('status-0').style.color = '#4a9eff';
+                    document.getElementById('status-0').textContent = 'T1 locks \u2014 FULL!';
+                    document.getElementById('status-0').style.color = 'var(--error)';
                     document.getElementById('status-0').classList.add('visible');
-                    t2.classList.add('bounce');
-                    t2.style.left = '250px'; t2.style.top = '8px';
-                    t3.classList.add('bounce');
-                    t3.style.left = '250px'; t3.style.top = '42px';
                     document.getElementById('sql-caption-8').classList.add('visible');
+                    dbState.label = 'T1 locks 12:00:00: count=100 \u2265 maxFirstWindow(62). FULL! T2/T3 get ORA-00054 (NOWAIT).';
+                    dbState.sqlHint = 'SELECT slot_count ... FOR UPDATE NOWAIT \u2192 T1 wins lock, sees FULL; T2/T3 skip';
+                }
+                if (step >= 2) {
+                    // Phase 2 begins: find_first_open_window skips to 12:00:04
+                    // All 3 threads now target 12:00:04
+                    t1.classList.add('bounce');
+                    t2.classList.add('bounce');
+                    t3.classList.add('bounce');
+                    t1.style.left = '250px'; t1.style.top = '8px';
+                    t2.style.left = '250px'; t2.style.top = '32px';
+                    t3.style.left = '250px'; t3.style.top = '56px';
+                    document.getElementById('lock-1').classList.add('visible');
+                    document.getElementById('lock-1').style.color = '#4a9eff';
+                    document.getElementById('status-1').textContent = 'LOCKED by T1';
+                    document.getElementById('status-1').style.color = '#4a9eff';
+                    document.getElementById('status-1').classList.add('visible');
                     dbState.windowCounter = [
                         { windowStart: '12:00:00', slotCount: 100, status: 'CLOSED', cssClass: 'row-full' },
                         { windowStart: '12:00:04', slotCount: 0, status: 'OPEN', cssClass: 'row-insert' }
                     ];
-                    dbState.label = 'T1 locks 12:00:00 (count=100, CLOSED). T2, T3 get ORA-00054 — skip to 12:00:04';
-                    dbState.sqlHint = 'SELECT slot_count ... FOR UPDATE NOWAIT → T1 wins, T2/T3 skip';
+                    dbState.label = 'Phase 2: find_first_open_window() \u2192 12:00:04. T1 locks it (count=0, has capacity!). T2/T3 bounce.';
+                    dbState.sqlHint = 'All threads skip to first OPEN window via index scan';
                 }
                 if (step >= 3) {
-                    document.getElementById('lock-1').classList.add('visible');
-                    document.getElementById('lock-1').style.color = '#f39c12';
-                    document.getElementById('status-1').textContent = 'LOCKED by T2';
-                    document.getElementById('status-1').style.color = '#f39c12';
-                    document.getElementById('status-1').classList.add('visible');
-                    t3.style.left = '430px'; t3.style.top = '25px';
+                    // T2 locks 12:00:08
+                    t2.style.left = '430px'; t2.style.top = '8px';
+                    t3.style.left = '430px'; t3.style.top = '42px';
+                    document.getElementById('lock-2').classList.add('visible');
+                    document.getElementById('lock-2').style.color = '#f39c12';
+                    document.getElementById('status-2').textContent = 'LOCKED by T2';
+                    document.getElementById('status-2').style.color = '#f39c12';
+                    document.getElementById('status-2').classList.add('visible');
                     dbState.windowCounter = [
                         { windowStart: '12:00:00', slotCount: 100, status: 'CLOSED', cssClass: 'row-full' },
                         { windowStart: '12:00:04', slotCount: 0, status: 'OPEN', cssClass: 'row-locked' },
                         { windowStart: '12:00:08', slotCount: 0, status: 'OPEN', cssClass: 'row-insert' }
                     ];
-                    dbState.label = 'T2 locks 12:00:04 (count=0, capacity!). T3 skips to 12:00:08';
+                    dbState.label = 'T2 locks 12:00:08 (count=0, capacity!). T3 bounces to 12:00:12.';
                     dbState.sqlHint = '';
                 }
                 if (step >= 4) {
-                    document.getElementById('lock-2').classList.add('visible');
-                    document.getElementById('lock-2').style.color = '#2ecc71';
-                    document.getElementById('status-2').textContent = 'LOCKED by T3';
-                    document.getElementById('status-2').style.color = '#2ecc71';
-                    document.getElementById('status-2').classList.add('visible');
+                    // T3 locks 12:00:12. All threads spread horizontally.
+                    t1.style.left = '250px'; t1.style.top = '25px';
+                    t2.style.left = '430px'; t2.style.top = '25px';
+                    t3.style.left = '610px'; t3.style.top = '25px';
+                    document.getElementById('lock-3').classList.add('visible');
+                    document.getElementById('lock-3').style.color = '#2ecc71';
+                    document.getElementById('status-3').textContent = 'LOCKED by T3';
+                    document.getElementById('status-3').style.color = '#2ecc71';
+                    document.getElementById('status-3').classList.add('visible');
                     document.getElementById('nowait-label-8').classList.add('visible');
                     dbState.windowCounter = [
                         { windowStart: '12:00:00', slotCount: 100, status: 'CLOSED', cssClass: 'row-full' },
                         { windowStart: '12:00:04', slotCount: 0, status: 'OPEN', cssClass: 'row-pulse' },
-                        { windowStart: '12:00:08', slotCount: 0, status: 'OPEN', cssClass: 'row-locked' }
+                        { windowStart: '12:00:08', slotCount: 0, status: 'OPEN', cssClass: 'row-pulse' },
+                        { windowStart: '12:00:12', slotCount: 0, status: 'OPEN', cssClass: 'row-locked' }
                     ];
-                    dbState.label = 'All threads have windows! T1 has 12:00:04 — proceeds to claim_slot_in_window()';
-                    dbState.sqlHint = '';
+                    dbState.label = 'All threads locked their own windows! T1\u219212:00:04, T2\u219212:00:08, T3\u219212:00:12. Each proceeds to claim_slot_in_window().';
+                    dbState.sqlHint = 'SELECT FOR UPDATE NOWAIT \u2014 Skip, don\u2019t block!';
                 }
                 renderDbTables(8);
             }
@@ -1420,7 +1529,6 @@
             const ctrl = makeStepController(8, 5, applyStep);
             return {
                 enter() {
-                    scenes[7].querySelectorAll('.anim-item').forEach((el, i) => schedule(() => el.classList.add('show'), i * 150));
                     ctrl.enter();
                 },
                 exit() {
@@ -1433,14 +1541,109 @@
             };
         })(),
 
-        // Scene 9: Claim Slot with Jitter (step controls + DB tables)
+        // Scene 9: find_first_open_window() (step controls + DB tables)
         8: (() => {
+            function applyStep(step) {
+                const sql = document.getElementById('skip-sql-9');
+                const cases = ['skip-case-1', 'skip-case-2', 'skip-case-2b', 'skip-case-3'];
+                const allSteps = ['skip-s1a','skip-s1b','skip-s2a','skip-s2b','skip-s2c','skip-s3a','skip-s3b'];
+                const result = document.getElementById('skip-result-9');
+
+                sql.classList.remove('visible');
+                cases.forEach(id => { const el = document.getElementById(id); el.classList.remove('visible'); el.style.display = 'none'; });
+                allSteps.forEach(id => document.getElementById(id).classList.remove('visible'));
+                result.classList.remove('visible');
+
+                resetDbState();
+
+                // Step 0: Show SQL query + Case 1 DB state (continuation from Scene 8)
+                dbState.windowCounter = [
+                    { windowStart: '12:00:00', slotCount: 100, status: 'CLOSED', cssClass: 'row-full' },
+                    { windowStart: '12:00:04', slotCount: 100, status: 'CLOSED', cssClass: 'row-full' },
+                    { windowStart: '12:00:08', slotCount: 42, status: 'OPEN', cssClass: '' }
+                ];
+                dbState.label = 'Continuing from Scene 8: Phase 1 failed (window 12:00:00 was FULL). Phase 2 begins.';
+                dbState.sqlHint = 'SELECT MIN(window_start) WHERE status = \'OPEN\' AND window_start > start_ts';
+
+                if (step >= 0) {
+                    sql.classList.add('visible');
+                }
+                if (step >= 1) {
+                    // Case 1: OPEN row found
+                    document.getElementById('skip-case-1').style.display = '';
+                    document.getElementById('skip-case-1').classList.add('visible');
+                    ['skip-s1a','skip-s1b'].forEach(id => document.getElementById(id).classList.add('visible'));
+                    dbState.windowCounter[2].cssClass = 'row-highlight';
+                    dbState.label = 'Case 1: OPEN row found at 12:00:08 \u2014 skip 2 CLOSED windows instantly!';
+                    dbState.sqlHint = 'MIN(window_start) WHERE status=\'OPEN\' \u2192 12:00:08';
+                }
+                if (step >= 2) {
+                    // Case 2: No OPEN, but rows exist
+                    document.getElementById('skip-case-2').style.display = '';
+                    document.getElementById('skip-case-2').classList.add('visible');
+                    ['skip-s2a','skip-s2b'].forEach(id => document.getElementById(id).classList.add('visible'));
+                    dbState.windowCounter = [
+                        { windowStart: '12:00:00', slotCount: 100, status: 'CLOSED', cssClass: 'row-full' },
+                        { windowStart: '12:00:04', slotCount: 100, status: 'CLOSED', cssClass: 'row-full' },
+                        { windowStart: '12:00:08', slotCount: 100, status: 'CLOSED', cssClass: 'row-full' }
+                    ];
+                    dbState.label = 'Case 2: All windows are CLOSED. Fallback to MAX(window_start).';
+                    dbState.sqlHint = 'open_ts IS NULL \u2192 SELECT MAX(window_start) INTO max_ts';
+                }
+                if (step >= 3) {
+                    // Case 2 continued: show DB state for this scenario
+                    document.getElementById('skip-case-2b').style.display = '';
+                    document.getElementById('skip-case-2b').classList.add('visible');
+                    document.getElementById('skip-s2c').classList.add('visible');
+                    dbState.windowCounter = [
+                        { windowStart: '12:00:00', slotCount: 100, status: 'CLOSED', cssClass: 'row-full' },
+                        { windowStart: '12:00:04', slotCount: 100, status: 'CLOSED', cssClass: 'row-full' },
+                        { windowStart: '12:00:08', slotCount: 100, status: 'CLOSED', cssClass: 'row-full' }
+                    ];
+                    dbState.label = 'Case 2: max_ts = 12:00:08. Return 12:00:08 + 4s = 12:00:12 (jump past all counter rows).';
+                    dbState.sqlHint = 'RETURN max_ts + window_size \u2192 12:00:12';
+
+                    // Case 3: No rows at all
+                    document.getElementById('skip-case-3').style.display = '';
+                    document.getElementById('skip-case-3').classList.add('visible');
+                    ['skip-s3a','skip-s3b'].forEach(id => document.getElementById(id).classList.add('visible'));
+                }
+                if (step >= 4) {
+                    // Final: searchLimit result + back to our 3-thread example
+                    result.classList.add('visible');
+                    dbState.windowCounter = [
+                        { windowStart: '12:00:00', slotCount: 100, status: 'CLOSED', cssClass: 'row-full' },
+                        { windowStart: '12:00:04', slotCount: 0, status: 'OPEN', cssClass: 'row-highlight' },
+                        { windowStart: '12:00:08', slotCount: 0, status: 'OPEN', cssClass: '' },
+                        { windowStart: '12:00:12', slotCount: 0, status: 'OPEN', cssClass: '' }
+                    ];
+                    dbState.label = 'Our example: T1\u219212:00:04, T2\u219212:00:08, T3\u219212:00:12. Each thread proceeds to claim_slot_in_window().';
+                    dbState.sqlHint = 'search_limit := first_open_window + headroom';
+                }
+                renderDbTables(9);
+            }
+            const ctrl = makeStepController(9, 5, applyStep);
+            return {
+                enter() { ctrl.enter(); },
+                exit() {
+                    resetScene('scene-9');
+                    ['skip-case-1','skip-case-2','skip-case-2b','skip-case-3'].forEach(id => {
+                        document.getElementById(id).style.display = 'none';
+                    });
+                    resetDbState();
+                    ctrl.reset();
+                }
+            };
+        })(),
+
+        // Scene 10: Claim Slot with Jitter (step controls + DB tables)
+        9: (() => {
             let reelInterval = null;
             let reelDone = false;
 
             function clearReel() {
                 if (reelInterval) { clearInterval(reelInterval); reelInterval = null; }
-                const reel = document.getElementById('jitter-reel-9');
+                const reel = document.getElementById('jitter-reel-10');
                 reel.textContent = '0000';
                 reel.style.color = '';
                 reelDone = false;
@@ -1448,11 +1651,11 @@
 
             function applyStep(step) {
                 clearReel();
-                const jitterBox = document.getElementById('jitter-box-9');
-                const schedCalc = document.getElementById('sched-calc-9');
-                const insertRow = document.getElementById('insert-row-9');
-                const updateCounter = document.getElementById('update-counter-9');
-                const counterVal = document.getElementById('counter-val-9');
+                const jitterBox = document.getElementById('jitter-box-10');
+                const schedCalc = document.getElementById('sched-calc-10');
+                const insertRow = document.getElementById('insert-row-10');
+                const updateCounter = document.getElementById('update-counter-10');
+                const counterVal = document.getElementById('counter-val-10');
 
                 jitterBox.classList.remove('visible');
                 schedCalc.classList.remove('visible');
@@ -1461,17 +1664,19 @@
                 counterVal.textContent = '0';
                 counterVal.classList.remove('flipping');
 
-                // Carry over from scene 8 end state
+                // Carry over from scene 8/9: T1 has 12:00:04, T2 has 12:00:08, T3 has 12:00:12
                 resetDbState();
                 dbState.windowCounter = [
                     { windowStart: '12:00:00', slotCount: 100, status: 'CLOSED', cssClass: 'row-full' },
-                    { windowStart: '12:00:04', slotCount: 0, status: 'OPEN', cssClass: '' }
+                    { windowStart: '12:00:04', slotCount: 0, status: 'OPEN', cssClass: 'row-locked' },
+                    { windowStart: '12:00:08', slotCount: 0, status: 'OPEN', cssClass: '' },
+                    { windowStart: '12:00:12', slotCount: 0, status: 'OPEN', cssClass: '' }
                 ];
-                dbState.label = 'claim_slot_in_window() — T1 has locked window 12:00:04';
+                dbState.label = 'claim_slot_in_window() \u2014 Showing T1 claiming in window 12:00:04 (T2\u219212:00:08, T3\u219212:00:12 do the same in parallel)';
 
                 if (step >= 0) {
                     jitterBox.classList.add('visible');
-                    const reel = document.getElementById('jitter-reel-9');
+                    const reel = document.getElementById('jitter-reel-10');
                     reelInterval = setInterval(() => {
                         reel.textContent = String(Math.floor(Math.random() * 4000)).padStart(4, '0');
                     }, 50);
@@ -1480,12 +1685,12 @@
                 if (step >= 1) {
                     clearReel();
                     jitterBox.classList.add('visible');
-                    const reel = document.getElementById('jitter-reel-9');
+                    const reel = document.getElementById('jitter-reel-10');
                     reel.textContent = '2371';
                     reel.style.color = 'var(--success)';
                     reelDone = true;
                     schedCalc.classList.add('visible');
-                    dbState.label = 'Jitter = 2371ms. scheduledTime = 12:00:04.000 + 2.371s = 12:00:06.371';
+                    dbState.label = 'T1: jitter = 2371ms. scheduledTime = 12:00:04.000 + 2.371s = 12:00:06.371';
                     dbState.sqlHint = 'scheduled_time := window_start + jitter/1000';
                 }
                 if (step >= 2) {
@@ -1493,7 +1698,7 @@
                     dbState.eventSlot = [
                         { eventId: 'pay-456', windowStart: '12:00:04', scheduledTime: '12:00:06.371', cssClass: 'row-insert' }
                     ];
-                    dbState.label = 'INSERT into rate_limit_event_slot — new row created';
+                    dbState.label = 'T1: INSERT into rate_limit_event_slot \u2014 new row for pay-456';
                     dbState.sqlHint = 'INSERT INTO rate_limit_event_slot (event_id, window_start, scheduled_time, config_id) ...';
                 }
                 if (step >= 3) {
@@ -1505,37 +1710,40 @@
                     }, 200);
                     dbState.windowCounter = [
                         { windowStart: '12:00:00', slotCount: 100, status: 'CLOSED', cssClass: 'row-full' },
-                        { windowStart: '12:00:04', slotCount: 1, status: 'OPEN', cssClass: 'row-update' }
+                        { windowStart: '12:00:04', slotCount: 1, status: 'OPEN', cssClass: 'row-update' },
+                        { windowStart: '12:00:08', slotCount: 1, status: 'OPEN', cssClass: 'row-update' },
+                        { windowStart: '12:00:12', slotCount: 1, status: 'OPEN', cssClass: 'row-update' }
                     ];
                     dbState.eventSlot = [
-                        { eventId: 'pay-456', windowStart: '12:00:04', scheduledTime: '12:00:06.371', cssClass: '' }
+                        { eventId: 'pay-456', windowStart: '12:00:04', scheduledTime: '12:00:06.371', cssClass: '' },
+                        { eventId: 'pay-789', windowStart: '12:00:08', scheduledTime: '12:00:09.142', cssClass: 'row-insert' },
+                        { eventId: 'pay-012', windowStart: '12:00:12', scheduledTime: '12:00:14.817', cssClass: 'row-insert' }
                     ];
-                    dbState.label = 'UPDATE window_counter: slot_count + 1, status = OPEN (not full yet). STATUS_NEW = 1!';
-                    dbState.sqlHint = 'UPDATE rate_limit_window_counter SET slot_count = 1, status = CASE ... WHERE window_start = 12:00:04';
+                    dbState.label = 'All 3 threads claimed! T1\u219212:00:06.371, T2\u219212:00:09.142, T3\u219212:00:14.817. STATUS_NEW = 1 for each.';
+                    dbState.sqlHint = 'UPDATE slot_count + 1, status = CASE WHEN full THEN \'CLOSED\' ELSE \'OPEN\' END';
                 }
-                renderDbTables(9);
+                renderDbTables(10);
             }
 
-            const ctrl = makeStepController(9, 4, applyStep);
+            const ctrl = makeStepController(10, 4, applyStep);
             return {
                 enter() {
-                    scenes[8].querySelectorAll('.anim-item').forEach((el, i) => schedule(() => el.classList.add('show'), i * 150));
                     ctrl.enter();
                 },
                 exit() {
                     clearReel();
-                    resetScene('scene-9');
-                    document.getElementById('jitter-box-9').classList.remove('visible');
-                    document.getElementById('sched-calc-9').classList.remove('visible');
-                    document.getElementById('counter-val-9').textContent = '0';
+                    resetScene('scene-10');
+                    document.getElementById('jitter-box-10').classList.remove('visible');
+                    document.getElementById('sched-calc-10').classList.remove('visible');
+                    document.getElementById('counter-val-10').textContent = '0';
                     resetDbState();
                     ctrl.reset();
                 }
             };
         })(),
 
-        // Scene 10: Results & Summary (clickable cards)
-        9: (() => {
+        // Scene 11: Results & Summary (clickable cards)
+        10: (() => {
             const responses = {
                 'new': {
                     header: 'Response (200 OK)',
@@ -1548,7 +1756,7 @@
                     header: 'Response (200 OK)',
                     headerColor: 'var(--primary)',
                     body: `{<br>&nbsp;&nbsp;<span class="field-name">"eventId":</span> <span class="field-val">"pay-456"</span>,<br>&nbsp;&nbsp;<span class="field-name">"scheduledTime":</span> <span class="field-val">"12:00:06.371Z"</span>,<br>&nbsp;&nbsp;<span class="field-name">"delayMs":</span> <span class="field-val">2371</span><br>}`,
-                    note: 'Idempotent hit — same slot returned instantly, no DB write',
+                    note: 'Idempotent hit \u2014 same slot returned instantly, no DB write',
                     noteColor: 'var(--primary)'
                 },
                 'exhausted': {
@@ -1568,12 +1776,12 @@
                 document.getElementById(cards[type]).classList.add('active-result');
 
                 const resp = responses[type];
-                document.getElementById('resp-header-10').textContent = resp.header;
-                document.getElementById('resp-header-10').style.color = resp.headerColor;
-                document.getElementById('resp-body-10').innerHTML = resp.body;
-                document.getElementById('resp-note-10').textContent = resp.note;
-                document.getElementById('resp-note-10').style.color = resp.noteColor;
-                document.getElementById('response-json-10').style.opacity = '1';
+                document.getElementById('resp-header-11').textContent = resp.header;
+                document.getElementById('resp-header-11').style.color = resp.headerColor;
+                document.getElementById('resp-body-11').innerHTML = resp.body;
+                document.getElementById('resp-note-11').textContent = resp.note;
+                document.getElementById('resp-note-11').style.color = resp.noteColor;
+                document.getElementById('response-json-11').style.opacity = '1';
             }
 
             document.getElementById('result-new').addEventListener('click', () => selectResult('new'));
@@ -1582,7 +1790,6 @@
 
             return {
                 enter() {
-                    scenes[9].querySelectorAll('.anim-item').forEach((el, i) => schedule(() => el.classList.add('show'), i * 150));
                     showElement('result-new', 400);
                     showElement('result-existing', 700);
                     showElement('result-exhausted', 1000);
@@ -1598,8 +1805,8 @@
                     }
                 },
                 exit() {
-                    resetScene('scene-10');
-                    document.getElementById('response-json-10').style.opacity = '0';
+                    resetScene('scene-11');
+                    document.getElementById('response-json-11').style.opacity = '0';
                 }
             };
         })()
