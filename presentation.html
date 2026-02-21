@@ -127,10 +127,12 @@
         #scene-7 .scene-subtitle,
         #scene-8 .scene-subtitle,
         #scene-9 .scene-subtitle { margin-bottom: 28px; }
-        #scene-6 .scene-subtitle,
+        #scene-6 .scene-subtitle { margin-bottom: 20px; }
         #scene-10 .scene-subtitle { margin-bottom: 8px; }
-        #scene-6.scene, #scene-10.scene { padding: 16px 20px; }
-        #scene-6 .scene-title, #scene-10 .scene-title { font-size: 22px; margin-bottom: 2px; }
+        #scene-6.scene { padding: 24px 24px; }
+        #scene-10.scene { padding: 16px 20px; }
+        #scene-6 .scene-title { font-size: 24px; margin-bottom: 6px; }
+        #scene-10 .scene-title { font-size: 22px; margin-bottom: 2px; }
         .anim-item { opacity: 0; }
         .anim-item.show { animation: fadeInUp 0.5s ease forwards; }
 
@@ -203,26 +205,26 @@
 
         /* ===== DB TABLES PANEL (scenes 5, 7-10) ===== */
         .db-tables-panel {
-            display: flex; gap: 12px; margin-top: 12px; width: 100%;
+            display: flex; flex-wrap: wrap; gap: 12px; margin-top: 12px; width: 100%;
             justify-content: center; flex-shrink: 0;
         }
         .db-tables-panel .db-label {
             width: 100%; text-align: center; font-size: 13px;
-            color: var(--warning); font-weight: 600; margin-bottom: 8px;
-            padding: 6px 12px; background: rgba(243, 156, 18, 0.08);
-            border-radius: 6px;
+            color: #ff4f6d; font-weight: 600; margin-bottom: 8px;
+            padding: 2px 0;
         }
         .db-mini-table {
             background: rgba(180, 130, 50, 0.08); border: 1px solid rgba(243, 156, 18, 0.3);
             border-radius: 8px; padding: 8px 10px; font-family: var(--mono); font-size: 11px;
             min-width: 220px; max-width: 380px; flex: 1;
         }
+        .db-mini-table:last-child { max-width: 480px; }
         .db-mini-table .table-title {
             font-size: 10px; text-transform: uppercase; letter-spacing: 0.5px;
             color: var(--warning); margin-bottom: 4px; font-weight: 600;
         }
         .db-mini-table .table-title::before { content: '\1F5C3 '; font-size: 11px; }
-        .db-mini-table table { width: 100%; border-collapse: collapse; }
+        .db-mini-table table { width: 100%; border-collapse: collapse; white-space: nowrap; }
         .db-mini-table th {
             color: rgba(243, 156, 18, 0.7); font-weight: 500; padding: 3px 6px;
             border-bottom: 1px solid rgba(243, 156, 18, 0.2); text-align: left; font-size: 10px;
@@ -356,12 +358,12 @@
         }
 
         /* ===== SCENE 6: SEARCH PARAMS ===== */
-        #scene-6 .params-container { width: 100%; max-width: 820px; margin-top: 8px; }
+        #scene-6 .params-container { width: 100%; max-width: 820px; margin-top: 12px; }
         #scene-6 .param-row {
             display: flex; align-items: flex-start; gap: 12px;
-            padding: 7px 12px; border-radius: 8px;
+            padding: 9px 14px; border-radius: 8px;
             background: var(--surface); border: 1px solid var(--border);
-            margin-bottom: 5px;
+            margin-bottom: 8px;
             opacity: 0; transition: all 0.4s ease;
         }
         #scene-6 .param-row.visible { opacity: 1; }
@@ -1441,7 +1443,7 @@
                     fc.classList.add('visible');
                     ['idem-s1','idem-s2','idem-s3'].forEach(id => document.getElementById(id).classList.add('visible'));
                     dbState.label = 'SELECT from event_slot WHERE event_id = \'pay-456\'';
-                    dbState.sqlHint = 'SELECT ... WHERE event_id = \'pay-456\' \u2192 NO_DATA_FOUND';
+                    dbState.esSqlHint = 'SELECT ... WHERE event_id = \'pay-456\' \u2192 NO_DATA_FOUND';
                 }
                 if (step >= 2) {
                     // Second call scenario: row found (pre-existing from earlier assignment)
@@ -1454,13 +1456,13 @@
                         { eventId: 'pay-456', windowStart: '12:00:04', scheduledTime: '12:00:06.371', cssClass: 'row-highlight' }
                     ];
                     dbState.label = 'Second call: event_id found! Return existing slot.';
-                    dbState.sqlHint = 'SELECT ... WHERE event_id = \'pay-456\' \u2192 ROW FOUND';
+                    dbState.esSqlHint = 'SELECT ... WHERE event_id = \'pay-456\' \u2192 ROW FOUND';
                 }
                 if (step >= 3) {
                     document.getElementById('idem-s6').classList.add('visible');
                     dbState.eventSlot[0].cssClass = 'row-insert';
                     dbState.label = 'STATUS_EXISTING = 0 \u2014 same slot returned to caller instantly';
-                    dbState.sqlHint = '';
+                    dbState.esSqlHint = '';
                 }
                 renderDbTables(7);
             }
@@ -1565,12 +1567,23 @@
 
         // Scene 9: Window Walk & NOWAIT Locking (step controls + DB tables)
         8: (() => {
+            // Compute center-X of a window box relative to the thread-anim-area
+            function getWinX(idx) {
+                const area = document.getElementById('thread-area-9');
+                const win = document.getElementById('ww-' + idx);
+                if (!area || !win) return 60;
+                const areaRect = area.getBoundingClientRect();
+                const winRect = win.getBoundingClientRect();
+                return (winRect.left + winRect.width / 2) - areaRect.left - 13; // 13 = half thread circle width
+            }
+
             function resetThreads() {
                 const t1 = document.getElementById('t1'), t2 = document.getElementById('t2'), t3 = document.getElementById('t3');
                 t1.style.transition = 'none'; t2.style.transition = 'none'; t3.style.transition = 'none';
-                t1.style.left = '60px'; t1.style.top = '30px';
-                t2.style.left = '60px'; t2.style.top = '30px';
-                t3.style.left = '60px'; t3.style.top = '30px';
+                const startX = getWinX(0) + 'px';
+                t1.style.left = startX; t1.style.top = '30px';
+                t2.style.left = startX; t2.style.top = '30px';
+                t3.style.left = startX; t3.style.top = '30px';
                 t1.classList.remove('bounce'); t2.classList.remove('bounce'); t3.classList.remove('bounce');
                 void t1.offsetWidth;
             }
@@ -1593,7 +1606,6 @@
 
                 // Step 0: Show windows + legend
                 ['ww-0','ww-1','ww-2','ww-3'].forEach(id => document.getElementById(id).classList.add('visible'));
-                resetThreads();
 
                 resetDbState();
                 dbState.windowCounter = [
@@ -1601,14 +1613,23 @@
                 ];
                 dbState.label = 'Phase 1: All threads try the first window (12:00:00)';
 
+                // Compute window center positions dynamically
+                const w0 = getWinX(0), w1 = getWinX(1), w2 = getWinX(2), w3 = getWinX(3);
+
+                if (step === 0) {
+                    // Reset all threads to start position
+                    resetThreads();
+                }
+
                 if (step >= 1) {
                     // Phase 1: All threads race for window 12:00:00
-                    t1.style.transition = 'all 0.5s ease';
-                    t2.style.transition = 'all 0.5s ease';
-                    t3.style.transition = 'all 0.5s ease';
-                    t1.style.left = '75px'; t1.style.top = '25px';
-                    t2.style.left = '55px'; t2.style.top = '48px';
-                    t3.style.left = '95px'; t3.style.top = '48px';
+                    t1.style.transition = 'all 0.6s ease';
+                    t2.style.transition = 'all 0.6s ease';
+                    t3.style.transition = 'all 0.6s ease';
+                    t1.style.left = w0 + 'px'; t1.style.top = '15px';
+                    t2.style.left = (w0 - 18) + 'px'; t2.style.top = '42px';
+                    t3.style.left = (w0 + 18) + 'px'; t3.style.top = '42px';
+                    t1.classList.remove('bounce'); t2.classList.remove('bounce'); t3.classList.remove('bounce');
                     document.getElementById('lock-0').classList.add('visible');
                     document.getElementById('lock-0').style.color = '#4a9eff';
                     document.getElementById('status-0').textContent = 'Window is FULL';
@@ -1619,14 +1640,15 @@
                     dbState.sqlHint = 'SELECT slot_count ... FOR UPDATE NOWAIT \u2192 T1 wins lock, sees FULL; T2/T3 skip';
                 }
                 if (step >= 2) {
-                    // Phase 2 begins: find_first_open_window skips to 12:00:04
-                    // All 3 threads now target 12:00:04
-                    t1.classList.add('bounce');
-                    t2.classList.add('bounce');
-                    t3.classList.add('bounce');
-                    t1.style.left = '250px'; t1.style.top = '25px';
-                    t2.style.left = '230px'; t2.style.top = '48px';
-                    t3.style.left = '270px'; t3.style.top = '48px';
+                    // Phase 2: All 3 threads race for 12:00:04, T1 wins lock
+                    t1.style.transition = 'all 0.8s cubic-bezier(0.25, -0.3, 0.25, 1.3)';
+                    t2.style.transition = 'all 0.8s cubic-bezier(0.25, -0.3, 0.25, 1.3)';
+                    t3.style.transition = 'all 0.8s cubic-bezier(0.25, -0.3, 0.25, 1.3)';
+                    // T1 locks window 1 — centered on it
+                    t1.style.left = w1 + 'px'; t1.style.top = '15px';
+                    // T2 & T3 cluster around window 1 (not yet locked)
+                    t2.style.left = (w1 - 18) + 'px'; t2.style.top = '42px';
+                    t3.style.left = (w1 + 18) + 'px'; t3.style.top = '42px';
                     document.getElementById('lock-1').classList.add('visible');
                     document.getElementById('lock-1').style.color = '#4a9eff';
                     document.getElementById('status-1').textContent = 'LOCKED by T1';
@@ -1640,9 +1662,13 @@
                     dbState.sqlHint = 'All threads skip to first OPEN window via index scan';
                 }
                 if (step >= 3) {
-                    // T2 locks 12:00:08
-                    t2.style.left = '430px'; t2.style.top = '25px';
-                    t3.style.left = '430px'; t3.style.top = '48px';
+                    // T1 stays at window 1 (already locked)
+                    t1.style.left = w1 + 'px'; t1.style.top = '25px';
+                    // T2 locks window 2, T3 clusters near it
+                    t2.style.transition = 'all 0.8s cubic-bezier(0.25, -0.3, 0.25, 1.3)';
+                    t3.style.transition = 'all 0.8s cubic-bezier(0.25, -0.3, 0.25, 1.3)';
+                    t2.style.left = w2 + 'px'; t2.style.top = '15px';
+                    t3.style.left = w2 + 'px'; t3.style.top = '42px';
                     document.getElementById('lock-2').classList.add('visible');
                     document.getElementById('lock-2').style.color = '#f39c12';
                     document.getElementById('status-2').textContent = 'LOCKED by T2';
@@ -1657,10 +1683,11 @@
                     dbState.sqlHint = '';
                 }
                 if (step >= 4) {
-                    // T3 locks 12:00:12. All threads spread horizontally.
-                    t1.style.left = '250px'; t1.style.top = '25px';
-                    t2.style.left = '430px'; t2.style.top = '25px';
-                    t3.style.left = '610px'; t3.style.top = '25px';
+                    // T1 stays at window 1, T2 stays at window 2, T3 locks window 3
+                    t1.style.left = w1 + 'px'; t1.style.top = '25px';
+                    t2.style.left = w2 + 'px'; t2.style.top = '25px';
+                    t3.style.transition = 'all 0.8s cubic-bezier(0.25, -0.3, 0.25, 1.3)';
+                    t3.style.left = w3 + 'px'; t3.style.top = '25px';
                     document.getElementById('lock-3').classList.add('visible');
                     document.getElementById('lock-3').style.color = '#2ecc71';
                     document.getElementById('status-3').textContent = 'LOCKED by T3';
