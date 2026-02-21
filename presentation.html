@@ -123,6 +123,14 @@
             background-clip: text;
         }
         .scene-subtitle { font-size: 14px; color: var(--text-muted); margin-bottom: 16px; }
+        #scene-5 .scene-subtitle,
+        #scene-7 .scene-subtitle,
+        #scene-8 .scene-subtitle,
+        #scene-9 .scene-subtitle { margin-bottom: 28px; }
+        #scene-6 .scene-subtitle,
+        #scene-10 .scene-subtitle { margin-bottom: 8px; }
+        #scene-6.scene, #scene-10.scene { padding: 16px 20px; }
+        #scene-6 .scene-title, #scene-10 .scene-title { font-size: 22px; margin-bottom: 2px; }
         .anim-item { opacity: 0; }
         .anim-item.show { animation: fadeInUp 0.5s ease forwards; }
 
@@ -138,10 +146,14 @@
         .arch-box.highlight { border-color: var(--primary); box-shadow: 0 0 15px rgba(74,158,255,0.2); }
 
         /* ===== STEP CONTROLS (shared across scenes) ===== */
-        .step-controls {
-            display: flex; align-items: center; justify-content: center;
-            gap: 16px; margin-top: 12px;
+        .step-controls { display: none; }
+        #step-controls-global {
+            display: none; align-items: center;
+            gap: 16px;
+            position: fixed; bottom: 20px; right: 32px;
+            z-index: 1000;
         }
+        #step-controls-global.visible { display: flex; }
         .step-btn {
             background: var(--surface); border: 1px solid var(--border);
             color: var(--text); padding: 6px 16px; border-radius: 6px;
@@ -173,7 +185,7 @@
             opacity: 0.7; border-color: var(--success); color: var(--success);
         }
         .jdbc-banner {
-            text-align: center; margin-bottom: 10px;
+            text-align: center; margin-bottom: 18px;
             padding: 6px 16px; border-radius: 8px;
             background: rgba(74,158,255,0.1); border: 1px solid rgba(74,158,255,0.3);
             font-weight: 600; font-size: 13px; color: var(--primary);
@@ -195,22 +207,25 @@
             justify-content: center; flex-shrink: 0;
         }
         .db-tables-panel .db-label {
-            width: 100%; text-align: center; font-size: 11px;
-            color: var(--text-muted); font-style: italic; margin-bottom: 6px;
+            width: 100%; text-align: center; font-size: 13px;
+            color: var(--warning); font-weight: 600; margin-bottom: 8px;
+            padding: 6px 12px; background: rgba(243, 156, 18, 0.08);
+            border-radius: 6px;
         }
         .db-mini-table {
-            background: var(--code-bg); border: 1px solid var(--border);
+            background: rgba(180, 130, 50, 0.08); border: 1px solid rgba(243, 156, 18, 0.3);
             border-radius: 8px; padding: 8px 10px; font-family: var(--mono); font-size: 11px;
             min-width: 220px; max-width: 380px; flex: 1;
         }
         .db-mini-table .table-title {
             font-size: 10px; text-transform: uppercase; letter-spacing: 0.5px;
-            color: var(--text-muted); margin-bottom: 4px; font-weight: 600;
+            color: var(--warning); margin-bottom: 4px; font-weight: 600;
         }
+        .db-mini-table .table-title::before { content: '\1F5C3 '; font-size: 11px; }
         .db-mini-table table { width: 100%; border-collapse: collapse; }
         .db-mini-table th {
-            color: var(--text-muted); font-weight: 500; padding: 3px 6px;
-            border-bottom: 1px solid var(--border); text-align: left; font-size: 10px;
+            color: rgba(243, 156, 18, 0.7); font-weight: 500; padding: 3px 6px;
+            border-bottom: 1px solid rgba(243, 156, 18, 0.2); text-align: left; font-size: 10px;
         }
         .db-mini-table td { padding: 3px 6px; color: #c3e88d; font-size: 11px; }
         .db-mini-table tr.row-insert { animation: rowInsert 1s ease; }
@@ -307,7 +322,7 @@
         #scene-4 .step-connector.visible { opacity: 1; }
 
         /* ===== SCENE 5: LOAD CONFIG ===== */
-        #scene-5 .config-flow { display: flex; flex-direction: column; align-items: center; gap: 14px; width: 100%; max-width: 860px; }
+        #scene-5 .config-flow { display: flex; flex-direction: column; align-items: center; gap: 20px; width: 100%; max-width: 860px; }
         #scene-5 .narrative { font-size: 13px; color: var(--text-muted); max-width: 700px; text-align: center; line-height: 1.6; }
         #scene-5 .flow-row { display: flex; align-items: stretch; gap: 0; justify-content: center; width: 100%; }
         #scene-5 .flow-box {
@@ -341,36 +356,36 @@
         }
 
         /* ===== SCENE 6: SEARCH PARAMS ===== */
-        #scene-6 .params-container { width: 100%; max-width: 780px; margin-top: 8px; }
+        #scene-6 .params-container { width: 100%; max-width: 820px; margin-top: 8px; }
         #scene-6 .param-row {
-            display: flex; align-items: flex-start; gap: 16px;
-            padding: 12px 16px; border-radius: 10px;
+            display: flex; align-items: flex-start; gap: 12px;
+            padding: 7px 12px; border-radius: 8px;
             background: var(--surface); border: 1px solid var(--border);
-            margin-bottom: 10px;
+            margin-bottom: 5px;
             opacity: 0; transition: all 0.4s ease;
         }
         #scene-6 .param-row.visible { opacity: 1; }
         #scene-6 .param-name {
-            font-family: var(--mono); font-size: 13px; font-weight: 600;
-            min-width: 180px; flex-shrink: 0;
+            font-family: var(--mono); font-size: 12px; font-weight: 600;
+            min-width: 160px; flex-shrink: 0;
         }
         #scene-6 .param-value {
-            font-family: var(--mono); font-size: 13px; font-weight: 600;
-            min-width: 200px; flex-shrink: 0;
+            font-family: var(--mono); font-size: 12px; font-weight: 600;
+            min-width: 170px; flex-shrink: 0;
         }
         #scene-6 .param-desc {
-            font-size: 12px; color: var(--text-muted); line-height: 1.5;
+            font-size: 11px; color: var(--text-muted); line-height: 1.4;
         }
         #scene-6 .param-formula {
-            font-family: var(--mono); font-size: 11px;
-            padding: 4px 8px; border-radius: 4px;
+            font-family: var(--mono); font-size: 10px;
+            padding: 2px 6px; border-radius: 4px;
             background: var(--code-bg); border: 1px solid var(--border);
-            display: inline-block; margin-top: 4px;
+            display: inline-block; margin-top: 2px;
         }
         #scene-6 .param-formula .kw { color: #c792ea; }
         #scene-6 .step-desc {
-            text-align: center; font-size: 12px; color: var(--text-muted);
-            margin-top: 12px; min-height: 18px;
+            text-align: center; font-size: 11px; color: var(--text-muted);
+            margin-top: 6px; min-height: 16px;
             transition: opacity 0.3s ease;
         }
 
@@ -395,100 +410,103 @@
             font-family: var(--mono); font-size: 10px; font-weight: 600;
         }
 
-        /* ===== SCENE 8: WINDOW WALK ===== */
-        #scene-8 .walk-container { width: 90%; max-width: 900px; }
-        #scene-8 .thread-legend { display: flex; gap: 16px; margin-bottom: 10px; justify-content: center; }
-        #scene-8 .thread-tag { display: flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 600; }
-        #scene-8 .thread-dot { width: 12px; height: 12px; border-radius: 50%; }
-        #scene-8 .walk-timeline { display: flex; gap: 10px; justify-content: center; margin-bottom: 10px; position: relative; }
-        #scene-8 .walk-window {
-            width: 160px; min-height: 80px; border-radius: 8px;
-            border: 1px solid var(--border); background: var(--surface);
-            padding: 10px; text-align: center; position: relative;
-            opacity: 0; transition: all 0.4s ease;
-        }
-        #scene-8 .walk-window.visible { opacity: 1; }
-        #scene-8 .walk-window .win-time { font-family: var(--mono); font-size: 11px; color: var(--text-muted); margin-bottom: 4px; }
-        #scene-8 .walk-window .win-lock { font-size: 16px; margin: 4px 0; opacity: 0; transition: opacity 0.3s ease; }
-        #scene-8 .walk-window .win-lock.visible { opacity: 1; }
-        #scene-8 .walk-window .win-status { font-size: 11px; font-weight: 600; opacity: 0; transition: opacity 0.3s ease; }
-        #scene-8 .walk-window .win-status.visible { opacity: 1; }
-        #scene-8 .thread-anim-area { height: 80px; position: relative; margin-bottom: 8px; }
-        #scene-8 .thread-circle {
-            width: 26px; height: 26px; border-radius: 50%;
-            position: absolute; display: flex; align-items: center;
-            justify-content: center; font-size: 10px; font-weight: 700;
-            color: #fff; transition: all 0.6s ease;
-            box-shadow: 0 2px 8px rgba(0,0,0,0.3);
-        }
-        #scene-8 .thread-circle.bounce { transition: all 0.8s cubic-bezier(0.25, -0.5, 0.25, 1.5); }
-        #scene-8 .nowait-label { text-align: center; font-size: 18px; font-weight: 700; color: var(--warning); opacity: 0; transition: opacity 0.5s ease; }
-        #scene-8 .nowait-label.visible { opacity: 1; }
-        #scene-8 .sql-caption {
-            text-align: center; margin-top: 6px;
-            font-family: var(--mono); font-size: 11px; color: var(--text-muted);
-            opacity: 0; transition: opacity 0.5s ease;
-        }
-        #scene-8 .sql-caption.visible { opacity: 1; }
-
-        /* ===== SCENE 9: FIND FIRST OPEN WINDOW ===== */
-        #scene-9 .skip-container { width: 100%; max-width: 820px; }
-        #scene-9 .skip-paths { display: flex; gap: 14px; flex-wrap: wrap; justify-content: center; }
-        #scene-9 .skip-path { flex: 1; min-width: 200px; max-width: 260px; }
-        #scene-9 .skip-path {
+        /* ===== SCENE 8: FIND FIRST OPEN WINDOW ===== */
+        #scene-8 .skip-container { width: 100%; max-width: 820px; }
+        #scene-8 .skip-paths { display: flex; gap: 14px; flex-wrap: wrap; justify-content: center; }
+        #scene-8 .skip-path { flex: 1; min-width: 200px; max-width: 260px; }
+        #scene-8 .skip-path {
             padding: 14px; border-radius: 10px;
             background: var(--surface); border: 1px solid var(--border);
             opacity: 0; transition: all 0.4s ease;
         }
-        #scene-9 .skip-path.visible { opacity: 1; }
-        #scene-9 .skip-path h4 { font-size: 12px; margin-bottom: 10px; color: var(--text); }
-        #scene-9 .skip-step {
+        #scene-8 .skip-path.visible { opacity: 1; }
+        #scene-8 .skip-path h4 { font-size: 12px; margin-bottom: 10px; color: var(--text); }
+        #scene-8 .skip-step {
             font-size: 11px; color: var(--text-muted); margin-bottom: 6px;
             padding-left: 10px; border-left: 2px solid var(--border);
             opacity: 0; transition: opacity 0.3s ease;
         }
-        #scene-9 .skip-step.visible { opacity: 1; }
-        #scene-9 .skip-sql {
+        #scene-8 .skip-step.visible { opacity: 1; }
+        #scene-8 .skip-sql {
             font-family: var(--mono); font-size: 11px;
             padding: 10px 14px; border-radius: 8px;
             background: var(--code-bg); border: 1px solid var(--border);
             margin-bottom: 12px; text-align: center;
             opacity: 0; transition: opacity 0.5s ease;
         }
-        #scene-9 .skip-sql.visible { opacity: 1; }
-        #scene-9 .skip-result {
+        #scene-8 .skip-sql.visible { opacity: 1; }
+        #scene-8 .skip-result {
             text-align: center; font-size: 13px; font-weight: 600;
             padding: 8px 16px; border-radius: 8px;
             background: var(--surface); border: 1px solid var(--border);
             opacity: 0; transition: opacity 0.5s ease;
         }
-        #scene-9 .skip-result.visible { opacity: 1; }
+        #scene-8 .skip-result.visible { opacity: 1; }
+
+        /* ===== SCENE 9: WINDOW WALK ===== */
+        #scene-9 .walk-container { width: 90%; max-width: 900px; }
+        #scene-9 .thread-legend { display: flex; gap: 16px; margin-bottom: 10px; justify-content: center; }
+        #scene-9 .thread-tag { display: flex; align-items: center; gap: 6px; font-size: 12px; font-weight: 600; }
+        #scene-9 .thread-dot { width: 12px; height: 12px; border-radius: 50%; }
+        #scene-9 .walk-timeline { display: flex; gap: 10px; justify-content: center; margin-bottom: 10px; position: relative; }
+        #scene-9 .walk-window {
+            width: 160px; min-height: 80px; border-radius: 8px;
+            border: 1px solid var(--border); background: var(--surface);
+            padding: 10px; text-align: center; position: relative;
+            opacity: 0; transition: all 0.4s ease;
+        }
+        #scene-9 .walk-window.visible { opacity: 1; }
+        #scene-9 .walk-window .win-time { font-family: var(--mono); font-size: 11px; color: var(--text-muted); margin-bottom: 4px; }
+        #scene-9 .walk-window .win-lock { font-size: 16px; margin: 4px 0; opacity: 0; transition: opacity 0.3s ease; }
+        #scene-9 .walk-window .win-lock.visible { opacity: 1; }
+        #scene-9 .walk-window .win-status { font-size: 11px; font-weight: 600; opacity: 0; transition: opacity 0.3s ease; }
+        #scene-9 .walk-window .win-status.visible { opacity: 1; }
+        #scene-9 .thread-anim-area { height: 80px; position: relative; margin-bottom: 8px; }
+        #scene-9 .thread-circle {
+            width: 26px; height: 26px; border-radius: 50%;
+            position: absolute; display: flex; align-items: center;
+            justify-content: center; font-size: 10px; font-weight: 700;
+            color: #fff; transition: all 0.6s ease;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.3);
+        }
+        #scene-9 .thread-circle.bounce { transition: all 0.8s cubic-bezier(0.25, -0.5, 0.25, 1.5); }
+        #scene-9 .nowait-label { text-align: center; font-size: 18px; font-weight: 700; color: var(--warning); opacity: 0; transition: opacity 0.5s ease; }
+        #scene-9 .nowait-label.visible { opacity: 1; }
+        #scene-9 .sql-caption {
+            text-align: center; margin-top: 6px;
+            font-family: var(--mono); font-size: 11px; color: var(--text-muted);
+            opacity: 0; transition: opacity 0.5s ease;
+        }
+        #scene-9 .sql-caption.visible { opacity: 1; }
 
         /* ===== SCENE 10: CLAIM SLOT ===== */
         #scene-10 .claim-container { width: 100%; max-width: 820px; }
+        #scene-10 .plsql-bar { margin-bottom: 6px; }
+        #scene-10 .jdbc-banner { margin-bottom: 6px; font-size: 11px; padding: 4px 12px; }
+        #scene-10 .row-data { font-size: 11px; line-height: 1.5; }
         #scene-10 .jitter-box {
-            text-align: center; margin-bottom: 12px; padding: 14px;
-            border-radius: 10px; background: var(--surface); border: 1px solid var(--border);
+            text-align: center; margin-bottom: 6px; padding: 8px;
+            border-radius: 8px; background: var(--surface); border: 1px solid var(--border);
             opacity: 0; transition: opacity 0.5s ease;
         }
         #scene-10 .jitter-box.visible { opacity: 1; }
-        #scene-10 .jitter-formula { font-family: var(--mono); font-size: 13px; color: var(--text-muted); margin-bottom: 8px; }
-        #scene-10 .jitter-reel { font-family: var(--mono); font-size: 40px; font-weight: 700; color: var(--primary); height: 50px; overflow: hidden; display: inline-block; }
+        #scene-10 .jitter-formula { font-family: var(--mono); font-size: 11px; color: var(--text-muted); margin-bottom: 4px; }
+        #scene-10 .jitter-reel { font-family: var(--mono); font-size: 28px; font-weight: 700; color: var(--primary); height: 36px; overflow: hidden; display: inline-block; }
         #scene-10 .sched-calc {
-            font-family: var(--mono); font-size: 14px; margin: 8px 0;
+            font-family: var(--mono); font-size: 11px; margin: 4px 0;
             text-align: center; opacity: 0; transition: opacity 0.5s ease;
         }
         #scene-10 .sched-calc.visible { opacity: 1; }
         #scene-10 .sched-calc .time-val { color: var(--success); font-weight: 600; }
-        #scene-10 .insert-card { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 8px; }
+        #scene-10 .insert-card { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 4px; }
         #scene-10 .insert-panel {
-            padding: 12px; border-radius: 10px;
+            padding: 8px; border-radius: 8px;
             background: var(--surface); border: 1px solid var(--border);
             opacity: 0; transition: all 0.4s ease;
         }
         #scene-10 .insert-panel.visible { opacity: 1; }
-        #scene-10 .insert-panel h4 { font-size: 12px; color: var(--text-muted); margin-bottom: 8px; text-transform: uppercase; letter-spacing: 0.5px; }
-        #scene-10 .counter-display { font-family: var(--mono); font-size: 32px; font-weight: 700; text-align: center; color: var(--success); perspective: 200px; }
+        #scene-10 .insert-panel h4 { font-size: 11px; color: var(--text-muted); margin-bottom: 5px; text-transform: uppercase; letter-spacing: 0.5px; }
+        #scene-10 .counter-display { font-family: var(--mono); font-size: 24px; font-weight: 700; text-align: center; color: var(--success); perspective: 200px; }
         #scene-10 .counter-display .counter-val { display: inline-block; transition: transform 0.4s ease; }
         #scene-10 .counter-display .counter-val.flipping { animation: numberFlip 0.4s ease; }
 
@@ -673,7 +691,6 @@
                 </div>
             </div>
         </div>
-        <div class="db-tables-panel" id="db-tables-5"></div>
         <div class="step-controls" id="step-controls-5">
             <button class="step-btn" id="s5-prev" disabled>&#9664; Prev</button>
             <span class="step-indicator" id="s5-indicator">Step 1 / 3</span>
@@ -759,8 +776,8 @@
             <div class="jdbc-banner" id="jdbc-banner-7">Single JDBC Round Trip &mdash; 1 network hop to Oracle</div>
             <div class="plsql-bar" id="plsql-bar-7">
                 <div class="plsql-func active" id="func-check-7">check_existing_slot()</div>
-                <div class="plsql-func" id="func-lock-7">try_lock_window()</div>
                 <div class="plsql-func" id="func-skip-7">find_first_open_window()</div>
+                <div class="plsql-func" id="func-lock-7">try_lock_window()</div>
                 <div class="plsql-func" id="func-claim-7">claim_slot_in_window()</div>
             </div>
             <div class="idem-paths">
@@ -797,66 +814,25 @@
         </div>
     </section>
 
-    <!-- ===== SCENE 8: WINDOW WALK ===== -->
+    <!-- ===== SCENE 8: FIND FIRST OPEN WINDOW ===== -->
     <section class="scene" id="scene-8">
         <div class="scene-title">Step 3: Single PL/SQL Round Trip</div>
-        <div class="scene-subtitle">Step 3.b &mdash; try_lock_window() &mdash; Threads race for windows, losers skip</div>
-        <div class="walk-container">
+        <div class="scene-subtitle">Step 3.b &mdash; find_first_open_window() &mdash; Skip to first available window via index scan</div>
+        <div class="skip-container">
             <div class="jdbc-banner">Single JDBC Round Trip &mdash; 1 network hop to Oracle</div>
             <div class="plsql-bar" id="plsql-bar-8">
                 <div class="plsql-func done">check_existing_slot()</div>
-                <div class="plsql-func active" id="func-lock-8">try_lock_window()</div>
-                <div class="plsql-func" id="func-skip-8">find_first_open_window()</div>
+                <div class="plsql-func active" id="func-skip-8">find_first_open_window()</div>
+                <div class="plsql-func" id="func-lock-8">try_lock_window()</div>
                 <div class="plsql-func" id="func-claim-8">claim_slot_in_window()</div>
             </div>
-            <div class="thread-legend">
-                <div class="thread-tag"><div class="thread-dot" style="background: #4a9eff;"></div> Thread 1</div>
-                <div class="thread-tag"><div class="thread-dot" style="background: #f39c12;"></div> Thread 2</div>
-                <div class="thread-tag"><div class="thread-dot" style="background: #2ecc71;"></div> Thread 3</div>
-            </div>
-            <div class="thread-anim-area" id="thread-area-8">
-                <div class="thread-circle" id="t1" style="background: #4a9eff; left: 60px; top: 30px;">T1</div>
-                <div class="thread-circle" id="t2" style="background: #f39c12; left: 60px; top: 30px;">T2</div>
-                <div class="thread-circle" id="t3" style="background: #2ecc71; left: 60px; top: 30px;">T3</div>
-            </div>
-            <div class="walk-timeline" id="walk-timeline-8">
-                <div class="walk-window" id="ww-0"><div class="win-time">12:00:00</div><div class="win-lock" id="lock-0">&#128274;</div><div class="win-status" id="status-0"></div></div>
-                <div class="walk-window" id="ww-1"><div class="win-time">12:00:04</div><div class="win-lock" id="lock-1">&#128274;</div><div class="win-status" id="status-1"></div></div>
-                <div class="walk-window" id="ww-2"><div class="win-time">12:00:08</div><div class="win-lock" id="lock-2">&#128274;</div><div class="win-status" id="status-2"></div></div>
-                <div class="walk-window" id="ww-3"><div class="win-time">12:00:12</div><div class="win-lock" id="lock-3">&#128274;</div><div class="win-status" id="status-3"></div></div>
-            </div>
-            <div class="sql-caption" id="sql-caption-8">
-                SELECT slot_count FROM rate_limit_window_counter WHERE window_start = ? <span style="color: var(--warning); font-weight: 600;">FOR UPDATE NOWAIT</span>
-            </div>
-            <div class="nowait-label" id="nowait-label-8">Skip, don't block!</div>
-        </div>
-        <div class="db-tables-panel" id="db-tables-8"></div>
-        <div class="step-controls" id="step-controls-8">
-            <button class="step-btn" id="s8-prev" disabled>&#9664; Prev</button>
-            <span class="step-indicator" id="s8-indicator">Step 1 / 5</span>
-            <button class="step-btn" id="s8-next">Next &#9654;</button>
-        </div>
-    </section>
-
-    <!-- ===== SCENE 9: FIND FIRST OPEN WINDOW ===== -->
-    <section class="scene" id="scene-9">
-        <div class="scene-title">Step 3: Single PL/SQL Round Trip</div>
-        <div class="scene-subtitle">Step 3.c &mdash; find_first_open_window() &mdash; Skip to first available window via index scan</div>
-        <div class="skip-container">
-            <div class="jdbc-banner">Single JDBC Round Trip &mdash; 1 network hop to Oracle</div>
-            <div class="plsql-bar" id="plsql-bar-9">
-                <div class="plsql-func done">check_existing_slot()</div>
-                <div class="plsql-func done">try_lock_window()</div>
-                <div class="plsql-func active" id="func-skip-9">find_first_open_window()</div>
-                <div class="plsql-func" id="func-claim-9">claim_slot_in_window()</div>
-            </div>
-            <div class="skip-sql" id="skip-sql-9">
+            <div class="skip-sql" id="skip-sql-8">
                 <span style="color: #c792ea;">SELECT</span> MIN(window_start) <span style="color: #c792ea;">INTO</span> open_ts
                 <span style="color: #c792ea;">FROM</span> rate_limit_window_counter
                 <span style="color: #c792ea;">WHERE</span> status = <span style="color: #c3e88d;">'OPEN'</span>
                 <span style="color: #c792ea;">AND</span> window_start &gt; start_ts
             </div>
-            <div class="skip-paths" id="skip-paths-9">
+            <div class="skip-paths" id="skip-paths-8">
                 <div class="skip-path" id="skip-case-1">
                     <h4 style="color: var(--success);">Case 1: OPEN row found</h4>
                     <div class="skip-step" id="skip-s1a">MIN(window_start) WHERE status = 'OPEN'<br>returns a timestamp</div>
@@ -872,9 +848,6 @@
                         Return max_ts + window_size<br>
                         <span style="color: var(--warning);">Jump past all counter rows</span>
                     </div>
-                </div>
-                <div class="skip-path" id="skip-case-2b" style="display: none;">
-                    <h4 style="color: var(--warning);">Case 2 &mdash; DB State</h4>
                     <div class="skip-step" id="skip-s2c" style="border-left-color: var(--warning);">
                         All windows are CLOSED.<br>
                         max_ts = 12:00:08<br>
@@ -890,9 +863,50 @@
                     </div>
                 </div>
             </div>
-            <div class="skip-result" id="skip-result-9">
+            <div class="skip-result" id="skip-result-8">
                 <span style="color: var(--text-muted);">Result:</span> searchLimit = first_open_window + headroom &rarr; walk from there
             </div>
+        </div>
+        <div class="db-tables-panel" id="db-tables-8"></div>
+        <div class="step-controls" id="step-controls-8">
+            <button class="step-btn" id="s8-prev" disabled>&#9664; Prev</button>
+            <span class="step-indicator" id="s8-indicator">Step 1 / 4</span>
+            <button class="step-btn" id="s8-next">Next &#9654;</button>
+        </div>
+    </section>
+
+    <!-- ===== SCENE 9: WINDOW WALK ===== -->
+    <section class="scene" id="scene-9">
+        <div class="scene-title">Step 3: Single PL/SQL Round Trip</div>
+        <div class="scene-subtitle">Step 3.c &mdash; try_lock_window() &mdash; Threads race for windows, losers skip</div>
+        <div class="walk-container">
+            <div class="jdbc-banner">Single JDBC Round Trip &mdash; 1 network hop to Oracle</div>
+            <div class="plsql-bar" id="plsql-bar-9">
+                <div class="plsql-func done">check_existing_slot()</div>
+                <div class="plsql-func done">find_first_open_window()</div>
+                <div class="plsql-func active" id="func-lock-9">try_lock_window()</div>
+                <div class="plsql-func" id="func-claim-9">claim_slot_in_window()</div>
+            </div>
+            <div class="thread-legend">
+                <div class="thread-tag"><div class="thread-dot" style="background: #4a9eff;"></div> Thread 1</div>
+                <div class="thread-tag"><div class="thread-dot" style="background: #f39c12;"></div> Thread 2</div>
+                <div class="thread-tag"><div class="thread-dot" style="background: #2ecc71;"></div> Thread 3</div>
+            </div>
+            <div class="thread-anim-area" id="thread-area-9">
+                <div class="thread-circle" id="t1" style="background: #4a9eff; left: 60px; top: 30px;">T1</div>
+                <div class="thread-circle" id="t2" style="background: #f39c12; left: 60px; top: 30px;">T2</div>
+                <div class="thread-circle" id="t3" style="background: #2ecc71; left: 60px; top: 30px;">T3</div>
+            </div>
+            <div class="walk-timeline" id="walk-timeline-9">
+                <div class="walk-window" id="ww-0"><div class="win-time">12:00:00</div><div class="win-lock" id="lock-0">&#128274;</div><div class="win-status" id="status-0"></div></div>
+                <div class="walk-window" id="ww-1"><div class="win-time">12:00:04</div><div class="win-lock" id="lock-1">&#128274;</div><div class="win-status" id="status-1"></div></div>
+                <div class="walk-window" id="ww-2"><div class="win-time">12:00:08</div><div class="win-lock" id="lock-2">&#128274;</div><div class="win-status" id="status-2"></div></div>
+                <div class="walk-window" id="ww-3"><div class="win-time">12:00:12</div><div class="win-lock" id="lock-3">&#128274;</div><div class="win-status" id="status-3"></div></div>
+            </div>
+            <div class="sql-caption" id="sql-caption-9">
+                SELECT slot_count FROM rate_limit_window_counter WHERE window_start = ? <span style="color: var(--warning); font-weight: 600;">FOR UPDATE NOWAIT</span>
+            </div>
+            <div class="nowait-label" id="nowait-label-9">Skip, don't block!</div>
         </div>
         <div class="db-tables-panel" id="db-tables-9"></div>
         <div class="step-controls" id="step-controls-9">
@@ -910,39 +924,84 @@
             <div class="jdbc-banner">Single JDBC Round Trip &mdash; 1 network hop to Oracle</div>
             <div class="plsql-bar" id="plsql-bar-10">
                 <div class="plsql-func done">check_existing_slot()</div>
-                <div class="plsql-func done">try_lock_window()</div>
                 <div class="plsql-func done">find_first_open_window()</div>
+                <div class="plsql-func done">try_lock_window()</div>
                 <div class="plsql-func active" id="func-claim-10">claim_slot_in_window()</div>
             </div>
-            <div class="jitter-box" id="jitter-box-10">
-                <div class="jitter-formula">jitter_ms := ThreadLocalRandom.nextLong(<span style="color: var(--warning);">elapsedMs</span>, <span style="color: var(--primary);">4000</span>)&nbsp;&nbsp;<span style="color: var(--text-muted); font-size: 11px;">// pre-computed in Kotlin, passed to PL/SQL</span></div>
-                <div class="jitter-reel" id="jitter-reel-10">0000</div>
-                <div style="font-size: 12px; color: var(--text-muted); margin-top: 6px;">milliseconds</div>
+            <!-- App Server note (outside jitter box) -->
+            <div id="app-server-note-10" style="text-align: center; margin-bottom: 5px; padding: 5px 12px; border-radius: 8px; background: rgba(46,204,113,0.08); border: 1px dashed var(--success); font-size: 11px; color: var(--success); opacity: 0; transition: opacity 0.5s;">
+                <strong>App Server (Kotlin)</strong> &mdash; Jitter pre-computed: ThreadLocalRandom.nextLong(elapsedMs, windowSizeMs)
             </div>
-            <div class="sched-calc" id="sched-calc-10">
-                <span style="color: var(--text-muted);">windowStart 12:00:04.000</span>
-                &nbsp;+&nbsp;
-                <span style="color: var(--primary);">2.371s jitter</span>
-                &nbsp;=&nbsp;
-                <span class="time-val">12:00:06.371</span>
+            <!-- Three jitter boxes -->
+            <div style="display: flex; gap: 8px; justify-content: center; width: 100%;" id="jitter-row-10">
+                <div class="jitter-box" id="jitter-box-t1" style="flex: 1; padding: 7px;">
+                    <div style="font-size: 10px; font-weight: 600; color: #4a9eff; margin-bottom: 2px;">T1 &rarr; 12:00:04</div>
+                    <div class="jitter-reel" id="jitter-reel-t1" style="font-size: 24px;">0000</div>
+                    <div style="font-size: 10px; color: var(--text-muted);">ms</div>
+                </div>
+                <div class="jitter-box" id="jitter-box-t2" style="flex: 1; padding: 7px;">
+                    <div style="font-size: 10px; font-weight: 600; color: #f39c12; margin-bottom: 2px;">T2 &rarr; 12:00:08</div>
+                    <div class="jitter-reel" id="jitter-reel-t2" style="font-size: 24px;">0000</div>
+                    <div style="font-size: 10px; color: var(--text-muted);">ms</div>
+                </div>
+                <div class="jitter-box" id="jitter-box-t3" style="flex: 1; padding: 7px;">
+                    <div style="font-size: 10px; font-weight: 600; color: #2ecc71; margin-bottom: 2px;">T3 &rarr; 12:00:12</div>
+                    <div class="jitter-reel" id="jitter-reel-t3" style="font-size: 24px;">0000</div>
+                    <div style="font-size: 10px; color: var(--text-muted);">ms</div>
+                </div>
             </div>
-            <div class="insert-card">
-                <div class="insert-panel" id="insert-row-10">
-                    <h4>INSERT &rarr; rate_limit_event_slot</h4>
+            <!-- Three schedule calculations -->
+            <div style="display: flex; gap: 8px; justify-content: center; width: 100%;" id="sched-row-10">
+                <div class="sched-calc" id="sched-calc-t1" style="flex: 1; font-size: 11px;">
+                    12:00:04 + <span style="color:#4a9eff;">2.371s</span> = <span class="time-val">12:00:06.371</span>
+                </div>
+                <div class="sched-calc" id="sched-calc-t2" style="flex: 1; font-size: 11px;">
+                    12:00:08 + <span style="color:#f39c12;">1.142s</span> = <span class="time-val">12:00:09.142</span>
+                </div>
+                <div class="sched-calc" id="sched-calc-t3" style="flex: 1; font-size: 11px;">
+                    12:00:12 + <span style="color:#2ecc71;">2.817s</span> = <span class="time-val">12:00:14.817</span>
+                </div>
+            </div>
+            <!-- Three INSERT cards -->
+            <div class="insert-card" style="grid-template-columns: 1fr 1fr 1fr; gap: 8px; margin-top: 4px;" id="insert-row-10">
+                <div class="insert-panel" id="insert-t1">
+                    <h4 style="color: #4a9eff;">INSERT T1 &rarr; event_slot</h4>
                     <div class="row-data">
                         <span class="field-name">event_id:</span> <span class="field-val">"pay-456"</span><br>
-                        <span class="field-name">window_start:</span> <span class="field-val">12:00:04.000</span><br>
-                        <span class="field-name">scheduled_time:</span> <span class="field-val">12:00:06.371</span><br>
-                        <span class="field-name">config_id:</span> <span class="field-val">1</span>
+                        <span class="field-name">window:</span> <span class="field-val">12:00:04</span><br>
+                        <span class="field-name">sched:</span> <span class="field-val">12:00:06.371</span>
                     </div>
                 </div>
-                <div class="insert-panel" id="update-counter-10">
-                    <h4>UPDATE &rarr; window_counter</h4>
-                    <div style="text-align: center; margin-bottom: 6px; font-size: 11px; color: var(--text-muted);">slot_count = slot_count + 1, status = CASE WHEN full THEN 'CLOSED' ELSE 'OPEN' END</div>
-                    <div class="counter-display">
-                        <span class="counter-val" id="counter-val-10">0</span>
-                        <span style="font-size: 16px; color: var(--text-muted);"> / 100</span>
+                <div class="insert-panel" id="insert-t2">
+                    <h4 style="color: #f39c12;">INSERT T2 &rarr; event_slot</h4>
+                    <div class="row-data">
+                        <span class="field-name">event_id:</span> <span class="field-val">"pay-789"</span><br>
+                        <span class="field-name">window:</span> <span class="field-val">12:00:08</span><br>
+                        <span class="field-name">sched:</span> <span class="field-val">12:00:09.142</span>
                     </div>
+                </div>
+                <div class="insert-panel" id="insert-t3">
+                    <h4 style="color: #2ecc71;">INSERT T3 &rarr; event_slot</h4>
+                    <div class="row-data">
+                        <span class="field-name">event_id:</span> <span class="field-val">"pay-012"</span><br>
+                        <span class="field-name">window:</span> <span class="field-val">12:00:12</span><br>
+                        <span class="field-name">sched:</span> <span class="field-val">12:00:14.817</span>
+                    </div>
+                </div>
+            </div>
+            <!-- Three UPDATE counter cards -->
+            <div class="insert-card" style="grid-template-columns: 1fr 1fr 1fr; gap: 8px; margin-top: 4px;" id="update-row-10">
+                <div class="insert-panel" id="update-t1">
+                    <h4 style="color: #4a9eff;">UPDATE counter T1</h4>
+                    <div class="counter-display"><span class="counter-val" id="counter-val-t1">0</span><span style="font-size: 14px; color: var(--text-muted);"> / 100</span></div>
+                </div>
+                <div class="insert-panel" id="update-t2">
+                    <h4 style="color: #f39c12;">UPDATE counter T2</h4>
+                    <div class="counter-display"><span class="counter-val" id="counter-val-t2">0</span><span style="font-size: 14px; color: var(--text-muted);"> / 100</span></div>
+                </div>
+                <div class="insert-panel" id="update-t3">
+                    <h4 style="color: #2ecc71;">UPDATE counter T3</h4>
+                    <div class="counter-display"><span class="counter-val" id="counter-val-t3">0</span><span style="font-size: 14px; color: var(--text-muted);"> / 100</span></div>
                 </div>
             </div>
         </div>
@@ -1011,6 +1070,13 @@
     <button id="next-btn">Next &rarr;</button>
 </nav>
 
+<!-- Global Step Controls (bottom-right, shown only on step-based scenes) -->
+<div id="step-controls-global">
+    <button class="step-btn" id="sg-prev" disabled>&#9664; Prev</button>
+    <span class="step-indicator" id="sg-indicator">Step 1 / 1</span>
+    <button class="step-btn" id="sg-next">Next &#9654;</button>
+</div>
+
 <!-- Keyboard Hint -->
 <div id="keyboard-hint">
     Use <kbd>&larr;</kbd> <kbd>&rarr;</kbd> arrow keys or click <kbd>Next</kbd> to navigate
@@ -1067,11 +1133,11 @@
             <div class="db-mini-table">
                 <div class="table-title">rate_limit_window_counter</div>
                 ${wcRows}
+                ${sqlHintHtml}
             </div>
             <div class="db-mini-table">
                 <div class="table-title">rate_limit_event_slot</div>
                 ${esRows}
-                ${sqlHintHtml}
             </div>
         `;
     }
@@ -1164,16 +1230,31 @@
     }
 
     // ===== STEP CONTROL HELPER =====
+    const sgPrev = document.getElementById('sg-prev');
+    const sgNext = document.getElementById('sg-next');
+    const sgIndicator = document.getElementById('sg-indicator');
+    const sgContainer = document.getElementById('step-controls-global');
+    let sgHandler = null;
+
+    sgPrev.addEventListener('click', () => { if (sgHandler) sgHandler.prev(); });
+    sgNext.addEventListener('click', () => { if (sgHandler) sgHandler.next(); });
+
+    function showGlobalControls(handler) {
+        sgHandler = handler;
+        sgContainer.classList.add('visible');
+    }
+    function hideGlobalControls() {
+        sgHandler = null;
+        sgContainer.classList.remove('visible');
+    }
+
     function makeStepController(sceneNum, totalSteps, applyStepFn) {
         let step = 0;
-        const prevEl = document.getElementById('s' + sceneNum + '-prev');
-        const nextEl = document.getElementById('s' + sceneNum + '-next');
-        const indEl = document.getElementById('s' + sceneNum + '-indicator');
 
         function updateBtns() {
-            prevEl.disabled = step === 0;
-            nextEl.disabled = step === totalSteps - 1;
-            indEl.textContent = 'Step ' + (step + 1) + ' / ' + totalSteps;
+            sgPrev.disabled = step === 0;
+            sgNext.disabled = step === totalSteps - 1;
+            sgIndicator.textContent = 'Step ' + (step + 1) + ' / ' + totalSteps;
         }
 
         function goTo(s) {
@@ -1183,12 +1264,14 @@
             updateBtns();
         }
 
-        prevEl.addEventListener('click', () => goTo(step - 1));
-        nextEl.addEventListener('click', () => goTo(step + 1));
+        const handler = {
+            prev() { goTo(step - 1); },
+            next() { goTo(step + 1); }
+        };
 
         return {
-            enter() { goTo(0); },
-            reset() { step = 0; updateBtns(); },
+            enter() { showGlobalControls(handler); goTo(0); },
+            reset() { step = 0; hideGlobalControls(); },
             goTo
         };
     }
@@ -1289,22 +1372,16 @@
                 missContainer.style.opacity = '0';
                 configCard.style.opacity = '0';
 
-                resetDbState();
-
                 if (step >= 0) {
                     narrative.style.opacity = '1';
                     hitContainer.style.opacity = '1';
-                    dbState.label = 'Database tables (no operations yet)';
                 }
                 if (step >= 1) {
                     missContainer.style.opacity = '1';
-                    dbState.label = 'Config loaded from rate_limit_config table (read-only)';
                 }
                 if (step >= 2) {
                     configCard.style.opacity = '1';
-                    dbState.label = 'Config cached in memory. DB tables below are empty for this event.';
                 }
-                renderDbTables(5);
             }
             const ctrl = makeStepController(5, 3, applyStep);
             return {
@@ -1317,7 +1394,6 @@
                         if (el) el.style.opacity = '0';
                     });
                     resetScene('scene-5');
-                    resetDbState();
                     ctrl.reset();
                 }
             };
@@ -1410,8 +1486,90 @@
             };
         })(),
 
-        // Scene 8: Window Walk & NOWAIT Locking (step controls + DB tables)
+        // Scene 8: find_first_open_window() (step controls + DB tables)
         7: (() => {
+            function applyStep(step) {
+                const sql = document.getElementById('skip-sql-8');
+                const cases = ['skip-case-1', 'skip-case-2', 'skip-case-3'];
+                const allSteps = ['skip-s1a','skip-s1b','skip-s2a','skip-s2b','skip-s2c','skip-s3a','skip-s3b'];
+                const result = document.getElementById('skip-result-8');
+
+                sql.classList.remove('visible');
+                cases.forEach(id => { const el = document.getElementById(id); el.classList.remove('visible'); el.style.display = 'none'; });
+                allSteps.forEach(id => document.getElementById(id).classList.remove('visible'));
+                result.classList.remove('visible');
+
+                resetDbState();
+
+                // Step 0: Show SQL query + DB state
+                dbState.windowCounter = [
+                    { windowStart: '12:00:00', slotCount: 100, status: 'CLOSED', cssClass: 'row-full' },
+                    { windowStart: '12:00:04', slotCount: 100, status: 'CLOSED', cssClass: 'row-full' },
+                    { windowStart: '12:00:08', slotCount: 42, status: 'OPEN', cssClass: '' }
+                ];
+                dbState.label = 'find_first_open_window(): Skip CLOSED windows via index scan.';
+                dbState.sqlHint = 'SELECT MIN(window_start) WHERE status = \'OPEN\' AND window_start > start_ts';
+
+                if (step >= 0) {
+                    sql.classList.add('visible');
+                }
+                if (step >= 1) {
+                    // Case 1: OPEN row found
+                    document.getElementById('skip-case-1').style.display = '';
+                    document.getElementById('skip-case-1').classList.add('visible');
+                    ['skip-s1a','skip-s1b'].forEach(id => document.getElementById(id).classList.add('visible'));
+                    dbState.windowCounter[2].cssClass = 'row-highlight';
+                    dbState.label = 'Case 1: OPEN row found at 12:00:08 \u2014 skip 2 CLOSED windows instantly!';
+                    dbState.sqlHint = 'MIN(window_start) WHERE status=\'OPEN\' \u2192 12:00:08';
+                }
+                if (step >= 2) {
+                    // Case 2: No OPEN, but rows exist (with merged DB state)
+                    document.getElementById('skip-case-2').style.display = '';
+                    document.getElementById('skip-case-2').classList.add('visible');
+                    ['skip-s2a','skip-s2b','skip-s2c'].forEach(id => document.getElementById(id).classList.add('visible'));
+                    dbState.windowCounter = [
+                        { windowStart: '12:00:00', slotCount: 100, status: 'CLOSED', cssClass: 'row-full' },
+                        { windowStart: '12:00:04', slotCount: 100, status: 'CLOSED', cssClass: 'row-full' },
+                        { windowStart: '12:00:08', slotCount: 100, status: 'CLOSED', cssClass: 'row-full' }
+                    ];
+                    dbState.label = 'Case 2: All CLOSED. max_ts = 12:00:08. Return 12:00:08 + 4s = 12:00:12 (jump past all).';
+                    dbState.sqlHint = 'open_ts IS NULL \u2192 MAX(window_start) + window_size \u2192 12:00:12';
+
+                    // Case 3: No rows at all — new window identified after start_ts
+                    document.getElementById('skip-case-3').style.display = '';
+                    document.getElementById('skip-case-3').classList.add('visible');
+                    ['skip-s3a','skip-s3b'].forEach(id => document.getElementById(id).classList.add('visible'));
+                }
+                if (step >= 3) {
+                    // Final: searchLimit result + back to our 3-thread example
+                    result.classList.add('visible');
+                    dbState.windowCounter = [
+                        { windowStart: '12:00:00', slotCount: 100, status: 'CLOSED', cssClass: 'row-full' },
+                        { windowStart: '12:00:04', slotCount: 0, status: 'OPEN', cssClass: 'row-highlight' },
+                        { windowStart: '12:00:08', slotCount: 0, status: 'OPEN', cssClass: '' },
+                        { windowStart: '12:00:12', slotCount: 0, status: 'OPEN', cssClass: '' }
+                    ];
+                    dbState.label = 'Our example: T1\u219212:00:04, T2\u219212:00:08, T3\u219212:00:12. Each thread proceeds to try_lock_window().';
+                    dbState.sqlHint = 'search_limit := first_open_window + headroom';
+                }
+                renderDbTables(8);
+            }
+            const ctrl = makeStepController(8, 4, applyStep);
+            return {
+                enter() { ctrl.enter(); },
+                exit() {
+                    resetScene('scene-8');
+                    ['skip-case-1','skip-case-2','skip-case-3'].forEach(id => {
+                        document.getElementById(id).style.display = 'none';
+                    });
+                    resetDbState();
+                    ctrl.reset();
+                }
+            };
+        })(),
+
+        // Scene 9: Window Walk & NOWAIT Locking (step controls + DB tables)
+        8: (() => {
             function resetThreads() {
                 const t1 = document.getElementById('t1'), t2 = document.getElementById('t2'), t3 = document.getElementById('t3');
                 t1.style.transition = 'none'; t2.style.transition = 'none'; t3.style.transition = 'none';
@@ -1430,8 +1588,8 @@
                     document.getElementById('status-' + i).style.color = '';
                     document.getElementById('status-' + i).classList.remove('visible');
                 }
-                document.getElementById('sql-caption-8').classList.remove('visible');
-                document.getElementById('nowait-label-8').classList.remove('visible');
+                document.getElementById('sql-caption-9').classList.remove('visible');
+                document.getElementById('nowait-label-9').classList.remove('visible');
             }
 
             function applyStep(step) {
@@ -1453,15 +1611,15 @@
                     t1.style.transition = 'all 0.5s ease';
                     t2.style.transition = 'all 0.5s ease';
                     t3.style.transition = 'all 0.5s ease';
-                    t1.style.left = '75px'; t1.style.top = '8px';
-                    t2.style.left = '75px'; t2.style.top = '32px';
-                    t3.style.left = '75px'; t3.style.top = '56px';
+                    t1.style.left = '75px'; t1.style.top = '25px';
+                    t2.style.left = '55px'; t2.style.top = '48px';
+                    t3.style.left = '95px'; t3.style.top = '48px';
                     document.getElementById('lock-0').classList.add('visible');
                     document.getElementById('lock-0').style.color = '#4a9eff';
-                    document.getElementById('status-0').textContent = 'T1 locks \u2014 FULL!';
+                    document.getElementById('status-0').textContent = 'Window is FULL';
                     document.getElementById('status-0').style.color = 'var(--error)';
                     document.getElementById('status-0').classList.add('visible');
-                    document.getElementById('sql-caption-8').classList.add('visible');
+                    document.getElementById('sql-caption-9').classList.add('visible');
                     dbState.label = 'T1 locks 12:00:00: count=100 \u2265 maxFirstWindow(62). FULL! T2/T3 get ORA-00054 (NOWAIT).';
                     dbState.sqlHint = 'SELECT slot_count ... FOR UPDATE NOWAIT \u2192 T1 wins lock, sees FULL; T2/T3 skip';
                 }
@@ -1471,9 +1629,9 @@
                     t1.classList.add('bounce');
                     t2.classList.add('bounce');
                     t3.classList.add('bounce');
-                    t1.style.left = '250px'; t1.style.top = '8px';
-                    t2.style.left = '250px'; t2.style.top = '32px';
-                    t3.style.left = '250px'; t3.style.top = '56px';
+                    t1.style.left = '250px'; t1.style.top = '25px';
+                    t2.style.left = '230px'; t2.style.top = '48px';
+                    t3.style.left = '270px'; t3.style.top = '48px';
                     document.getElementById('lock-1').classList.add('visible');
                     document.getElementById('lock-1').style.color = '#4a9eff';
                     document.getElementById('status-1').textContent = 'LOCKED by T1';
@@ -1488,8 +1646,8 @@
                 }
                 if (step >= 3) {
                     // T2 locks 12:00:08
-                    t2.style.left = '430px'; t2.style.top = '8px';
-                    t3.style.left = '430px'; t3.style.top = '42px';
+                    t2.style.left = '430px'; t2.style.top = '25px';
+                    t3.style.left = '430px'; t3.style.top = '48px';
                     document.getElementById('lock-2').classList.add('visible');
                     document.getElementById('lock-2').style.color = '#f39c12';
                     document.getElementById('status-2').textContent = 'LOCKED by T2';
@@ -1513,7 +1671,7 @@
                     document.getElementById('status-3').textContent = 'LOCKED by T3';
                     document.getElementById('status-3').style.color = '#2ecc71';
                     document.getElementById('status-3').classList.add('visible');
-                    document.getElementById('nowait-label-8').classList.add('visible');
+                    document.getElementById('nowait-label-9').classList.add('visible');
                     dbState.windowCounter = [
                         { windowStart: '12:00:00', slotCount: 100, status: 'CLOSED', cssClass: 'row-full' },
                         { windowStart: '12:00:04', slotCount: 0, status: 'OPEN', cssClass: 'row-pulse' },
@@ -1523,16 +1681,16 @@
                     dbState.label = 'All threads locked their own windows! T1\u219212:00:04, T2\u219212:00:08, T3\u219212:00:12. Each proceeds to claim_slot_in_window().';
                     dbState.sqlHint = 'SELECT FOR UPDATE NOWAIT \u2014 Skip, don\u2019t block!';
                 }
-                renderDbTables(8);
+                renderDbTables(9);
             }
 
-            const ctrl = makeStepController(8, 5, applyStep);
+            const ctrl = makeStepController(9, 5, applyStep);
             return {
                 enter() {
                     ctrl.enter();
                 },
                 exit() {
-                    resetScene('scene-8');
+                    resetScene('scene-9');
                     resetThreads();
                     resetLocks();
                     resetDbState();
@@ -1541,173 +1699,109 @@
             };
         })(),
 
-        // Scene 9: find_first_open_window() (step controls + DB tables)
-        8: (() => {
-            function applyStep(step) {
-                const sql = document.getElementById('skip-sql-9');
-                const cases = ['skip-case-1', 'skip-case-2', 'skip-case-2b', 'skip-case-3'];
-                const allSteps = ['skip-s1a','skip-s1b','skip-s2a','skip-s2b','skip-s2c','skip-s3a','skip-s3b'];
-                const result = document.getElementById('skip-result-9');
-
-                sql.classList.remove('visible');
-                cases.forEach(id => { const el = document.getElementById(id); el.classList.remove('visible'); el.style.display = 'none'; });
-                allSteps.forEach(id => document.getElementById(id).classList.remove('visible'));
-                result.classList.remove('visible');
-
-                resetDbState();
-
-                // Step 0: Show SQL query + Case 1 DB state (continuation from Scene 8)
-                dbState.windowCounter = [
-                    { windowStart: '12:00:00', slotCount: 100, status: 'CLOSED', cssClass: 'row-full' },
-                    { windowStart: '12:00:04', slotCount: 100, status: 'CLOSED', cssClass: 'row-full' },
-                    { windowStart: '12:00:08', slotCount: 42, status: 'OPEN', cssClass: '' }
-                ];
-                dbState.label = 'Continuing from Scene 8: Phase 1 failed (window 12:00:00 was FULL). Phase 2 begins.';
-                dbState.sqlHint = 'SELECT MIN(window_start) WHERE status = \'OPEN\' AND window_start > start_ts';
-
-                if (step >= 0) {
-                    sql.classList.add('visible');
-                }
-                if (step >= 1) {
-                    // Case 1: OPEN row found
-                    document.getElementById('skip-case-1').style.display = '';
-                    document.getElementById('skip-case-1').classList.add('visible');
-                    ['skip-s1a','skip-s1b'].forEach(id => document.getElementById(id).classList.add('visible'));
-                    dbState.windowCounter[2].cssClass = 'row-highlight';
-                    dbState.label = 'Case 1: OPEN row found at 12:00:08 \u2014 skip 2 CLOSED windows instantly!';
-                    dbState.sqlHint = 'MIN(window_start) WHERE status=\'OPEN\' \u2192 12:00:08';
-                }
-                if (step >= 2) {
-                    // Case 2: No OPEN, but rows exist
-                    document.getElementById('skip-case-2').style.display = '';
-                    document.getElementById('skip-case-2').classList.add('visible');
-                    ['skip-s2a','skip-s2b'].forEach(id => document.getElementById(id).classList.add('visible'));
-                    dbState.windowCounter = [
-                        { windowStart: '12:00:00', slotCount: 100, status: 'CLOSED', cssClass: 'row-full' },
-                        { windowStart: '12:00:04', slotCount: 100, status: 'CLOSED', cssClass: 'row-full' },
-                        { windowStart: '12:00:08', slotCount: 100, status: 'CLOSED', cssClass: 'row-full' }
-                    ];
-                    dbState.label = 'Case 2: All windows are CLOSED. Fallback to MAX(window_start).';
-                    dbState.sqlHint = 'open_ts IS NULL \u2192 SELECT MAX(window_start) INTO max_ts';
-                }
-                if (step >= 3) {
-                    // Case 2 continued: show DB state for this scenario
-                    document.getElementById('skip-case-2b').style.display = '';
-                    document.getElementById('skip-case-2b').classList.add('visible');
-                    document.getElementById('skip-s2c').classList.add('visible');
-                    dbState.windowCounter = [
-                        { windowStart: '12:00:00', slotCount: 100, status: 'CLOSED', cssClass: 'row-full' },
-                        { windowStart: '12:00:04', slotCount: 100, status: 'CLOSED', cssClass: 'row-full' },
-                        { windowStart: '12:00:08', slotCount: 100, status: 'CLOSED', cssClass: 'row-full' }
-                    ];
-                    dbState.label = 'Case 2: max_ts = 12:00:08. Return 12:00:08 + 4s = 12:00:12 (jump past all counter rows).';
-                    dbState.sqlHint = 'RETURN max_ts + window_size \u2192 12:00:12';
-
-                    // Case 3: No rows at all
-                    document.getElementById('skip-case-3').style.display = '';
-                    document.getElementById('skip-case-3').classList.add('visible');
-                    ['skip-s3a','skip-s3b'].forEach(id => document.getElementById(id).classList.add('visible'));
-                }
-                if (step >= 4) {
-                    // Final: searchLimit result + back to our 3-thread example
-                    result.classList.add('visible');
-                    dbState.windowCounter = [
-                        { windowStart: '12:00:00', slotCount: 100, status: 'CLOSED', cssClass: 'row-full' },
-                        { windowStart: '12:00:04', slotCount: 0, status: 'OPEN', cssClass: 'row-highlight' },
-                        { windowStart: '12:00:08', slotCount: 0, status: 'OPEN', cssClass: '' },
-                        { windowStart: '12:00:12', slotCount: 0, status: 'OPEN', cssClass: '' }
-                    ];
-                    dbState.label = 'Our example: T1\u219212:00:04, T2\u219212:00:08, T3\u219212:00:12. Each thread proceeds to claim_slot_in_window().';
-                    dbState.sqlHint = 'search_limit := first_open_window + headroom';
-                }
-                renderDbTables(9);
-            }
-            const ctrl = makeStepController(9, 5, applyStep);
-            return {
-                enter() { ctrl.enter(); },
-                exit() {
-                    resetScene('scene-9');
-                    ['skip-case-1','skip-case-2','skip-case-2b','skip-case-3'].forEach(id => {
-                        document.getElementById(id).style.display = 'none';
-                    });
-                    resetDbState();
-                    ctrl.reset();
-                }
-            };
-        })(),
-
-        // Scene 10: Claim Slot with Jitter (step controls + DB tables)
+        // Scene 10: Claim Slot with Jitter (step controls + DB tables) — 3 threads
         9: (() => {
-            let reelInterval = null;
-            let reelDone = false;
+            let reelIntervals = [];
+            const reelIds = ['jitter-reel-t1', 'jitter-reel-t2', 'jitter-reel-t3'];
+            const jitterBoxIds = ['jitter-box-t1', 'jitter-box-t2', 'jitter-box-t3'];
+            const schedIds = ['sched-calc-t1', 'sched-calc-t2', 'sched-calc-t3'];
+            const insertIds = ['insert-t1', 'insert-t2', 'insert-t3'];
+            const updateIds = ['update-t1', 'update-t2', 'update-t3'];
+            const counterIds = ['counter-val-t1', 'counter-val-t2', 'counter-val-t3'];
+            const jitterValues = ['2371', '1142', '2817'];
+            const jitterColors = ['#4a9eff', '#f39c12', '#2ecc71'];
 
-            function clearReel() {
-                if (reelInterval) { clearInterval(reelInterval); reelInterval = null; }
-                const reel = document.getElementById('jitter-reel-10');
-                reel.textContent = '0000';
-                reel.style.color = '';
-                reelDone = false;
+            function clearReels() {
+                reelIntervals.forEach(iv => clearInterval(iv));
+                reelIntervals = [];
+                reelIds.forEach(id => {
+                    const reel = document.getElementById(id);
+                    reel.textContent = '0000';
+                    reel.style.color = '';
+                });
             }
 
             function applyStep(step) {
-                clearReel();
-                const jitterBox = document.getElementById('jitter-box-10');
-                const schedCalc = document.getElementById('sched-calc-10');
-                const insertRow = document.getElementById('insert-row-10');
-                const updateCounter = document.getElementById('update-counter-10');
-                const counterVal = document.getElementById('counter-val-10');
+                clearReels();
+                const appNote = document.getElementById('app-server-note-10');
+                appNote.style.opacity = '0';
 
-                jitterBox.classList.remove('visible');
-                schedCalc.classList.remove('visible');
-                insertRow.classList.remove('visible');
-                updateCounter.classList.remove('visible');
-                counterVal.textContent = '0';
-                counterVal.classList.remove('flipping');
+                jitterBoxIds.forEach(id => document.getElementById(id).classList.remove('visible'));
+                schedIds.forEach(id => document.getElementById(id).classList.remove('visible'));
+                insertIds.forEach(id => document.getElementById(id).classList.remove('visible'));
+                updateIds.forEach(id => document.getElementById(id).classList.remove('visible'));
+                counterIds.forEach(id => {
+                    const el = document.getElementById(id);
+                    el.textContent = '0';
+                    el.classList.remove('flipping');
+                });
+                document.getElementById('insert-row-10').style.opacity = '0';
+                document.getElementById('update-row-10').style.opacity = '0';
+                document.getElementById('sched-row-10').style.opacity = '0';
+                document.getElementById('jitter-row-10').style.opacity = '0';
 
-                // Carry over from scene 8/9: T1 has 12:00:04, T2 has 12:00:08, T3 has 12:00:12
+                // Carry over from scenes 8/9
                 resetDbState();
                 dbState.windowCounter = [
                     { windowStart: '12:00:00', slotCount: 100, status: 'CLOSED', cssClass: 'row-full' },
                     { windowStart: '12:00:04', slotCount: 0, status: 'OPEN', cssClass: 'row-locked' },
-                    { windowStart: '12:00:08', slotCount: 0, status: 'OPEN', cssClass: '' },
-                    { windowStart: '12:00:12', slotCount: 0, status: 'OPEN', cssClass: '' }
+                    { windowStart: '12:00:08', slotCount: 0, status: 'OPEN', cssClass: 'row-locked' },
+                    { windowStart: '12:00:12', slotCount: 0, status: 'OPEN', cssClass: 'row-locked' }
                 ];
-                dbState.label = 'claim_slot_in_window() \u2014 Showing T1 claiming in window 12:00:04 (T2\u219212:00:08, T3\u219212:00:12 do the same in parallel)';
+                dbState.label = 'claim_slot_in_window() \u2014 All 3 threads compute jitter in parallel on the app server';
 
                 if (step >= 0) {
-                    jitterBox.classList.add('visible');
-                    const reel = document.getElementById('jitter-reel-10');
-                    reelInterval = setInterval(() => {
-                        reel.textContent = String(Math.floor(Math.random() * 4000)).padStart(4, '0');
-                    }, 50);
-                    dbState.sqlHint = 'Jitter pre-computed in Kotlin: ThreadLocalRandom.nextLong(0, 4000)';
+                    // Show app server note + 3 spinning jitter reels
+                    appNote.style.opacity = '1';
+                    document.getElementById('jitter-row-10').style.opacity = '1';
+                    jitterBoxIds.forEach(id => document.getElementById(id).classList.add('visible'));
+                    reelIds.forEach(id => {
+                        const reel = document.getElementById(id);
+                        reelIntervals.push(setInterval(() => {
+                            reel.textContent = String(Math.floor(Math.random() * 4000)).padStart(4, '0');
+                        }, 50));
+                    });
+                    dbState.sqlHint = 'Jitter pre-computed in Kotlin for each thread';
                 }
                 if (step >= 1) {
-                    clearReel();
-                    jitterBox.classList.add('visible');
-                    const reel = document.getElementById('jitter-reel-10');
-                    reel.textContent = '2371';
-                    reel.style.color = 'var(--success)';
-                    reelDone = true;
-                    schedCalc.classList.add('visible');
-                    dbState.label = 'T1: jitter = 2371ms. scheduledTime = 12:00:04.000 + 2.371s = 12:00:06.371';
+                    // All 3 reels land on their values + show schedule calculations
+                    clearReels();
+                    document.getElementById('jitter-row-10').style.opacity = '1';
+                    jitterBoxIds.forEach(id => document.getElementById(id).classList.add('visible'));
+                    reelIds.forEach((id, i) => {
+                        const reel = document.getElementById(id);
+                        reel.textContent = jitterValues[i];
+                        reel.style.color = jitterColors[i];
+                    });
+                    document.getElementById('sched-row-10').style.opacity = '1';
+                    schedIds.forEach(id => document.getElementById(id).classList.add('visible'));
+                    dbState.label = 'All 3 jitters computed: T1=2371ms, T2=1142ms, T3=2817ms. scheduledTime = windowStart + jitter.';
                     dbState.sqlHint = 'scheduled_time := window_start + jitter/1000';
                 }
                 if (step >= 2) {
-                    insertRow.classList.add('visible');
+                    // Show all 3 INSERT cards
+                    document.getElementById('insert-row-10').style.opacity = '1';
+                    insertIds.forEach(id => document.getElementById(id).classList.add('visible'));
                     dbState.eventSlot = [
-                        { eventId: 'pay-456', windowStart: '12:00:04', scheduledTime: '12:00:06.371', cssClass: 'row-insert' }
+                        { eventId: 'pay-456', windowStart: '12:00:04', scheduledTime: '12:00:06.371', cssClass: 'row-insert' },
+                        { eventId: 'pay-789', windowStart: '12:00:08', scheduledTime: '12:00:09.142', cssClass: 'row-insert' },
+                        { eventId: 'pay-012', windowStart: '12:00:12', scheduledTime: '12:00:14.817', cssClass: 'row-insert' }
                     ];
-                    dbState.label = 'T1: INSERT into rate_limit_event_slot \u2014 new row for pay-456';
+                    dbState.label = 'All 3 threads INSERT into rate_limit_event_slot simultaneously.';
                     dbState.sqlHint = 'INSERT INTO rate_limit_event_slot (event_id, window_start, scheduled_time, config_id) ...';
                 }
                 if (step >= 3) {
-                    updateCounter.classList.add('visible');
-                    counterVal.classList.add('flipping');
-                    setTimeout(() => {
-                        counterVal.textContent = '1';
-                        setTimeout(() => counterVal.classList.remove('flipping'), 200);
-                    }, 200);
+                    // Show all 3 UPDATE counters flipping 0 -> 1
+                    document.getElementById('update-row-10').style.opacity = '1';
+                    updateIds.forEach(id => document.getElementById(id).classList.add('visible'));
+                    counterIds.forEach(id => {
+                        const el = document.getElementById(id);
+                        el.classList.add('flipping');
+                        setTimeout(() => {
+                            el.textContent = '1';
+                            setTimeout(() => el.classList.remove('flipping'), 200);
+                        }, 200);
+                    });
                     dbState.windowCounter = [
                         { windowStart: '12:00:00', slotCount: 100, status: 'CLOSED', cssClass: 'row-full' },
                         { windowStart: '12:00:04', slotCount: 1, status: 'OPEN', cssClass: 'row-update' },
@@ -1716,8 +1810,8 @@
                     ];
                     dbState.eventSlot = [
                         { eventId: 'pay-456', windowStart: '12:00:04', scheduledTime: '12:00:06.371', cssClass: '' },
-                        { eventId: 'pay-789', windowStart: '12:00:08', scheduledTime: '12:00:09.142', cssClass: 'row-insert' },
-                        { eventId: 'pay-012', windowStart: '12:00:12', scheduledTime: '12:00:14.817', cssClass: 'row-insert' }
+                        { eventId: 'pay-789', windowStart: '12:00:08', scheduledTime: '12:00:09.142', cssClass: '' },
+                        { eventId: 'pay-012', windowStart: '12:00:12', scheduledTime: '12:00:14.817', cssClass: '' }
                     ];
                     dbState.label = 'All 3 threads claimed! T1\u219212:00:06.371, T2\u219212:00:09.142, T3\u219212:00:14.817. STATUS_NEW = 1 for each.';
                     dbState.sqlHint = 'UPDATE slot_count + 1, status = CASE WHEN full THEN \'CLOSED\' ELSE \'OPEN\' END';
@@ -1731,11 +1825,12 @@
                     ctrl.enter();
                 },
                 exit() {
-                    clearReel();
+                    clearReels();
                     resetScene('scene-10');
-                    document.getElementById('jitter-box-10').classList.remove('visible');
-                    document.getElementById('sched-calc-10').classList.remove('visible');
-                    document.getElementById('counter-val-10').textContent = '0';
+                    document.getElementById('app-server-note-10').style.opacity = '0';
+                    jitterBoxIds.forEach(id => document.getElementById(id).classList.remove('visible'));
+                    schedIds.forEach(id => document.getElementById(id).classList.remove('visible'));
+                    counterIds.forEach(id => document.getElementById(id).textContent = '0');
                     resetDbState();
                     ctrl.reset();
                 }
