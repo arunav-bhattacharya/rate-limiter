@@ -83,7 +83,9 @@ Response:
                 |                               |
                 |  1. Load config (cached)      |
                 |  2. Single PL/SQL round trip:  |
-                |     idempotency + window walk  |
+                |     idempotency check          |
+                |     + proportional first window|
+                |     + skip to OPEN window      |
                 |     + lock + insert + jitter   |
                 +-------------------------------+
                                 |
@@ -162,12 +164,13 @@ Assigns a rate-limited time slot for the given event. Idempotent: calling with t
 Time is divided into fixed-size windows (default: 4 seconds). Each window has a maximum
 capacity (default: 100 events). When an event requests execution at time T:
 
-1. **Snap** T to the nearest window boundary: `windowStart = T - (T % windowSize)`
-2. **Lock** the window counter row with `SELECT FOR UPDATE NOWAIT`
-3. **Check** if `slot_count < max_per_window`
-4. **If yes**: insert slot record, increment counter, compute `scheduled_time = windowStart + random(0, windowSize)`
-5. **If no (full)** or **contended (NOWAIT bounce)**: advance to the next window and repeat
-6. **Return** the `AssignedSlot` with `scheduledTime` and `delay`
+1. **Snap** T to the epoch-aligned window boundary (floor): `windowStart = T - (T % windowSize)`
+2. **Proportional capacity**: if T is mid-window, the first window's effective max = `floor(maxPerWindow * remainingTime / windowSize)`. Jitter is constrained to `[elapsedMs, windowSizeMs)` so `scheduledTime >= T`. Subsequent windows use full `maxPerWindow`.
+3. **Lock** the window counter row with `SELECT FOR UPDATE NOWAIT`
+4. **Check** if `slot_count < effective_max`
+5. **If yes**: insert slot record, increment counter, set status to `CLOSED` if full, compute `scheduled_time = windowStart + jitter`
+6. **If no (full)** or **contended (NOWAIT bounce)**: skip to the first `OPEN` window via indexed query, then walk from there
+7. **Return** the `AssignedSlot` with `scheduledTime` and `delay`
 
 ### Single Round-Trip PL/SQL Block
 
@@ -175,26 +178,60 @@ The entire slot assignment — idempotency check, window walk loop, lock acquisi
 slot insertion, and counter update — executes as a **single anonymous PL/SQL block**
 in one JDBC round trip. This minimizes network latency and lock hold time.
 
-The PL/SQL block contains three local functions:
+The PL/SQL block contains four local functions:
 - `check_existing_slot`: Idempotency pre-check (SELECT by event_id)
-- `try_lock_window`: Ensure counter row + SELECT FOR UPDATE NOWAIT
-- `claim_slot_in_window`: INSERT slot + UPDATE counter, with ORA-00001 handling
+- `try_lock_window`: Ensure counter row (with `status = 'OPEN'`) + SELECT FOR UPDATE NOWAIT
+- `claim_slot_in_window`: INSERT slot + UPDATE counter with atomic status transition (OPEN → CLOSED when full), with ORA-00001 handling. Receives pre-computed jitter as parameter.
+- `find_first_open_window`: Skip query using composite index `(status, window_start)` to jump past full windows in O(log N)
+
+The main block uses a two-phase approach:
+- **Phase 1**: Try the first (floor-aligned) window with proportional capacity and constrained jitter
+- **Phase 2**: If Phase 1 fails, skip to the first OPEN window via indexed query, compute a dynamic per-request search limit (`skipTarget + headroom`), then walk sequentially
 
 Threads that lose the lock race (`NOWAIT` bounce) skip to the next window inside
 the PL/SQL loop — zero additional network hops for window skipping.
 
 ### Random Jitter
 
-All offsets within a window use uniformly random jitter via Oracle's `DBMS_RANDOM`:
+Jitter is pre-computed in Kotlin using `ThreadLocalRandom` and passed to the PL/SQL block
+as IN parameters. Two jitter values are computed per call:
 
-```
-jitter_ms  = TRUNC(DBMS_RANDOM.VALUE(0, windowSizeMs))
-scheduled_time = windowStart + jitter_ms/1000 seconds
+```kotlin
+// First window (partial): constrain jitter so scheduledTime >= requestedTime
+firstJitterMs = ThreadLocalRandom.nextLong(elapsedMs, windowSizeMs)
+
+// Subsequent windows (full): jitter spans entire window
+fullJitterMs  = ThreadLocalRandom.nextLong(0, windowSizeMs)
+
+// PL/SQL uses the appropriate one: scheduled_time = windowStart + jitterMs/1000 seconds
 ```
 
 Random jitter is used exclusively because when `max_per_window` is increased dynamically,
 new events must not cluster on deterministic grid points left by previously assigned events.
 At high volumes (100+ per window), random distribution is practically uniform.
+
+### Window Status & Skip Query
+
+The `rate_limit_window_counter` table includes a `status` column (`OPEN` or `CLOSED`)
+with a composite index `(status, window_start)`. This enables O(log N) skip queries:
+
+```sql
+SELECT MIN(window_start) FROM rate_limit_window_counter
+WHERE status = 'OPEN' AND window_start > ?
+```
+
+When `claim_slot_in_window` increments `slot_count`, it atomically transitions `status`
+to `CLOSED` if the new count reaches `max_per_window`:
+
+```sql
+UPDATE rate_limit_window_counter
+SET slot_count = slot_count + 1,
+    status = CASE WHEN slot_count + 1 >= max_per_window THEN 'CLOSED' ELSE 'OPEN' END
+WHERE window_start = ?
+```
+
+This eliminates the need to walk through hundreds of full windows sequentially — the
+skip query jumps directly to the first available window.
 
 ### Config-Agnostic Counters
 
@@ -238,19 +275,18 @@ sequenceDiagram
     end
     Cache-->>SAS: RateLimitConfig
 
-    Note over SAS: Step 2 — Compute search range
-    SAS->>SAS: windowStart = align(requestedTime)<br/>searchLimit = max(frontier, windowStart) + headroom
+    Note over SAS: Step 2 — Compute search params + jitter
+    SAS->>SAS: windowStart = align(requestedTime)<br/>effectiveMax = proportional capacity<br/>firstJitterMs, fullJitterMs = ThreadLocalRandom<br/>headroomSecs = headroomWindows × windowSizeSecs
 
     Note over SAS: Step 3 — Single PL/SQL round trip
-    SAS->>DB: CallableStatement: anonymous PL/SQL block<br/>(8 IN params, 5 OUT params)
+    SAS->>DB: CallableStatement: anonymous PL/SQL block<br/>(10 IN params, 5 OUT params)
 
-    Note over DB: PL/SQL block executes server-side:<br/>1. Idempotency pre-check (SELECT by event_id)<br/>2. Window walk loop:<br/>   - try_lock_window (INSERT counter + SELECT FOR UPDATE NOWAIT)<br/>   - Skip on ORA-00054/ORA-00060 (contended)<br/>   - Skip if slot_count >= max_per_window (full)<br/>   - claim_slot_in_window (INSERT slot + UPDATE counter)<br/>   - DBMS_RANDOM jitter per window<br/>3. Marshal results to OUT params
+    Note over DB: PL/SQL block executes server-side:<br/>1. Idempotency pre-check (check_existing_slot)<br/>2. Phase 1: Try first window with pre-computed effectiveMax<br/>   - Uses firstJitterMs (constrained by Kotlin)<br/>3. Phase 2 (if Phase 1 fails):<br/>   - find_first_open_window (indexed skip query)<br/>   - searchLimit = skipTarget + headroomSecs<br/>   - Walk loop with try_lock_window + claim_slot_in_window<br/>   - Uses fullJitterMs<br/>4. Marshal results to OUT params
 
     DB-->>SAS: ou_status, ou_slot_id, ou_scheduled_time,<br/>ou_window_start, ou_windows_searched
 
     Note over SAS: Step 4 — Interpret result (pure Kotlin)
     alt status = NEW (slot assigned)
-        SAS->>SAS: update furthestAssignedWindow atomically
         SAS-->>Caller: return AssignedSlot
     else status = EXISTING (idempotent hit)
         SAS-->>Caller: return AssignedSlot (same slot)
@@ -266,17 +302,28 @@ flowchart TD
     A([assignSlot called]) --> D[Load RateLimitConfig<br/>from cache or DB]
     D --> E{Config found?}
     E -- No --> F([Throw ConfigLoadException])
-    E -- Yes --> G["Compute search range<br/>windowStart = align(requestedTime)<br/>searchLimit = max(frontier, windowStart) + headroom"]
+    E -- Yes --> G["Compute search params + jitter<br/>windowStart = align(requestedTime)<br/>effectiveMax, firstJitterMs, fullJitterMs<br/>headroomSecs = headroomWindows × windowSizeSecs"]
 
     G --> PL["<b>Execute PL/SQL block</b><br/>(single JDBC round trip)"]
 
     subgraph PLSQL ["PL/SQL Block (server-side)"]
         B{check_existing_slot#colon;<br/>event_id already exists?}
         B -- Yes --> C2[/"ou_status = EXISTING"/]
-        B -- No --> H{current_window<br/>> search_limit?}
+
+        B -- No --> P1["Phase 1: Try first window<br/>effectiveMax = maxPerWindow × remainingMs / windowSizeMs<br/>try_lock_window(windowStart)"]
+        P1 --> P1C{slot_count < effectiveMax<br/>and lock acquired?}
+        P1C -- Yes --> P1Q["claim_slot_in_window(firstWindow, firstJitterMs)<br/>jitter pre-computed in Kotlin"]
+        P1Q --> P1S{DUP_VAL_ON_INDEX?}
+        P1S -- Yes --> T[/"Idempotency race<br/>ou_status = EXISTING"/]
+        P1S -- No --> U[/"ou_status = NEW"/]
+
+        P1C -- No --> SKIP["find_first_open_window(windowStart)<br/>SELECT MIN(window_start)<br/>WHERE status = 'OPEN'"]
+
+        SKIP --> SL["searchLimit = skipTarget + headroomSecs"]
+        SL --> H{current_window<br/>> search_limit?}
         H -- Yes --> I2[/"ou_status = EXHAUSTED"/]
 
-        H -- No --> J["try_lock_window:<br/>INSERT counter row (catch DUP_VAL_ON_INDEX)<br/>SELECT slot_count FOR UPDATE NOWAIT"]
+        H -- No --> J["try_lock_window:<br/>INSERT counter row (status='OPEN')<br/>SELECT slot_count FOR UPDATE NOWAIT"]
         J --> L{ORA-00054 /<br/>ORA-00060?}
 
         L -- Yes --> M[/"Contended — skip"/]
@@ -287,11 +334,11 @@ flowchart TD
         O -- Yes --> P[/"Full — skip"/]
         P --> N
 
-        O -- No --> Q["claim_slot_in_window:<br/>jitter = DBMS_RANDOM.VALUE(0, windowSizeMs)<br/>INSERT slot + UPDATE counter"]
-        Q --> S{DUP_VAL_ON_INDEX<br/>on event_id?}
+        O -- No --> Q["claim_slot_in_window(window, fullJitterMs)<br/>INSERT slot + UPDATE counter + status"]
+        Q --> S{DUP_VAL_ON_INDEX?}
 
-        S -- Yes --> T[/"Idempotency race<br/>ou_status = EXISTING"/]
-        S -- No --> U[/"ou_status = NEW"/]
+        S -- Yes --> T
+        S -- No --> U
     end
 
     PL --> B
@@ -303,8 +350,7 @@ flowchart TD
     RET["Marshal OUT params:<br/>status, slot_id, scheduled_time,<br/>window_start, windows_searched"]
 
     RET --> INT{Interpret status}
-    INT -- NEW --> X["Update furthestAssignedWindow<br/>atomically"]
-    X --> Y([Return new AssignedSlot])
+    INT -- NEW --> Y([Return new AssignedSlot])
     INT -- EXISTING --> C([Return existing AssignedSlot])
     INT -- EXHAUSTED --> I([Throw SlotAssignmentException])
 
@@ -317,6 +363,7 @@ flowchart TD
     style P fill:#f39c12,color:#fff
     style T fill:#e67e22,color:#fff
     style PL fill:#3498db,color:#fff
+    style SKIP fill:#9b59b6,color:#fff
 ```
 
 ## Configuration Reference
@@ -326,7 +373,7 @@ All properties are set in `src/main/resources/application.yaml`:
 | Property | Description | Default |
 |---|---|---|
 | `rate-limiter.default-config-name` | Name of the default rate limit config | `default` |
-| `rate-limiter.headroom-windows` | How many windows beyond the frontier to search | `100` |
+| `rate-limiter.headroom-windows` | How many windows beyond the skip target to search | `100` |
 | `quarkus.datasource.db-kind` | Database type | `oracle` |
 | `quarkus.datasource.jdbc.url` | Oracle JDBC URL | `jdbc:oracle:thin:@localhost:1521/ORCLPDB1` |
 | `quarkus.datasource.username` | Oracle username | `rate_limiter` |
@@ -416,7 +463,6 @@ curl -X POST http://localhost:8080/admin/rate-limit/cache/flush
 - `INFO  SlotAssignmentService - Assigned slot for eventId={} in window={} after searching {} windows`
 - `DEBUG SlotAssignmentService - Idempotent hit for eventId={}`
 - `ERROR SlotAssignmentService - Could not assign slot for event {} after searching {} windows`
-- `INFO  SlotAssignmentService - Initialized furthestAssignedWindow from DB: {}`
 - `INFO  RateLimitConfigRepository - Config cache miss for {configName}, loaded from DB`
 
 ## Known Limitations
@@ -427,7 +473,8 @@ curl -X POST http://localhost:8080/admin/rate-limit/cache/flush
 
 2. **Lookahead exhaustion**: If a single burst exceeds `headroom-windows * maxPerWindow`
    events (default: 100 * 100 = 10,000), slot assignment fails for remaining events.
-   The dynamic lookahead grows with load, so this is only a concern for sudden massive spikes.
+   The skip query jumps past full windows efficiently, but the headroom still limits
+   how far ahead the system searches from the first available window.
 
 3. **Config propagation delay**: Config changes take up to 5 seconds (cache TTL) to
    propagate to all nodes. Use the cache flush endpoint for immediate propagation.

@@ -20,6 +20,7 @@ object RateLimitConfigTable : Table("rate_limit_config") {
 object WindowCounterTable : Table("rate_limit_window_counter") {
     val windowStart = timestamp("window_start")
     val slotCount = integer("slot_count")
+    val status = varchar("status", 10)
 
     override val primaryKey = PrimaryKey(windowStart)
 }

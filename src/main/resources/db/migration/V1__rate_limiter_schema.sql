@@ -87,8 +87,18 @@ CREATE TABLE rate_limit_window_counter (
     -- is never inflated by failed idempotency-race inserts.
     slot_count   NUMBER(10) DEFAULT 0 NOT NULL,
 
+    -- Denormalized availability flag. OPEN = window has capacity, CLOSED = full.
+    -- Set atomically with slot_count increment: when slot_count reaches
+    -- max_per_window, status flips to CLOSED. Enables a fast indexed skip query
+    -- to find the first available window without scanning full windows.
+    status       VARCHAR2(10) DEFAULT 'OPEN' NOT NULL,
+
     CONSTRAINT pk_window_counter PRIMARY KEY (window_start)
 );
+
+-- Composite index for the skip query: find first OPEN window after a given timestamp.
+-- Used by find_first_open_window() in the PL/SQL block.
+CREATE INDEX idx_window_status_start ON rate_limit_window_counter(status, window_start);
 
 -- ============================================================================
 -- TABLE: rate_limit_event_slot

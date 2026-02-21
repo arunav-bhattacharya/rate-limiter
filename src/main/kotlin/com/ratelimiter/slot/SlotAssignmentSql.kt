@@ -12,29 +12,39 @@ internal object SlotAssignmentSql {
 
     /**
      * Anonymous PL/SQL block that performs the entire slot assignment in a single
-     * database round trip. Contains three local functions:
+     * database round trip. Contains four local functions:
      *
      * - check_existing_slot: Idempotency pre-check (SELECT by event_id)
      * - try_lock_window: Ensure counter row + SELECT FOR UPDATE NOWAIT
-     * - claim_slot_in_window: INSERT slot + UPDATE counter, with ORA-00001 handling
+     * - claim_slot_in_window: INSERT slot + UPDATE counter with status transition, with ORA-00001 handling
+     * - find_first_open_window: Skip query using status index to find first OPEN window
+     *
+     * The main block uses a two-phase approach:
+     *   Phase 1: Try the first (floor-aligned) window with pre-computed proportional capacity
+     *   Phase 2: Skip to first OPEN window via index scan, compute dynamic search limit, walk
+     *
+     * Jitter and proportional capacity are pre-computed in Kotlin and passed as IN params.
      *
      * Parameter positions:
-     *   IN:  1=event_id, 2=window_start, 3=search_limit, 4=requested_time,
-     *        5=config_id, 6=max_per_window, 7=window_size_secs, 8=window_size_ms
-     *   OUT: 9=status, 10=slot_id, 11=scheduled_time, 12=window_start_out,
-     *        13=windows_searched
+     *   IN:  1=event_id, 2=window_start, 3=requested_time, 4=config_id,
+     *        5=max_per_window, 6=window_size_secs, 7=effective_max,
+     *        8=first_jitter_ms, 9=full_jitter_ms, 10=headroom_secs
+     *   OUT: 11=status, 12=slot_id, 13=scheduled_time, 14=window_start_out,
+     *        15=windows_searched
      */
     val ASSIGN_SLOT_PLSQL = """
         DECLARE
             -- IN bind variables
             in_event_id         VARCHAR2(256) := ?;  /* 1  */
             in_window_start     TIMESTAMP     := ?;  /* 2  */
-            in_search_limit     TIMESTAMP     := ?;  /* 3  */
-            in_requested_time   TIMESTAMP     := ?;  /* 4  */
-            in_config_id        NUMBER        := ?;  /* 5  */
-            in_max_per_window   NUMBER        := ?;  /* 6  */
-            in_window_size_secs NUMBER        := ?;  /* 7  */
-            in_window_size_ms   NUMBER        := ?;  /* 8  */
+            in_requested_time   TIMESTAMP     := ?;  /* 3  */
+            in_config_id        NUMBER        := ?;  /* 4  */
+            in_max_per_window   NUMBER        := ?;  /* 5  */
+            in_window_size_secs NUMBER        := ?;  /* 6  */
+            in_effective_max    NUMBER        := ?;  /* 7  */
+            in_first_jitter_ms  NUMBER        := ?;  /* 8  */
+            in_full_jitter_ms   NUMBER        := ?;  /* 9  */
+            in_headroom_secs    NUMBER        := ?;  /* 10 */
 
             -- Output result locals (marshalled to OUT bind vars at end)
             ou_status           NUMBER := -1;  -- default: EXHAUSTED
@@ -46,10 +56,10 @@ internal object SlotAssignmentSql {
             -- Working state
             current_window   TIMESTAMP;
             current_count    NUMBER;
-            jitter_ms        NUMBER;
-            sched_time       TIMESTAMP;
             windows_searched NUMBER := 0;
             slot_claimed     BOOLEAN := FALSE;
+            skip_target      TIMESTAMP;
+            search_limit     TIMESTAMP;
 
             STATUS_NEW       CONSTANT NUMBER := 1;
             STATUS_EXISTING  CONSTANT NUMBER := 0;
@@ -58,20 +68,14 @@ internal object SlotAssignmentSql {
             ---------------------------------------------------------------
             -- check_existing_slot: Idempotency pre-check.
             -- Returns TRUE if event already has a slot (populates ou_ locals).
-            --
-            -- Scenario: Caller sends event_id = 'pay-123' for the second time.
-            -- The first call already inserted a slot (scheduled_time = 12:00:02.371).
-            -- This SELECT finds that row and returns it immediately — no locking,
-            -- no window walk. The caller gets back the exact same AssignedSlot.
-            -- If event_id has never been seen, NO_DATA_FOUND falls through to
-            -- the window walk loop below.            
             ---------------------------------------------------------------
+
             FUNCTION check_existing_slot RETURN BOOLEAN IS
             BEGIN
-                SELECT slot_id, scheduled_time, window_start
-                INTO ou_slot_id, ou_scheduled_time, ou_window_start
-                FROM rate_limit_event_slot
-                WHERE event_id = in_event_id;
+                SELECT  slot_id, scheduled_time, window_start
+                INTO    ou_slot_id, ou_scheduled_time, ou_window_start
+                FROM    rate_limit_event_slot
+                WHERE   event_id = in_event_id;
                 ou_status           := STATUS_EXISTING;
                 ou_windows_searched := 0;
                 RETURN TRUE;
@@ -82,28 +86,15 @@ internal object SlotAssignmentSql {
             ---------------------------------------------------------------
             -- try_lock_window: Ensure counter row exists, then lock + read.
             -- Returns slot_count on success, -1 if contended/deadlocked.
-            --
-            -- Scenario: Threads T1 and T2 both target window 12:00:00.
-            --
-            -- Step 1 — Ensure the counter row exists. T1 arrives first and
-            -- INSERTs (window_start=12:00:00, slot_count=0). T2 arrives and
-            -- hits DUP_VAL_ON_INDEX, which is silently ignored.
-            --
-            -- Step 2 — Acquire an exclusive row lock without waiting.
-            -- T1's SELECT FOR UPDATE NOWAIT succeeds and returns slot_count=0.
-            -- T2's SELECT FOR UPDATE NOWAIT hits ORA-00054 (resource busy)
-            -- because T1 holds the lock. T2 returns -1, and the caller skips
-            -- to the next window (12:00:04) instead of blocking.
-            --
-            -- This is the key to concurrency: NOWAIT means threads never queue
-            -- behind each other — they scatter across windows naturally.            
+            -- Creates new rows with status = 'OPEN'.
             ---------------------------------------------------------------
+
             FUNCTION try_lock_window(window_ts IN TIMESTAMP) RETURN NUMBER IS
                 locked_count NUMBER;
             BEGIN
                 BEGIN
-                    INSERT INTO rate_limit_window_counter(window_start, slot_count)
-                    VALUES (window_ts, 0);
+                    INSERT INTO rate_limit_window_counter(window_start, slot_count, status)
+                    VALUES (window_ts, 0, 'OPEN');
                 EXCEPTION WHEN DUP_VAL_ON_INDEX THEN NULL;
                 END;
 
@@ -115,43 +106,26 @@ internal object SlotAssignmentSql {
                 RETURN locked_count;
             EXCEPTION
                 WHEN OTHERS THEN
-                    -- If the error is ORA-00054 (resource busy) or ORA-00060 (deadlock), 
-                    -- it means another thread holds the lock on this window. 
-                    -- Return -1 to indicate contention and skip this window.
                     IF SQLCODE IN (-54, -60) THEN
                         RETURN -1;
                     END IF;
-                    -- Propagate other unexpected exceptions to the caller
                     RAISE;
             END try_lock_window;
 
             ---------------------------------------------------------------
             -- claim_slot_in_window: Insert slot + increment counter.
-            -- Handles idempotency race (ORA-00001). Returns TRUE on success.
-            --
-            -- Scenario: T1 locked window 12:00:00 with slot_count=50 (max=100).
-            --
-            -- 1. Jitter: DBMS_RANDOM picks 2371 from [0, 4000) → scheduled_time
-            --    becomes 12:00:00 + 2.371s = 12:00:02.371.
-            -- 2. INSERT the slot row for event_id='pay-456'. The RETURNING clause
-            --    captures the generated slot_id and the jittered scheduled_time.
-            -- 3. UPDATE the counter: slot_count goes from 50 → 51.
-            -- 4. Return NEW — the caller exits the window walk loop.
-            --
-            -- Race condition: If T3 concurrently tries to insert the same
-            -- event_id='pay-456' (e.g. a duplicate request that passed the
-            -- check_existing_slot pre-check before T1 committed), the UNIQUE
-            -- constraint on event_id fires ORA-00001 (DUP_VAL_ON_INDEX).
-            -- The exception handler re-SELECTs the row T1 inserted and returns
-            -- EXISTING — the caller sees the same slot, no duplicate is created.            
+            -- Atomically sets status to CLOSED when slot_count reaches max.
+            -- Jitter is pre-computed in Kotlin and passed as p_jitter_ms.
             ---------------------------------------------------------------
+
             FUNCTION claim_slot_in_window(
-                window_ts  IN TIMESTAMP,
-                slot_count IN NUMBER
+                window_ts    IN TIMESTAMP,
+                slot_count   IN NUMBER,
+                p_jitter_ms  IN NUMBER
             ) RETURN BOOLEAN IS
+                sched_time TIMESTAMP;
             BEGIN
-                jitter_ms  := TRUNC(DBMS_RANDOM.VALUE(0, in_window_size_ms));
-                sched_time := window_ts + NUMTODSINTERVAL(jitter_ms / 1000, 'SECOND');
+                sched_time := window_ts + NUMTODSINTERVAL(p_jitter_ms / 1000, 'SECOND');
 
                 INSERT INTO rate_limit_event_slot(
                     event_id, requested_time, window_start,
@@ -162,8 +136,10 @@ internal object SlotAssignmentSql {
                 ) RETURNING slot_id, scheduled_time
                   INTO ou_slot_id, ou_scheduled_time;
 
+                -- Atomic: increment counter AND set CLOSED if full
                 UPDATE rate_limit_window_counter
-                SET slot_count = slot_count + 1
+                SET slot_count = slot_count + 1,
+                    status = CASE WHEN slot_count + 1 >= in_max_per_window THEN 'CLOSED' ELSE 'OPEN' END
                 WHERE window_start = window_ts;
 
                 ou_window_start     := window_ts;
@@ -182,29 +158,75 @@ internal object SlotAssignmentSql {
                     RETURN TRUE;
             END claim_slot_in_window;
 
+            ---------------------------------------------------------------
+            -- find_first_open_window: Skip query using status index.
+            -- Returns the first OPEN window after start_ts, or the first
+            -- empty (no counter row) window past the last counter row.
+            ---------------------------------------------------------------
+
+            FUNCTION find_first_open_window(start_ts IN TIMESTAMP) RETURN TIMESTAMP IS
+                open_ts TIMESTAMP;
+                max_ts  TIMESTAMP;
+            BEGIN
+                -- Single indexed query: find first OPEN window after start_ts
+                SELECT MIN(window_start) INTO open_ts
+                FROM rate_limit_window_counter
+                WHERE status = 'OPEN'
+                  AND window_start > start_ts;
+
+                IF open_ts IS NOT NULL THEN
+                    RETURN open_ts;
+                END IF;
+
+                -- No OPEN rows found. Jump past the last counter row.
+                SELECT MAX(window_start) INTO max_ts
+                FROM rate_limit_window_counter
+                WHERE window_start > start_ts;
+
+                IF max_ts IS NOT NULL THEN
+                    RETURN max_ts + NUMTODSINTERVAL(in_window_size_secs, 'SECOND');
+                ELSE
+                    -- Returning the next window after start_ts, as the first window was already checked in Phase 1
+                    RETURN start_ts + NUMTODSINTERVAL(in_window_size_secs, 'SECOND');
+                END IF;
+            END find_first_open_window;
+
+        ---------------------------------------------------------------
+        -- PROCEDURE BODY: Main slot assignment logic
         ---------------------------------------------------------------
         BEGIN
             -- 1. Idempotency pre-check
             IF NOT check_existing_slot() THEN
 
-                -- 2. Window walk loop
+                -- Phase 1: Try first window with pre-computed proportional capacity
                 current_window := in_window_start;
-                WHILE current_window <= in_search_limit AND NOT slot_claimed LOOP
-                    windows_searched := windows_searched + 1;
+                windows_searched := windows_searched + 1;
 
-                    -- count is -1 if try_lock_window failed, or >=0 if lock acquired
-                    current_count := try_lock_window(current_window);
+                current_count := try_lock_window(current_window);
+                IF current_count >= 0 AND current_count < in_effective_max THEN
+                    slot_claimed := claim_slot_in_window(current_window, current_count, in_first_jitter_ms);
+                END IF;
 
-                    IF current_count >= 0 AND current_count < in_max_per_window THEN
-                        slot_claimed := claim_slot_in_window(current_window, current_count);
-                    END IF;
+                -- Phase 2: Skip to first OPEN window, compute search limit, walk
+                IF NOT slot_claimed THEN
+                    skip_target  := find_first_open_window(in_window_start);
+                    search_limit := skip_target + NUMTODSINTERVAL(in_headroom_secs, 'SECOND');
+                    current_window := skip_target;
 
-                    -- search next window if slot not claimed
-                    IF NOT slot_claimed THEN
-                        current_window := current_window
-                            + NUMTODSINTERVAL(in_window_size_secs, 'SECOND');
-                    END IF;
-                END LOOP;
+                    WHILE current_window <= search_limit AND NOT slot_claimed LOOP
+                        windows_searched := windows_searched + 1;
+
+                        current_count := try_lock_window(current_window);
+                        IF current_count >= 0 AND current_count < in_max_per_window THEN
+                            slot_claimed := claim_slot_in_window(current_window, current_count, in_full_jitter_ms);
+                        END IF;
+
+                        IF NOT slot_claimed THEN
+                            current_window := current_window
+                                + NUMTODSINTERVAL(in_window_size_secs, 'SECOND');
+                        END IF;
+                    END LOOP;
+                END IF;
 
                 -- 3. If never claimed, status stays EXHAUSTED
                 IF NOT slot_claimed THEN
@@ -213,11 +235,11 @@ internal object SlotAssignmentSql {
             END IF;
 
             -- Marshal ou_ locals -> OUT bind variables (always reached)
-            ? := ou_status;            /* 9  */
-            ? := ou_slot_id;           /* 10 */
-            ? := ou_scheduled_time;    /* 11 */
-            ? := ou_window_start;      /* 12 */
-            ? := ou_windows_searched;  /* 13 */
+            ? := ou_status;            /* 11 */
+            ? := ou_slot_id;           /* 12 */
+            ? := ou_scheduled_time;    /* 13 */
+            ? := ou_window_start;      /* 14 */
+            ? := ou_windows_searched;  /* 15 */
         END;
     """.trimIndent()
 }

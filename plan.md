@@ -21,27 +21,37 @@ A bulk payments processing platform needs an Oracle-based rate limiter to enforc
 5. **5-second in-memory config cache** via `ConcurrentHashMap`
 6. **Random-only jitter** — uniform distribution within each window
 7. **INSERT + catch ORA-00001** for window counter row creation (not MERGE/insertIgnore) — INSERT is lighter than MERGE; conflict only on first event per window; Oracle detects duplicates at index level cheaply
-8. **Dynamic lookahead** — no fixed MAX_LOOKAHEAD; computed as `furthestAssignedWindow + headroom` (see below)
+8. **Dynamic per-request search limit** — no global frontier or fixed MAX_LOOKAHEAD; PL/SQL skip query finds first OPEN window, search limit = `skipTarget + headroom`
+9. **Window status column** (`OPEN`/`CLOSED`) on `rate_limit_window_counter` — enables O(log N) indexed skip queries via composite index `(status, window_start)`
+10. **Proportional first-window capacity** — when `requestedTime` falls mid-window, first window's effective max = `floor(maxPerWindow * remainingTime / windowSize)` with constrained jitter `[elapsedMs, windowSizeMs)`
 
-## Dynamic Lookahead
+## Dynamic Per-Request Search Limit
 
-Instead of a fixed `MAX_LOOKAHEAD`, the search limit is dynamically computed:
+Instead of a fixed `MAX_LOOKAHEAD` or a global frontier, the search limit is computed
+dynamically per request inside the PL/SQL block:
 
 ```
-searchLimit = max(furthestAssignedWindow, startingWindow) + headroom
+Phase 1: Try first window with proportional capacity
+  effectiveMax = floor(maxPerWindow * remainingMs / windowSizeMs)
+  jitter constrained to [elapsedMs, windowSizeMs) so scheduledTime >= requestedTime
+
+Phase 2 (if Phase 1 fails):
+  skipTarget   = find_first_open_window(windowStart)  -- O(log N) indexed query
+  searchLimit  = skipTarget + headroomSecs
+  Walk from skipTarget to searchLimit
 ```
 
-- **`furthestAssignedWindow`**: In-memory `AtomicReference<Instant>` tracking the furthest window that has been assigned a slot. Updated atomically on every successful assignment.
-- **`headroom`**: Fixed configurable value (default: 100 windows). How far past the frontier we search for empty windows.
-- **On startup**: Initialized from DB via `SELECT MAX(window_start) FROM rate_limit_window_counter WHERE slot_count > 0`.
+- **No global state**: No `AtomicReference`, no `@PostConstruct` initialization, no cross-request interference.
+- **`headroom`**: Fixed configurable value (default: 100 windows). How far past the skip target we search.
+- **Skip query**: Uses composite index `(status, window_start)` on `rate_limit_window_counter` to find the first `OPEN` window after the requested window in O(log N).
 
 **Behavior**:
-- First event: no windows exist -> limit = `startingWindow + 100 windows`. Event gets window 0.
-- After 5,000 windows filled: limit = `window 4,999 + 100 = window 5,099`. System grew organically.
-- No static ceiling that needs manual tuning. The frontier just advances as load increases.
-- Headroom prevents infinite search on sparse data — if 100 consecutive empty windows are found past the frontier, we stop.
+- First event: no windows exist → Phase 1 succeeds immediately.
+- After 5,000 windows filled: skip query jumps to first OPEN window, then searches `headroom` windows from there.
+- Events at different time horizons (e.g., near-term vs 1 year ahead) never interfere — each request computes its own search limit.
+- No static ceiling that needs manual tuning. The skip query adapts to the actual window occupancy.
 
-**Multi-node consistency**: Each node tracks its own `furthestAssignedWindow`. Node A may be at window 3,000 while Node B is at 3,500. Node A's limit is 3,100, Node B's is 3,600. This is safe — Node A simply has a tighter search range and may stop earlier. On the next DB query (startup or a future enhancement), nodes re-sync. The headroom provides buffer for inter-node skew.
+**Multi-node consistency**: No cross-node coordination needed. Each request independently queries the database for the first OPEN window. This is inherently consistent — all nodes see the same window status via the shared database.
 
 ## Capacity Planning for 500K Bulk Load
 
@@ -52,7 +62,7 @@ searchLimit = max(furthestAssignedWindow, startingWindow) + headroom
 | Ingestion duration | 5,000s (~83 min) | 500K / 100 TPS |
 | Windows needed | 5,000 | 500K / 100 per window |
 | Time spread | ~5.5 hours | 5,000 x 4s |
-| Dynamic lookahead | Grows from 100 to 5,100 | Frontier advances with each fill |
+| Per-request search | headroom = 100 windows | Skip query jumps past full windows |
 | DB ops/sec (hot path) | ~300 | 100 TPS x 3 ops (SELECT FOR UPDATE + UPDATE + INSERT) |
 | Lock hold time per tx | ~3-5ms | UPDATE counter + INSERT slot + commit |
 | Effective lock utilization | ~50% at 100 TPS | 100 x 5ms = 500ms/sec of lock hold |
@@ -74,7 +84,7 @@ searchLimit = max(furthestAssignedWindow, startingWindow) + headroom
 
 | # | File | Responsibility |
 |---|---|---|
-| 5 | `src/main/resources/db/migration/V1__rate_limiter_schema.sql` | Flyway DDL: 3 tables, indexes, constraints |
+| 5 | `src/main/resources/db/migration/V1__rate_limiter_schema.sql` | Flyway DDL: 3 tables (window_counter with status column + composite index), indexes, constraints |
 | 6 | `src/main/kotlin/com/ratelimiter/db/Tables.kt` | Exposed Table objects mirroring DDL exactly |
 | 7 | `src/main/kotlin/com/ratelimiter/db/ExposedDatabaseInitializer.kt` | CDI bean connecting Exposed to Quarkus Agroal DataSource |
 
@@ -96,7 +106,7 @@ searchLimit = max(furthestAssignedWindow, startingWindow) + headroom
 
 | # | File | Responsibility |
 |---|---|---|
-| 11 | `src/main/kotlin/com/ratelimiter/slot/SlotAssignmentService.kt` | Window walk, dynamic lookahead, FOR UPDATE NOWAIT, jitter, idempotency |
+| 11 | `src/main/kotlin/com/ratelimiter/slot/SlotAssignmentService.kt` | Two-phase slot assignment, proportional first-window, pre-computed jitter, FOR UPDATE NOWAIT, skip query, idempotency |
 
 ### REST API Layer (Phase 6)
 
@@ -119,7 +129,7 @@ searchLimit = max(furthestAssignedWindow, startingWindow) + headroom
 |---|---|---|
 | 17 | `src/test/kotlin/com/ratelimiter/OracleTestResource.kt` | Testcontainers Oracle XE lifecycle manager |
 | 18 | `src/test/kotlin/com/ratelimiter/RateLimitConfigRepositoryTest.kt` | Config insert/load/cache/deactivate tests |
-| 19 | `src/test/kotlin/com/ratelimiter/SlotAssignmentServiceTest.kt` | Idempotency, window walk, jitter bounds, dynamic lookahead |
+| 19 | `src/test/kotlin/com/ratelimiter/SlotAssignmentServiceTest.kt` | Idempotency, window walk, jitter bounds, proportional first-window, skip query, status transitions, isolation |
 | 20 | `src/test/kotlin/com/ratelimiter/ConcurrencyTest.kt` | 100 concurrent threads, no collisions, no deadlocks, counter consistency |
 
 ## Dependency Graph
@@ -133,9 +143,13 @@ Tables.kt ───────────────────────�
     +-- RateLimitConfigRepository.kt                 |
     |       depends on: Tables.kt, RateLimitConfig   |
     |                                                |
+    +-- SlotAssignmentSql.kt                          |
+    |       (PL/SQL constants, no deps)                |
+    |                                                |
     +-- SlotAssignmentService.kt                     |
-    |       depends on: Tables.kt, RateLimitConfig,  |
-    |         AssignedSlot, ConfigRepository          |
+    |       depends on: SlotAssignmentSql,            |
+    |         RateLimitConfig, AssignedSlot,           |
+    |         ConfigRepository                        |
     |                                                |
     +-- SlotAssignmentResource.kt                    |
     |       depends on: SlotAssignmentService,        |
@@ -151,46 +165,54 @@ Tables.kt ───────────────────────�
 assignSlot(eventId, configName, requestedTime):
   1. loadActiveConfig(configName) -> from cache or DB
   2. windowStart = alignToWindowBoundary(requestedTime, config.windowSizeSecs)
-  3. searchLimit = max(furthestAssignedWindow, windowStart) + (headroom * config.windowSizeSecs)
-  4. Execute single PL/SQL block via CallableStatement (8 IN, 5 OUT params):
+     elapsedMs = Duration.between(windowStart, requestedTime).toMillis()
+     effectiveMax = computeEffectiveMax(maxPerWindow, elapsedMs, windowSizeMs)
+     firstJitterMs = ThreadLocalRandom.nextLong(elapsedMs or 0, windowSizeMs)
+     fullJitterMs = ThreadLocalRandom.nextLong(0, windowSizeMs)
+     headroomSecs = headroomWindows * config.windowSizeSecs
+  3. Execute single PL/SQL block via CallableStatement (10 IN, 5 OUT params):
      -- Server-side (inside PL/SQL anonymous block):
      a. check_existing_slot: SELECT by event_id -> if found, ou_status = EXISTING
-     b. Window walk loop (current_window from windowStart to searchLimit):
-        - try_lock_window: INSERT counter (catch DUP_VAL_ON_INDEX) + SELECT FOR UPDATE NOWAIT
+     b. Phase 1: Try first window with pre-computed proportional capacity
+        - try_lock_window(windowStart) -> if count < in_effective_max:
+          claim_slot_in_window(windowStart, count, in_first_jitter_ms)
+     c. Phase 2 (if Phase 1 fails): Skip to first OPEN window
+        - skipTarget = find_first_open_window(windowStart) -> O(log N) indexed query
+        - searchLimit = skipTarget + headroomSecs
+        - Walk loop (current_window from skipTarget to searchLimit):
+          try_lock_window -> SELECT FOR UPDATE NOWAIT
           -> SQLCODE -54/-60 -> skip to next window
-        - if slot_count >= max_per_window -> skip to next window
-        - claim_slot_in_window:
-          jitter = DBMS_RANDOM.VALUE(0, windowSizeMs)
-          INSERT into rate_limit_event_slot
-          -> DUP_VAL_ON_INDEX on event_id -> idempotency race -> ou_status = EXISTING
-          UPDATE slot_count + 1 -> ou_status = NEW
-     c. If no window had capacity -> ou_status = EXHAUSTED
-     d. Marshal ou_ locals to OUT bind variables
-  5. Interpret result (pure Kotlin):
-     - NEW: furthestAssignedWindow.updateAndGet { max(it, result.windowStart) }; return AssignedSlot
+          -> if slot_count >= max_per_window -> skip
+          -> claim_slot_in_window(window, count, in_full_jitter_ms)
+            INSERT slot + UPDATE counter (atomic status OPEN/CLOSED transition)
+            -> DUP_VAL_ON_INDEX on event_id -> idempotency race -> ou_status = EXISTING
+     d. If no window had capacity -> ou_status = EXHAUSTED
+     e. Marshal ou_ locals to OUT bind variables
+  4. Interpret result (pure Kotlin):
+     - NEW: return AssignedSlot
      - EXISTING: return AssignedSlot (idempotent hit)
      - EXHAUSTED: throw SlotAssignmentException
-
-@PostConstruct init:
-  furthestAssignedWindow = SELECT MAX(window_start)
-                           FROM rate_limit_window_counter
-                           WHERE slot_count > 0
 ```
 
-**Key changes from original design**:
-- Entire slot assignment (idempotency check + window walk + lock + insert + counter update) in a **single PL/SQL anonymous block** — one JDBC round trip
-- Jitter computed server-side via `DBMS_RANDOM.VALUE()` (loop runs inside PL/SQL)
-- Counter row creation uses plain `INSERT` + catch DUP_VAL_ON_INDEX
-- Loop bound is dynamic (`searchLimit`) not fixed (`MAX_LOOKAHEAD`)
-- `furthestAssignedWindow` is an in-memory `AtomicReference<Instant>`, updated on every successful assignment
-- Initialized from DB at startup to survive restarts
+**Key design features**:
+- Entire slot assignment (idempotency check + two-phase window search + lock + insert + counter update) in a **single PL/SQL anonymous block** — one JDBC round trip
+- **Two-phase approach**: Phase 1 tries first window with proportional capacity; Phase 2 skips to first OPEN window
+- **No global frontier**: Search limit computed per-request inside PL/SQL (`skipTarget + headroom`)
+- **Status-based skip query**: `find_first_open_window()` uses composite index `(status, window_start)` for O(log N) lookups
+- **Proportional first-window**: `effectiveMax = floor(maxPerWindow * remainingMs / windowSizeMs)` pre-computed in Kotlin
+- **Pre-computed jitter**: Both jitter values computed in Kotlin via `ThreadLocalRandom` and passed as IN params — no `DBMS_RANDOM` in PL/SQL
+- **Constrained first-window jitter**: `firstJitterMs = ThreadLocalRandom.nextLong(elapsedMs, windowSizeMs)` ensures `scheduledTime >= requestedTime`
+- **Atomic status transition**: `claim_slot_in_window` sets `status = CLOSED` when `slot_count + 1 >= maxPerWindow`
+- Counter row creation uses plain `INSERT` (with `status = 'OPEN'`) + catch DUP_VAL_ON_INDEX
 - `window_size` stored as ISO-8601 Duration string (e.g., `"PT4S"`) instead of integer seconds
 
 ## Testing Strategy
 
 - **Unit-like tests** (with Testcontainers Oracle XE): SlotAssignmentService is deeply coupled to Oracle SQL semantics, so tests use real Oracle via Testcontainers rather than mocks
 - **Config repository tests**: Insert/load/cache TTL/deactivate
-- **Dynamic lookahead tests**: Verify frontier advances, headroom bounds search, startup initialization from DB
+- **Proportional first-window tests**: Verify proportional max, constrained jitter (`scheduledTime >= requestedTime`), overflow to next window
+- **Skip query tests**: Verify status-based skip avoids walking full windows, status transitions to CLOSED
+- **Isolation tests**: Verify far-future events don't corrupt near-term search (no global frontier)
 - **Concurrency test**: 100 threads, same target time, verify:
   - No window exceeds `max_per_window`
   - Total slots == total events submitted
