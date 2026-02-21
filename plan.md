@@ -83,7 +83,8 @@ searchLimit = max(furthestAssignedWindow, startingWindow) + headroom
 | # | File | Responsibility |
 |---|---|---|
 | 8 | `src/main/kotlin/com/ratelimiter/config/RateLimitConfig.kt` | Immutable domain model data class |
-| 9 | `src/main/kotlin/com/ratelimiter/slot/AssignedSlot.kt` | Result type + `sealed class WindowResult` + `SlotAssignmentException` |
+| 9 | `src/main/kotlin/com/ratelimiter/slot/AssignedSlot.kt` | Result type (`AssignedSlot` data class) |
+| 9b | `src/main/kotlin/com/ratelimiter/slot/Exceptions.kt` | `SlotAssignmentException` + `ConfigLoadException` |
 
 ### Data Access (Phase 4)
 
@@ -148,26 +149,27 @@ Tables.kt ───────────────────────�
 
 ```
 assignSlot(eventId, configName, requestedTime):
-  1. findExistingSlot(eventId) -> if found, return (idempotent)
-  2. loadActiveConfig(configName) -> from cache or DB
-  3. windowStart = alignToWindowBoundary(requestedTime, windowSizeSecs)
-  4. searchLimit = max(furthestAssignedWindow, windowStart) + (headroom * windowSizeSecs)
-  5. while windowStart <= searchLimit:
-     a. transaction {
-        - INSERT counter row (plain INSERT, not MERGE)
-          -> catch ORA-00001: row already exists, proceed
-        - SELECT slot_count FROM counter WHERE window_start=? FOR UPDATE NOWAIT
-          -> catch ORA-00054/ORA-00060 -> WindowResult.Contended -> next window
-        - if slot_count >= maxPerWindow -> WindowResult.Full -> next window
-        - scheduledTime = windowStart + random(0, windowSizeMs)
-        - INSERT into rate_limit_event_slot
-          -> catch ORA-00001 on event_id -> idempotency race -> re-read (counter never touched)
-        - UPDATE slot_count = slot_count + 1  (only after INSERT succeeds)
-        - return WindowResult.Assigned
-     }
-     b. On success: furthestAssignedWindow.updateAndGet { max(it, windowStart) }
-     c. windowStart += windowSizeSecs
-  6. throw SlotAssignmentException (search limit exhausted)
+  1. loadActiveConfig(configName) -> from cache or DB
+  2. windowStart = alignToWindowBoundary(requestedTime, config.windowSizeSecs)
+  3. searchLimit = max(furthestAssignedWindow, windowStart) + (headroom * config.windowSizeSecs)
+  4. Execute single PL/SQL block via CallableStatement (8 IN, 5 OUT params):
+     -- Server-side (inside PL/SQL anonymous block):
+     a. check_existing_slot: SELECT by event_id -> if found, ou_status = EXISTING
+     b. Window walk loop (current_window from windowStart to searchLimit):
+        - try_lock_window: INSERT counter (catch DUP_VAL_ON_INDEX) + SELECT FOR UPDATE NOWAIT
+          -> SQLCODE -54/-60 -> skip to next window
+        - if slot_count >= max_per_window -> skip to next window
+        - claim_slot_in_window:
+          jitter = DBMS_RANDOM.VALUE(0, windowSizeMs)
+          INSERT into rate_limit_event_slot
+          -> DUP_VAL_ON_INDEX on event_id -> idempotency race -> ou_status = EXISTING
+          UPDATE slot_count + 1 -> ou_status = NEW
+     c. If no window had capacity -> ou_status = EXHAUSTED
+     d. Marshal ou_ locals to OUT bind variables
+  5. Interpret result (pure Kotlin):
+     - NEW: furthestAssignedWindow.updateAndGet { max(it, result.windowStart) }; return AssignedSlot
+     - EXISTING: return AssignedSlot (idempotent hit)
+     - EXHAUSTED: throw SlotAssignmentException
 
 @PostConstruct init:
   furthestAssignedWindow = SELECT MAX(window_start)
@@ -176,10 +178,13 @@ assignSlot(eventId, configName, requestedTime):
 ```
 
 **Key changes from original design**:
-- Counter row creation uses plain `INSERT` + catch ORA-00001 instead of `MERGE` (insertIgnore)
+- Entire slot assignment (idempotency check + window walk + lock + insert + counter update) in a **single PL/SQL anonymous block** — one JDBC round trip
+- Jitter computed server-side via `DBMS_RANDOM.VALUE()` (loop runs inside PL/SQL)
+- Counter row creation uses plain `INSERT` + catch DUP_VAL_ON_INDEX
 - Loop bound is dynamic (`searchLimit`) not fixed (`MAX_LOOKAHEAD`)
 - `furthestAssignedWindow` is an in-memory `AtomicReference<Instant>`, updated on every successful assignment
 - Initialized from DB at startup to survive restarts
+- `window_size` stored as ISO-8601 Duration string (e.g., `"PT4S"`) instead of integer seconds
 
 ## Testing Strategy
 
@@ -198,6 +203,6 @@ assignSlot(eventId, configName, requestedTime):
 1. **Build**: `./gradlew build` — compiles, runs all tests
 2. **Start Oracle**: `./scripts/setup-oracle.sh`
 3. **Run app**: `./gradlew quarkusDev`
-4. **Seed config**: `curl -X POST localhost:8080/admin/rate-limit/config -H 'Content-Type: application/json' -d '{"configName":"default","maxPerWindow":100,"windowSizeSecs":4}'`
+4. **Seed config**: `curl -X POST localhost:8080/admin/rate-limit/config -H 'Content-Type: application/json' -d '{"configName":"default","maxPerWindow":100,"windowSize":"PT4S"}'`
 5. **Test slot assignment**: `curl -X POST localhost:8080/api/v1/slots -H 'Content-Type: application/json' -d '{"eventId":"test-1","configName":"default","requestedTime":"2025-06-01T12:00:00Z"}'`
 6. **Run tests**: `./gradlew test` (requires Docker for Testcontainers)

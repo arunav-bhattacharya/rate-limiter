@@ -3,12 +3,16 @@ package com.ratelimiter
 import io.quarkus.test.common.QuarkusTestResourceLifecycleManager
 import org.testcontainers.containers.OracleContainer
 import org.testcontainers.utility.DockerImageName
+import java.time.Duration
 
 /**
  * Testcontainers lifecycle manager that starts an Oracle XE container
  * and injects its connection details into the Quarkus datasource config.
  *
  * Used by all integration tests via `@QuarkusTestResource(OracleTestResource::class)`.
+ *
+ * Note: On ARM64 hosts (Apple Silicon), this image runs under QEMU emulation
+ * and may take 60-120 seconds to start. The startup timeout is set accordingly.
  */
 class OracleTestResource : QuarkusTestResourceLifecycleManager {
 
@@ -17,6 +21,8 @@ class OracleTestResource : QuarkusTestResourceLifecycleManager {
             DockerImageName.parse("gvenzl/oracle-xe:21-slim-faststart")
         ).apply {
             withReuse(true)
+            withStartupTimeout(Duration.ofMinutes(5))
+            withConnectTimeoutSeconds(120)
         }
     }
 

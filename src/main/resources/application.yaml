@@ -25,3 +25,12 @@ quarkus:
 rate-limiter:
   default-config-name: default
   headroom-windows: 100
+
+# Test profile — longer timeouts for Oracle XE under ARM emulation
+"%test":
+  quarkus:
+    datasource:
+      jdbc:
+        acquisition-timeout: 60S
+    flyway:
+      clean-at-start: true

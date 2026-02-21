@@ -38,7 +38,7 @@ curl -X POST http://localhost:8080/admin/rate-limit/config \
   -d '{
     "configName": "default",
     "maxPerWindow": 100,
-    "windowSizeSecs": 4
+    "windowSize": "PT4S"
   }'
 ```
 
@@ -81,10 +81,10 @@ Response:
                 +-------------------------------+
                 |   SlotAssignmentService        |
                 |                               |
-                |  1. Idempotency check         |
-                |  2. Load config (cached)      |
-                |  3. Walk windows until slot    |
-                |     found                     |
+                |  1. Load config (cached)      |
+                |  2. Single PL/SQL round trip:  |
+                |     idempotency + window walk  |
+                |     + lock + insert + jitter   |
                 +-------------------------------+
                                 |
            +--------------------+--------------------+
@@ -149,7 +149,7 @@ Assigns a rate-limited time slot for the given event. Idempotent: calling with t
 {
   "configName": "default",
   "maxPerWindow": 100,
-  "windowSizeSecs": 4
+  "windowSize": "PT4S"
 }
 ```
 
@@ -169,13 +169,27 @@ capacity (default: 100 events). When an event requests execution at time T:
 5. **If no (full)** or **contended (NOWAIT bounce)**: advance to the next window and repeat
 6. **Return** the `AssignedSlot` with `scheduledTime` and `delay`
 
+### Single Round-Trip PL/SQL Block
+
+The entire slot assignment — idempotency check, window walk loop, lock acquisition,
+slot insertion, and counter update — executes as a **single anonymous PL/SQL block**
+in one JDBC round trip. This minimizes network latency and lock hold time.
+
+The PL/SQL block contains three local functions:
+- `check_existing_slot`: Idempotency pre-check (SELECT by event_id)
+- `try_lock_window`: Ensure counter row + SELECT FOR UPDATE NOWAIT
+- `claim_slot_in_window`: INSERT slot + UPDATE counter, with ORA-00001 handling
+
+Threads that lose the lock race (`NOWAIT` bounce) skip to the next window inside
+the PL/SQL loop — zero additional network hops for window skipping.
+
 ### Random Jitter
 
-All offsets within a window use uniformly random jitter:
+All offsets within a window use uniformly random jitter via Oracle's `DBMS_RANDOM`:
 
 ```
-offset = Random.nextLong(0, windowSizeMs)
-scheduled_time = windowStart + offset
+jitter_ms  = TRUNC(DBMS_RANDOM.VALUE(0, windowSizeMs))
+scheduled_time = windowStart + jitter_ms/1000 seconds
 ```
 
 Random jitter is used exclusively because when `max_per_window` is increased dynamically,
@@ -216,14 +230,7 @@ sequenceDiagram
 
     Caller->>SAS: assignSlot(eventId, configName, requestedTime)
 
-    Note over SAS: Step 1 — Idempotency check
-    SAS->>DB: SELECT * FROM rate_limit_event_slot WHERE event_id = ?
-    alt Slot already exists
-        DB-->>SAS: existing row
-        SAS-->>Caller: return AssignedSlot (idempotent hit)
-    end
-
-    Note over SAS: Step 2 — Load config
+    Note over SAS: Step 1 — Load config
     SAS->>Cache: loadActiveConfig(configName)
     alt Cache miss
         Cache->>DB: SELECT * FROM rate_limit_config WHERE config_name = ? AND is_active = 1
@@ -231,85 +238,76 @@ sequenceDiagram
     end
     Cache-->>SAS: RateLimitConfig
 
-    Note over SAS: Step 3 — Compute search range
+    Note over SAS: Step 2 — Compute search range
     SAS->>SAS: windowStart = align(requestedTime)<br/>searchLimit = max(frontier, windowStart) + headroom
 
-    loop Step 4 — Walk windows until windowStart > searchLimit
-        Note over SAS,DB: Begin transaction
+    Note over SAS: Step 3 — Single PL/SQL round trip
+    SAS->>DB: CallableStatement: anonymous PL/SQL block<br/>(8 IN params, 5 OUT params)
 
-        SAS->>DB: INSERT INTO rate_limit_window_counter (window_start, 0)
-        Note right of DB: Catch ORA-00001 if row exists
+    Note over DB: PL/SQL block executes server-side:<br/>1. Idempotency pre-check (SELECT by event_id)<br/>2. Window walk loop:<br/>   - try_lock_window (INSERT counter + SELECT FOR UPDATE NOWAIT)<br/>   - Skip on ORA-00054/ORA-00060 (contended)<br/>   - Skip if slot_count >= max_per_window (full)<br/>   - claim_slot_in_window (INSERT slot + UPDATE counter)<br/>   - DBMS_RANDOM jitter per window<br/>3. Marshal results to OUT params
 
-        SAS->>DB: SELECT slot_count FROM rate_limit_window_counter<br/>WHERE window_start = ? FOR UPDATE NOWAIT
-        alt ORA-00054 / ORA-00060 (locked by another txn)
-            DB-->>SAS: Contended
-            SAS->>SAS: advance to next window
-        else slot_count >= max_per_window
-            DB-->>SAS: Full
-            SAS->>SAS: advance to next window
-        else Has capacity
-            DB-->>SAS: slot_count
+    DB-->>SAS: ou_status, ou_slot_id, ou_scheduled_time,<br/>ou_window_start, ou_windows_searched
 
-            SAS->>SAS: scheduledTime = windowStart + random(0, windowSizeMs)
-            SAS->>DB: INSERT INTO rate_limit_event_slot
-
-            alt ORA-00001 on event_id (idempotency race)
-                Note right of SAS: Counter never touched — no revert needed
-                SAS->>DB: SELECT * FROM rate_limit_event_slot WHERE event_id = ?
-                DB-->>SAS: existing row
-                Note over SAS,DB: End transaction
-                SAS-->>Caller: return AssignedSlot (race resolved)
-            else Insert succeeded
-                DB-->>SAS: inserted id
-                SAS->>DB: UPDATE rate_limit_window_counter SET slot_count = slot_count + 1
-                Note over SAS,DB: End transaction (COMMIT)
-                SAS->>SAS: update furthestAssignedWindow
-                SAS-->>Caller: return AssignedSlot
-            end
-        end
+    Note over SAS: Step 4 — Interpret result (pure Kotlin)
+    alt status = NEW (slot assigned)
+        SAS->>SAS: update furthestAssignedWindow atomically
+        SAS-->>Caller: return AssignedSlot
+    else status = EXISTING (idempotent hit)
+        SAS-->>Caller: return AssignedSlot (same slot)
+    else status = EXHAUSTED (no capacity)
+        SAS-->>Caller: throw SlotAssignmentException
     end
-
-    SAS-->>Caller: throw SlotAssignmentException (search limit exhausted)
 ```
 
 ### Slot Assignment Flow Diagram
 
 ```mermaid
 flowchart TD
-    A([assignSlot called]) --> B{event_id already<br/>in rate_limit_event_slot?}
-    B -- Yes --> C([Return existing AssignedSlot])
-    B -- No --> D[Load RateLimitConfig<br/>from cache or DB]
+    A([assignSlot called]) --> D[Load RateLimitConfig<br/>from cache or DB]
     D --> E{Config found?}
     E -- No --> F([Throw ConfigLoadException])
     E -- Yes --> G["Compute search range<br/>windowStart = align(requestedTime)<br/>searchLimit = max(frontier, windowStart) + headroom"]
 
-    G --> H{windowStart<br/>> searchLimit?}
-    H -- Yes --> I([Throw SlotAssignmentException<br/>search limit exhausted])
+    G --> PL["<b>Execute PL/SQL block</b><br/>(single JDBC round trip)"]
 
-    H -- No --> J["<b>BEGIN TRANSACTION</b><br/>INSERT counter row for windowStart<br/>(catch ORA-00001 if exists)"]
-    J --> K["SELECT slot_count<br/>FOR UPDATE NOWAIT"]
-    K --> L{ORA-00054 /<br/>ORA-00060?}
+    subgraph PLSQL ["PL/SQL Block (server-side)"]
+        direction TD
+        B{check_existing_slot:<br/>event_id already exists?}
+        B -- Yes --> C2[/"ou_status = EXISTING"/]
+        B -- No --> H{current_window<br/>> search_limit?}
+        H -- Yes --> I2[/"ou_status = EXHAUSTED"/]
 
-    L -- Yes --> M[/"WindowResult.Contended<br/>ROLLBACK"/]
-    M --> N["Advance to next window<br/>windowStart += windowSize"]
-    N --> H
+        H -- No --> J["try_lock_window:<br/>INSERT counter row (catch DUP_VAL_ON_INDEX)<br/>SELECT slot_count FOR UPDATE NOWAIT"]
+        J --> L{ORA-00054 /<br/>ORA-00060?}
 
-    L -- No --> O{slot_count >=<br/>max_per_window?}
-    O -- Yes --> P[/"WindowResult.Full<br/>ROLLBACK"/]
-    P --> N
+        L -- Yes --> M[/"Contended — skip"/]
+        M --> N["current_window += window_size"]
+        N --> H
 
-    O -- No --> Q["Compute jitter<br/>scheduledTime = windowStart + random(0, windowSizeMs)"]
-    Q --> R[INSERT INTO rate_limit_event_slot]
-    R --> S{ORA-00001 on<br/>event_id unique?}
+        L -- No --> O{slot_count >=<br/>max_per_window?}
+        O -- Yes --> P[/"Full — skip"/]
+        P --> N
 
-    S -- Yes --> T["Idempotency race detected<br/>Counter never touched — no revert needed<br/>Re-read existing slot"]
-    T --> V["<b>COMMIT</b>"]
-    V --> C
+        O -- No --> Q["claim_slot_in_window:<br/>jitter = DBMS_RANDOM.VALUE(0, windowSizeMs)<br/>INSERT slot + UPDATE counter"]
+        Q --> S{DUP_VAL_ON_INDEX<br/>on event_id?}
 
-    S -- No --> U["UPDATE slot_count = slot_count + 1"]
-    U --> W["<b>COMMIT</b>"]
-    W --> X["Update furthestAssignedWindow<br/>atomically"]
+        S -- Yes --> T[/"Idempotency race<br/>ou_status = EXISTING"/]
+        S -- No --> U[/"ou_status = NEW"/]
+    end
+
+    PL --> PLSQL
+    C2 --> RET
+    I2 --> RET
+    T --> RET
+    U --> RET
+
+    RET["Marshal OUT params:<br/>status, slot_id, scheduled_time,<br/>window_start, windows_searched"]
+
+    RET --> INT{Interpret status}
+    INT -- NEW --> X["Update furthestAssignedWindow<br/>atomically"]
     X --> Y([Return new AssignedSlot])
+    INT -- EXISTING --> C([Return existing AssignedSlot])
+    INT -- EXHAUSTED --> I([Throw SlotAssignmentException])
 
     style A fill:#4a9eff,color:#fff
     style C fill:#2ecc71,color:#fff
@@ -319,6 +317,7 @@ flowchart TD
     style M fill:#f39c12,color:#fff
     style P fill:#f39c12,color:#fff
     style T fill:#e67e22,color:#fff
+    style PL fill:#3498db,color:#fff
 ```
 
 ## Configuration Reference
@@ -382,7 +381,7 @@ curl -X POST http://localhost:8080/admin/rate-limit/config \
   -d '{
     "configName": "default",
     "maxPerWindow": 200,
-    "windowSizeSecs": 4
+    "windowSize": "PT4S"
   }'
 ```
 
@@ -398,7 +397,7 @@ Same API, lower value. Windows already exceeding the new limit are treated as fu
 No existing events are cancelled.
 
 **What NOT to change**:
-- Do not change `window_size_secs` while events are in-flight. This changes the window
+- Do not change `window_size` while events are in-flight. This changes the window
   boundaries and makes existing counter rows meaningless.
 - Do not manually edit `rate_limit_window_counter` rows.
 - Do not delete `rate_limit_config` rows — deactivate them instead.
@@ -415,10 +414,11 @@ curl -X POST http://localhost:8080/admin/rate-limit/cache/flush
 
 ### Key Log Messages
 
-- `WARN  SlotAssignmentService - Window contention on {windowStart}, skipping to next`
-- `ERROR SlotAssignmentService - Lookahead exhausted for event {eventId}, searched {depth} windows`
+- `INFO  SlotAssignmentService - Assigned slot for eventId={} in window={} after searching {} windows`
+- `DEBUG SlotAssignmentService - Idempotent hit for eventId={}`
+- `ERROR SlotAssignmentService - Could not assign slot for event {} after searching {} windows`
+- `INFO  SlotAssignmentService - Initialized furthestAssignedWindow from DB: {}`
 - `INFO  RateLimitConfigRepository - Config cache miss for {configName}, loaded from DB`
-- `INFO  RateLimitConfigRepository - Config updated: {configName} maxPerWindow={old}->{new}`
 
 ## Known Limitations
 
