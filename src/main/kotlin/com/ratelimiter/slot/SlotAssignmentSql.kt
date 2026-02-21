@@ -58,6 +58,13 @@ internal object SlotAssignmentSql {
             ---------------------------------------------------------------
             -- check_existing_slot: Idempotency pre-check.
             -- Returns TRUE if event already has a slot (populates ou_ locals).
+            --
+            -- Scenario: Caller sends event_id = 'pay-123' for the second time.
+            -- The first call already inserted a slot (scheduled_time = 12:00:02.371).
+            -- This SELECT finds that row and returns it immediately — no locking,
+            -- no window walk. The caller gets back the exact same AssignedSlot.
+            -- If event_id has never been seen, NO_DATA_FOUND falls through to
+            -- the window walk loop below.            
             ---------------------------------------------------------------
             FUNCTION check_existing_slot RETURN BOOLEAN IS
             BEGIN
@@ -75,6 +82,21 @@ internal object SlotAssignmentSql {
             ---------------------------------------------------------------
             -- try_lock_window: Ensure counter row exists, then lock + read.
             -- Returns slot_count on success, -1 if contended/deadlocked.
+            --
+            -- Scenario: Threads T1 and T2 both target window 12:00:00.
+            --
+            -- Step 1 — Ensure the counter row exists. T1 arrives first and
+            -- INSERTs (window_start=12:00:00, slot_count=0). T2 arrives and
+            -- hits DUP_VAL_ON_INDEX, which is silently ignored.
+            --
+            -- Step 2 — Acquire an exclusive row lock without waiting.
+            -- T1's SELECT FOR UPDATE NOWAIT succeeds and returns slot_count=0.
+            -- T2's SELECT FOR UPDATE NOWAIT hits ORA-00054 (resource busy)
+            -- because T1 holds the lock. T2 returns -1, and the caller skips
+            -- to the next window (12:00:04) instead of blocking.
+            --
+            -- This is the key to concurrency: NOWAIT means threads never queue
+            -- behind each other — they scatter across windows naturally.            
             ---------------------------------------------------------------
             FUNCTION try_lock_window(window_ts IN TIMESTAMP) RETURN NUMBER IS
                 locked_count NUMBER;
@@ -93,15 +115,35 @@ internal object SlotAssignmentSql {
                 RETURN locked_count;
             EXCEPTION
                 WHEN OTHERS THEN
+                    -- If the error is ORA-00054 (resource busy) or ORA-00060 (deadlock), 
+                    -- it means another thread holds the lock on this window. 
+                    -- Return -1 to indicate contention and skip this window.
                     IF SQLCODE IN (-54, -60) THEN
                         RETURN -1;
                     END IF;
+                    -- Propagate other unexpected exceptions to the caller
                     RAISE;
             END try_lock_window;
 
             ---------------------------------------------------------------
             -- claim_slot_in_window: Insert slot + increment counter.
             -- Handles idempotency race (ORA-00001). Returns TRUE on success.
+            --
+            -- Scenario: T1 locked window 12:00:00 with slot_count=50 (max=100).
+            --
+            -- 1. Jitter: DBMS_RANDOM picks 2371 from [0, 4000) → scheduled_time
+            --    becomes 12:00:00 + 2.371s = 12:00:02.371.
+            -- 2. INSERT the slot row for event_id='pay-456'. The RETURNING clause
+            --    captures the generated slot_id and the jittered scheduled_time.
+            -- 3. UPDATE the counter: slot_count goes from 50 → 51.
+            -- 4. Return NEW — the caller exits the window walk loop.
+            --
+            -- Race condition: If T3 concurrently tries to insert the same
+            -- event_id='pay-456' (e.g. a duplicate request that passed the
+            -- check_existing_slot pre-check before T1 committed), the UNIQUE
+            -- constraint on event_id fires ORA-00001 (DUP_VAL_ON_INDEX).
+            -- The exception handler re-SELECTs the row T1 inserted and returns
+            -- EXISTING — the caller sees the same slot, no duplicate is created.            
             ---------------------------------------------------------------
             FUNCTION claim_slot_in_window(
                 window_ts  IN TIMESTAMP,
@@ -150,12 +192,14 @@ internal object SlotAssignmentSql {
                 WHILE current_window <= in_search_limit AND NOT slot_claimed LOOP
                     windows_searched := windows_searched + 1;
 
+                    -- count is -1 if try_lock_window failed, or >=0 if lock acquired
                     current_count := try_lock_window(current_window);
 
                     IF current_count >= 0 AND current_count < in_max_per_window THEN
                         slot_claimed := claim_slot_in_window(current_window, current_count);
                     END IF;
 
+                    -- search next window if slot not claimed
                     IF NOT slot_claimed THEN
                         current_window := current_window
                             + NUMTODSINTERVAL(in_window_size_secs, 'SECOND');

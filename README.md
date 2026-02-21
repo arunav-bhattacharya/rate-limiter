@@ -295,7 +295,7 @@ flowchart TD
         S -- No --> U[/"ou_status = NEW"/]
     end
 
-    PL --> PLSQL
+    PL --> B
     C2 --> RET
     I2 --> RET
     T --> RET
