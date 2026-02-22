@@ -31,7 +31,9 @@ class RateLimitAdminResource @Inject constructor(
         val configName: String,
         val maxPerWindow: Int,
         /** ISO-8601 duration string, e.g., "PT4S" for 4 seconds. */
-        val windowSize: String
+        val windowSize: String,
+        /** Optional per-config override for search headroom (in windows). */
+        val headroomWindows: Int? = null
     )
 
     /** Response body for config queries. */
@@ -41,6 +43,7 @@ class RateLimitAdminResource @Inject constructor(
         val maxPerWindow: Int,
         /** ISO-8601 duration string. */
         val windowSize: String,
+        val headroomWindows: Int?,
         val effectiveFrom: String,
         val isActive: Boolean,
         val createdAt: String
@@ -69,7 +72,11 @@ class RateLimitAdminResource @Inject constructor(
     @POST
     @Path("/config")
     fun createConfig(request: ConfigRequest): Response {
-        require(request.maxPerWindow > 0) { "maxPerWindow must be positive" }
+        if (request.maxPerWindow <= 0) {
+            return Response.status(Response.Status.BAD_REQUEST)
+                .entity(mapOf("error" to "maxPerWindow must be positive"))
+                .build()
+        }
 
         val windowSize = try {
             Duration.parse(request.windowSize)
@@ -79,14 +86,32 @@ class RateLimitAdminResource @Inject constructor(
                 .build()
         }
 
-        require(!windowSize.isZero && !windowSize.isNegative) { "windowSize must be positive" }
+        if (windowSize.isZero || windowSize.isNegative) {
+            return Response.status(Response.Status.BAD_REQUEST)
+                .entity(mapOf("error" to "windowSize must be positive"))
+                .build()
+        }
 
-        val config = configRepository.createConfig(
-            configName = request.configName,
-            maxPerWindow = request.maxPerWindow,
-            windowSize = windowSize,
-            effectiveFrom = Instant.now()
-        )
+        val headroomWindows = request.headroomWindows
+        if (headroomWindows != null && headroomWindows <= 0) {
+            return Response.status(Response.Status.BAD_REQUEST)
+                .entity(mapOf("error" to "headroomWindows must be positive when provided"))
+                .build()
+        }
+
+        val config = try {
+            configRepository.createConfig(
+                configName = request.configName,
+                maxPerWindow = request.maxPerWindow,
+                windowSize = windowSize,
+                headroomWindows = headroomWindows,
+                effectiveFrom = Instant.now()
+            )
+        } catch (e: IllegalArgumentException) {
+            return Response.status(Response.Status.BAD_REQUEST)
+                .entity(mapOf("error" to (e.message ?: "Invalid configuration")))
+                .build()
+        }
 
         return Response.status(Response.Status.CREATED)
             .entity(config.toResponse())
@@ -109,6 +134,7 @@ class RateLimitAdminResource @Inject constructor(
         configName = configName,
         maxPerWindow = maxPerWindow,
         windowSize = windowSize.toString(),
+        headroomWindows = headroomWindows,
         effectiveFrom = effectiveFrom.toString(),
         isActive = isActive,
         createdAt = createdAt.toString()

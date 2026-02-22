@@ -25,6 +25,10 @@ quarkus:
 rate-limiter:
   default-config-name: default
   headroom-windows: 100
+  max-inflight-assignments: 25
+  inflight-acquire-timeout-ms: 50
+  max-request-ahead-minutes: 60
+  horizon-extension-buffer-minutes: 5
 
 # Test profile — longer timeouts for Oracle XE under ARM emulation
 "%test":
@@ -34,3 +38,6 @@ rate-limiter:
         acquisition-timeout: 60S
     flyway:
       clean-at-start: true
+  rate-limiter:
+    max-inflight-assignments: 200
+    inflight-acquire-timeout-ms: 500

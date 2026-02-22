@@ -1,16 +1,20 @@
 package com.ratelimiter
 
 import com.ratelimiter.config.RateLimitConfigRepository
+import com.ratelimiter.db.HorizonStateTable
 import com.ratelimiter.db.RateLimitEventSlotTable
 import com.ratelimiter.db.WindowCounterTable
 import com.ratelimiter.slot.ConfigLoadException
+import com.ratelimiter.slot.SlotAssignmentException
 import com.ratelimiter.slot.SlotAssignmentService
+import com.ratelimiter.slot.SlotAssignmentSql
 import io.quarkus.test.common.QuarkusTestResource
 import io.quarkus.test.junit.QuarkusTest
 import jakarta.inject.Inject
 import org.assertj.core.api.Assertions.assertThat
 import org.assertj.core.api.Assertions.assertThatThrownBy
 import org.jetbrains.exposed.sql.deleteAll
+import org.jetbrains.exposed.sql.insert
 import org.jetbrains.exposed.sql.selectAll
 import org.jetbrains.exposed.sql.transactions.transaction
 import org.junit.jupiter.api.BeforeEach
@@ -34,6 +38,14 @@ class SlotAssignmentServiceTest {
         transaction {
             RateLimitEventSlotTable.deleteAll()
             WindowCounterTable.deleteAll()
+            HorizonStateTable.deleteAll()
+            HorizonStateTable.insert {
+                it[horizonKey] = "GLOBAL"
+                it[horizonStart] = Instant.EPOCH
+                it[horizonEnd] = Instant.EPOCH
+                it[windowSizeSecs] = null
+                it[updatedAt] = Instant.now()
+            }
         }
         configRepository.evictCache()
     }
@@ -274,7 +286,7 @@ class SlotAssignmentServiceTest {
         service.assignSlot("evt-st-2", "test-status", requestedTime)
 
         // Verify status is CLOSED in DB
-        val status = transaction {
+        val status: String? = transaction {
             WindowCounterTable.selectAll()
                 .where { WindowCounterTable.windowStart eq Instant.parse("2025-06-01T12:00:00Z") }
                 .firstOrNull()
@@ -300,5 +312,58 @@ class SlotAssignmentServiceTest {
         assertThat(nearSlot.scheduledTime).isAfterOrEqualTo(nearTerm)
         assertThat(nearSlot.scheduledTime).isBefore(nearTerm.plusSeconds(4))
         assertThat(nearSlot.delay).isLessThan(Duration.ofSeconds(4))
+    }
+
+    @Test
+    fun `on-demand horizon extension materializes rows for requested range`() {
+        configRepository.createConfig("test-horizon", 100, Duration.ofSeconds(4))
+        val requestedTime = Instant.parse("2025-06-01T12:00:00Z")
+
+        service.assignSlot("evt-horizon-1", "test-horizon", requestedTime)
+
+        val horizonState = transaction {
+            HorizonStateTable.selectAll()
+                .where { HorizonStateTable.horizonKey eq "GLOBAL" }
+                .first()
+        }
+
+        assertThat(horizonState[HorizonStateTable.horizonStart])
+            .isEqualTo(Instant.parse("2025-06-01T12:00:00Z"))
+        assertThat(horizonState[HorizonStateTable.horizonEnd])
+            .isAfter(Instant.parse("2025-06-01T12:11:00Z"))
+    }
+
+    @Test
+    fun `exhausted assignment returns continuation metadata and resumes`() {
+        configRepository.createConfig(
+            configName = "test-resume",
+            maxPerWindow = 1,
+            windowSize = Duration.ofSeconds(4),
+            headroomWindows = 1
+        )
+        val requestedTime = Instant.parse("2025-06-01T12:00:00Z")
+
+        service.assignSlot("evt-resume-1", "test-resume", requestedTime)
+        service.assignSlot("evt-resume-2", "test-resume", requestedTime)
+
+        val thrown = runCatching {
+            service.assignSlot("evt-resume-3", "test-resume", requestedTime)
+        }.exceptionOrNull()
+
+        assertThat(thrown).isInstanceOf(SlotAssignmentException::class.java)
+        val exhausted = thrown as SlotAssignmentException
+        assertThat(exhausted.reason).isEqualTo(SlotAssignmentSql.REASON_CAPACITY_EXHAUSTED)
+        assertThat(exhausted.searchLimit).isNotNull
+        assertThat(exhausted.resumeFromWindow).isNotNull
+        assertThat(exhausted.resumeFromWindow).isAfter(exhausted.searchLimit)
+
+        val resumed = service.assignSlot(
+            eventId = "evt-resume-3-retry",
+            configName = "test-resume",
+            requestedTime = requestedTime,
+            resumeFromWindow = exhausted.resumeFromWindow
+        )
+
+        assertThat(resumed.scheduledTime).isAfterOrEqualTo(exhausted.resumeFromWindow)
     }
 }

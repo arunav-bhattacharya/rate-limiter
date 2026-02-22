@@ -5,6 +5,7 @@ import io.quarkus.test.common.QuarkusTestResource
 import io.quarkus.test.junit.QuarkusTest
 import jakarta.inject.Inject
 import org.assertj.core.api.Assertions.assertThat
+import org.assertj.core.api.Assertions.assertThatThrownBy
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
 import java.time.Duration
@@ -75,12 +76,40 @@ class RateLimitConfigRepositoryTest {
         val later = Instant.parse("2025-06-01T00:00:00Z")
 
         // Deactivate any existing for this name first
-        repository.createConfig("test-order", 50, Duration.ofSeconds(2), earlier)
-        val newest = repository.createConfig("test-order", 100, Duration.ofSeconds(4), later)
+        repository.createConfig(
+            configName = "test-order",
+            maxPerWindow = 50,
+            windowSize = Duration.ofSeconds(4),
+            effectiveFrom = earlier
+        )
+        val newest = repository.createConfig(
+            configName = "test-order",
+            maxPerWindow = 100,
+            windowSize = Duration.ofSeconds(4),
+            effectiveFrom = later
+        )
 
         val loaded = repository.loadActiveConfig("test-order")
         assertThat(loaded).isNotNull
         assertThat(loaded?.configId).isEqualTo(newest.configId)
+    }
+
+    @Test
+    fun `createConfig rejects active windowSize mismatch across config names`() {
+        repository.createConfig(
+            configName = "test-ws-a",
+            maxPerWindow = 50,
+            windowSize = Duration.ofSeconds(4)
+        )
+
+        assertThatThrownBy {
+            repository.createConfig(
+                configName = "test-ws-b",
+                maxPerWindow = 50,
+                windowSize = Duration.ofSeconds(2)
+            )
+        }.isInstanceOf(IllegalArgumentException::class.java)
+            .hasMessageContaining("windowSize")
     }
 
     @Test

@@ -1,6 +1,7 @@
 package com.ratelimiter
 
 import com.ratelimiter.config.RateLimitConfigRepository
+import com.ratelimiter.db.HorizonStateTable
 import com.ratelimiter.db.RateLimitEventSlotTable
 import com.ratelimiter.db.WindowCounterTable
 import com.ratelimiter.slot.AssignedSlot
@@ -10,6 +11,7 @@ import io.quarkus.test.junit.QuarkusTest
 import jakarta.inject.Inject
 import org.assertj.core.api.Assertions.assertThat
 import org.jetbrains.exposed.sql.deleteAll
+import org.jetbrains.exposed.sql.insert
 import org.jetbrains.exposed.sql.selectAll
 import org.jetbrains.exposed.sql.transactions.transaction
 import org.junit.jupiter.api.BeforeEach
@@ -39,6 +41,14 @@ class ConcurrencyTest {
         transaction {
             RateLimitEventSlotTable.deleteAll()
             WindowCounterTable.deleteAll()
+            HorizonStateTable.deleteAll()
+            HorizonStateTable.insert {
+                it[horizonKey] = "GLOBAL"
+                it[horizonStart] = Instant.EPOCH
+                it[horizonEnd] = Instant.EPOCH
+                it[windowSizeSecs] = null
+                it[updatedAt] = Instant.now()
+            }
         }
         configRepository.evictCache()
     }

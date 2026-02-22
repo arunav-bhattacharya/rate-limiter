@@ -17,6 +17,7 @@ data class RateLimitConfig(
      * duration string (e.g., "PT4S") and parsed to [Duration] at load time.
      */
     val windowSize: Duration,
+    val headroomWindows: Int?,
 
     val effectiveFrom: Instant,
     val isActive: Boolean,

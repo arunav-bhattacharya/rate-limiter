@@ -75,12 +75,34 @@ class RateLimitConfigRepository {
         configName: String,
         maxPerWindow: Int,
         windowSize: Duration,
+        headroomWindows: Int? = null,
         effectiveFrom: Instant = Instant.now()
     ): RateLimitConfig {
+        require(maxPerWindow > 0) { "maxPerWindow must be positive" }
         require(!windowSize.isZero && !windowSize.isNegative) { "windowSize must be positive" }
+        require(windowSize.toSeconds() > 0) { "windowSize must be at least 1 second" }
+        require(windowSize.toMillis() % 1000L == 0L) { "windowSize must be an integer number of seconds" }
+        require(headroomWindows == null || headroomWindows > 0) { "headroomWindows must be positive when provided" }
 
         val now = Instant.now()
+        val windowSizeText = windowSize.toString()
         val insertedId = transaction {
+            val mismatchedWindowSizeExists = !RateLimitConfigTable
+                .selectAll()
+                .where {
+                    (RateLimitConfigTable.isActive eq true) and
+                        (RateLimitConfigTable.windowSize neq windowSizeText)
+                }
+                .limit(1)
+                .empty()
+
+            if (mismatchedWindowSizeExists) {
+                throw IllegalArgumentException(
+                    "All active configs must share the same windowSize. " +
+                        "Create/update rejected for windowSize=$windowSizeText"
+                )
+            }
+
             // Deactivate existing active configs for this name
             RateLimitConfigTable.update(
                 where = {
@@ -95,7 +117,8 @@ class RateLimitConfigRepository {
             RateLimitConfigTable.insert {
                 it[RateLimitConfigTable.configName] = configName
                 it[RateLimitConfigTable.maxPerWindow] = maxPerWindow
-                it[RateLimitConfigTable.windowSize] = windowSize.toString()
+                it[RateLimitConfigTable.windowSize] = windowSizeText
+                it[RateLimitConfigTable.headroomWindows] = headroomWindows
                 it[RateLimitConfigTable.effectiveFrom] = effectiveFrom
                 it[isActive] = true
                 it[createdAt] = now
@@ -109,6 +132,7 @@ class RateLimitConfigRepository {
             configName = configName,
             maxPerWindow = maxPerWindow,
             windowSize = windowSize,
+            headroomWindows = headroomWindows,
             effectiveFrom = effectiveFrom,
             isActive = true,
             createdAt = now
@@ -131,6 +155,7 @@ class RateLimitConfigRepository {
         configName = this[RateLimitConfigTable.configName],
         maxPerWindow = this[RateLimitConfigTable.maxPerWindow],
         windowSize = Duration.parse(this[RateLimitConfigTable.windowSize]),
+        headroomWindows = this[RateLimitConfigTable.headroomWindows],
         effectiveFrom = this[RateLimitConfigTable.effectiveFrom],
         isActive = this[RateLimitConfigTable.isActive],
         createdAt = this[RateLimitConfigTable.createdAt]
