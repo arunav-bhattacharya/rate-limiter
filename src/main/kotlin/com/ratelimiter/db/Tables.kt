@@ -20,7 +20,6 @@ object RateLimitConfigTable : Table("rate_limit_config") {
 object WindowCounterTable : Table("rate_limit_window_counter") {
     val windowStart = timestamp("window_start")
     val slotCount = integer("slot_count")
-    val status = varchar("status", 10)
 
     override val primaryKey = PrimaryKey(windowStart)
 }
@@ -36,4 +35,12 @@ object RateLimitEventSlotTable : Table("rate_limit_event_slot") {
     val createdAt = timestamp("created_at")
 
     override val primaryKey = PrimaryKey(slotId)
+}
+
+/** Append-only provisioning frontier tracker. Composite PK = (requested_time, window_end). */
+object WindowEndTrackerTable : Table("track_window_end") {
+    val requestedTime = timestamp("requested_time")
+    val windowEnd = timestamp("window_end")
+
+    override val primaryKey = PrimaryKey(requestedTime, windowEnd)
 }

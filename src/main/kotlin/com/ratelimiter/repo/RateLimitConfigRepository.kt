@@ -1,5 +1,6 @@
-package com.ratelimiter.config
+package com.ratelimiter.repo
 
+import com.ratelimiter.config.RateLimitConfig
 import com.ratelimiter.db.RateLimitConfigTable
 import jakarta.enterprise.context.ApplicationScoped
 import org.jetbrains.exposed.sql.ResultRow
@@ -51,7 +52,7 @@ class RateLimitConfigRepository {
                 .selectAll()
                 .where {
                     (RateLimitConfigTable.configName eq configName) and
-                        (RateLimitConfigTable.isActive eq true)
+                            (RateLimitConfigTable.isActive eq true)
                 }
                 .orderBy(RateLimitConfigTable.effectiveFrom, SortOrder.DESC)
                 .limit(1)
@@ -85,7 +86,7 @@ class RateLimitConfigRepository {
             RateLimitConfigTable.update(
                 where = {
                     (RateLimitConfigTable.configName eq configName) and
-                        (RateLimitConfigTable.isActive eq true)
+                            (RateLimitConfigTable.isActive eq true)
                 }
             ) {
                 it[isActive] = false

@@ -59,3 +59,18 @@ tasks.withType<org.jetbrains.kotlin.gradle.tasks.KotlinCompile> {
         javaParameters.set(true)
     }
 }
+
+tasks.named<Test>("test") {
+    useJUnitPlatform {
+        excludeTags("perf")
+    }
+}
+
+tasks.register<Test>("perfTest") {
+    useJUnitPlatform {
+        includeTags("perf")
+    }
+    testLogging {
+        showStandardStreams = true
+    }
+}

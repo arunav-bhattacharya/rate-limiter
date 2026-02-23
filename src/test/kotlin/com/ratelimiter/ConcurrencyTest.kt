@@ -1,6 +1,6 @@
 package com.ratelimiter
 
-import com.ratelimiter.config.RateLimitConfigRepository
+import com.ratelimiter.repo.RateLimitConfigRepository
 import com.ratelimiter.db.RateLimitEventSlotTable
 import com.ratelimiter.db.WindowCounterTable
 import com.ratelimiter.slot.AssignedSlot

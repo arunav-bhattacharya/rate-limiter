@@ -552,6 +552,7 @@
         #scene-11 .replay-node.active-node { border-color: var(--primary); background: rgba(74,158,255,0.15); }
         #scene-11 .replay-arrow { color: var(--primary); font-size: 14px; opacity: 0; transition: opacity 0.2s ease; }
         #scene-11 .replay-arrow.visible { opacity: 1; }
+
     </style>
 </head>
 <body>
@@ -568,6 +569,9 @@
         <div class="main-subtitle anim-item">Oracle-based Rate Limiter for High-Throughput Event Scheduling</div>
         <div style="margin-top: 4px; font-size: 15px; color: var(--text-muted);" class="anim-item">
             Supports up to <span style="color: var(--primary); font-weight: 700;">1,000,000</span> events / day
+        </div>
+        <div style="margin-top: 8px; font-size: 13px; color: var(--text-muted);" class="anim-item">
+            <span style="color: var(--warning); font-weight: 600;">Kotlin/Exposed</span> &bull; <span style="color: var(--error); font-weight: 600;">PL/SQL</span>
         </div>
         <div class="badge-row">
             <div class="tech-badge badge-blue">Quarkus 3.x</div>
@@ -608,6 +612,7 @@
                         <div class="db-table-name">rate_limit_config</div>
                         <div class="db-table-name">rate_limit_window_counter</div>
                         <div class="db-table-name">rate_limit_event_slot</div>
+                        <div class="db-table-name">track_window_end</div>
                     </div>
                 </div>
             </div>
@@ -639,12 +644,12 @@
             <div class="step-connector" id="conn-1"></div>
             <div class="step-card" id="step-2">
                 <div class="step-number">2</div>
-                <div class="step-content"><h3>Compute Search Params</h3><p>Align to window boundary, compute elapsed time &amp; headroom</p></div>
+                <div class="step-content"><h3>Compute Search Params</h3><p>Align to window boundary, compute elapsed time &amp; chunk sizes</p></div>
             </div>
             <div class="step-connector" id="conn-2"></div>
             <div class="step-card" id="step-3">
                 <div class="step-number">3</div>
-                <div class="step-content"><h3>Single PL/SQL Round Trip</h3><p>Idempotency check, window walk, lock, insert with jitter &mdash; all in one JDBC call</p></div>
+                <div class="step-content"><h3>Single Transaction</h3><p>Idempotency check, find+lock, extension loop &mdash; all in one transaction</p></div>
             </div>
             <div class="step-connector" id="conn-3"></div>
             <div class="step-card" id="step-4">
@@ -708,7 +713,7 @@
     <!-- ===== SCENE 6: COMPUTE SEARCH PARAMS ===== -->
     <section class="scene" id="scene-6">
         <div class="scene-title">Step 2: Compute Search Parameters</div>
-        <div class="scene-subtitle">Kotlin pre-computes these values before the single PL/SQL call</div>
+        <div class="scene-subtitle">Kotlin pre-computes these values before the single transaction</div>
         <div class="params-container">
             <div class="param-row" id="param-1">
                 <div class="param-name" style="color: var(--warning);">requestedTime</div>
@@ -759,11 +764,19 @@
                 </div>
             </div>
             <div class="param-row" id="param-7">
-                <div class="param-name" style="color: var(--error);">headroomSecs</div>
-                <div class="param-value" style="color: #c3e88d;">400</div>
+                <div class="param-name" style="color: var(--warning);">maxWindowsInChunk</div>
+                <div class="param-value" style="color: #c3e88d;">100</div>
                 <div class="param-desc">
-                    How far ahead to search. PL/SQL computes <code style="color:var(--error);">searchLimit = firstOpenWindow + headroom</code> per-request.
-                    <div class="param-formula"><span class="kw">headroomWindows</span>(100) &times; windowSizeSecs(4) = 400s</div>
+                    Number of windows provisioned per chunk. Each chunk is batch-inserted if the last window does not yet exist.
+                    <div class="param-formula"><span class="kw">config</span>.maxWindowsInChunk = 100</div>
+                </div>
+            </div>
+            <div class="param-row" id="param-8">
+                <div class="param-name" style="color: var(--warning);">maxChunksToSearch</div>
+                <div class="param-value" style="color: #c3e88d;">10</div>
+                <div class="param-desc">
+                    Maximum number of chunks the extension loop will scan before giving up (STATUS_EXHAUSTED).
+                    <div class="param-formula"><span class="kw">config</span>.maxChunksToSearch = 10 &rarr; up to 1000 windows total</div>
                 </div>
             </div>
         </div>
@@ -777,15 +790,15 @@
 
     <!-- ===== SCENE 7: IDEMPOTENCY ===== -->
     <section class="scene" id="scene-7">
-        <div class="scene-title">Step 3: Single PL/SQL Round Trip</div>
-        <div class="scene-subtitle">Step 3.a &mdash; check_existing_slot() &mdash; Same event_id always returns the same slot</div>
+        <div class="scene-title">Step 3: Single Transaction</div>
+        <div class="scene-subtitle">Phase 0 &mdash; Idempotency &mdash; Same event_id always returns the same slot</div>
         <div class="idem-container">
-            <div class="jdbc-banner" id="jdbc-banner-7">Single JDBC Round Trip &mdash; 1 network hop to Oracle</div>
+            <div class="jdbc-banner" id="jdbc-banner-7">Single Transaction &mdash; all phases in one atomic unit</div>
             <div class="plsql-bar" id="plsql-bar-7">
-                <div class="plsql-func active" id="func-check-7">check_existing_slot()</div>
-                <div class="plsql-func" id="func-skip-7">find_first_open_window()</div>
-                <div class="plsql-func" id="func-lock-7">try_lock_window()</div>
-                <div class="plsql-func" id="func-claim-7">claim_slot_in_window()</div>
+                <div class="plsql-func active" id="func-check-7">checkExistingSlot</div>
+                <div class="plsql-func" id="func-first-7">tryLockFirstWindow</div>
+                <div class="plsql-func" id="func-find-7">findAndLockFirstAvailable</div>
+                <div class="plsql-func" id="func-claim-7">claimSlot</div>
             </div>
             <div class="idem-paths">
                 <div class="idem-path" id="idem-first-call">
@@ -796,7 +809,7 @@
                         <span style="display: block; color: var(--error);">&#10007; Not in DB yet</span>
                     </div>
                     <div class="idem-step" id="idem-s3" style="border-left-color: var(--primary);">
-                        &#8594; Proceed to try_lock_window()...
+                        &#8594; Proceed to tryLockFirstWindow()...
                     </div>
                 </div>
                 <div class="idem-path" id="idem-second-call">
@@ -821,57 +834,56 @@
         </div>
     </section>
 
-    <!-- ===== SCENE 8: FIND FIRST OPEN WINDOW ===== -->
+    <!-- ===== SCENE 8: PHASE 1 — FIRST WINDOW ===== -->
     <section class="scene" id="scene-8">
-        <div class="scene-title">Step 3: Single PL/SQL Round Trip</div>
-        <div class="scene-subtitle">Step 3.b &mdash; find_first_open_window() &mdash; Skip to first available window via index scan</div>
+        <div class="scene-title">Step 3: Single Transaction</div>
+        <div class="scene-subtitle">Phase 1 &mdash; First Window (Proportional Capacity)</div>
         <div class="skip-container">
-            <div class="jdbc-banner">Single JDBC Round Trip &mdash; 1 network hop to Oracle</div>
+            <div class="jdbc-banner">Single Transaction &mdash; all phases in one atomic unit</div>
             <div class="plsql-bar" id="plsql-bar-8">
-                <div class="plsql-func done">check_existing_slot()</div>
-                <div class="plsql-func active" id="func-skip-8">find_first_open_window()</div>
-                <div class="plsql-func" id="func-lock-8">try_lock_window()</div>
-                <div class="plsql-func" id="func-claim-8">claim_slot_in_window()</div>
+                <div class="plsql-func done">checkExistingSlot</div>
+                <div class="plsql-func active" id="func-first-8">tryLockFirstWindow</div>
+                <div class="plsql-func" id="func-find-8">findAndLockFirstAvailable</div>
+                <div class="plsql-func" id="func-claim-8">claimSlot</div>
             </div>
             <div class="skip-sql" id="skip-sql-8">
-                <span style="color: #c792ea;">SELECT</span> MIN(window_start) <span style="color: #c792ea;">INTO</span> open_ts
-                <span style="color: #c792ea;">FROM</span> rate_limit_window_counter
-                <span style="color: #c792ea;">WHERE</span> status = <span style="color: #c3e88d;">'OPEN'</span>
-                <span style="color: #c792ea;">AND</span> window_start &gt; start_ts
+                <span style="color: #c792ea;">INSERT INTO</span> window_counter(window_start, slot_count) <span style="color: #c792ea;">VALUES</span>(alignedStart, 0) <span style="color: var(--text-muted);">&mdash; catch DUP</span><br>
+                <span style="color: #c792ea;">SELECT</span> slot_count <span style="color: #c792ea;">FROM</span> window_counter
+                <span style="color: #c792ea;">WHERE</span> window_start = alignedStart
+                <span style="color: var(--warning); font-weight: 600;">FOR UPDATE SKIP LOCKED</span>
             </div>
             <div class="skip-paths" id="skip-paths-8">
                 <div class="skip-path" id="skip-case-1">
-                    <h4 style="color: var(--success);">Case 1: OPEN row found</h4>
-                    <div class="skip-step" id="skip-s1a">MIN(window_start) WHERE status = 'OPEN'<br>returns a timestamp</div>
+                    <h4 style="color: var(--success);">ensureWindowExists(alignedStart)</h4>
+                    <div class="skip-step" id="skip-s1a">INSERT window_counter (catch DUP_VAL_ON_INDEX)<br>Guarantees the first window row exists</div>
                     <div class="skip-step" id="skip-s1b" style="border-left-color: var(--success);">
-                        &#10003; Return open_ts directly<br>
-                        <span style="color: var(--success);">Skip all CLOSED windows!</span>
+                        &#10003; First thread inserts, others catch DUP<br>
+                        <span style="color: var(--success);">No thundering herd on initial window</span>
                     </div>
                 </div>
                 <div class="skip-path" id="skip-case-2">
-                    <h4 style="color: var(--warning);">Case 2: No OPEN, but rows exist</h4>
-                    <div class="skip-step" id="skip-s2a">open_ts IS NULL<br>SELECT MAX(window_start) INTO max_ts</div>
+                    <h4 style="color: var(--warning);">tryLockFirstWindow()</h4>
+                    <div class="skip-step" id="skip-s2a">SELECT slot_count FOR UPDATE SKIP LOCKED<br>Lock the first window if not contended</div>
                     <div class="skip-step" id="skip-s2b" style="border-left-color: var(--warning);">
-                        Return max_ts + window_size<br>
-                        <span style="color: var(--warning);">Jump past all counter rows</span>
+                        Check: count &lt; maxFirstWindow?<br>
+                        <span style="color: var(--warning);">maxFirstWindow = floor(maxPerWindow &times; remainingMs / windowSizeMs)</span>
                     </div>
                     <div class="skip-step" id="skip-s2c" style="border-left-color: var(--warning);">
-                        All windows are CLOSED.<br>
-                        max_ts = 12:00:08<br>
-                        <span style="color: var(--warning);">Return 12:00:08 + 4s = 12:00:12</span>
+                        If yes &rarr; claimSlot with constrained jitter<br>
+                        <span style="color: var(--success);">jitter in [elapsedMs, windowSizeMs)</span>
                     </div>
                 </div>
                 <div class="skip-path" id="skip-case-3">
-                    <h4 style="color: var(--primary);">Case 3: No rows at all</h4>
-                    <div class="skip-step" id="skip-s3a">open_ts IS NULL, max_ts IS NULL<br>No counter rows after start_ts</div>
+                    <h4 style="color: var(--primary);">First window full or locked?</h4>
+                    <div class="skip-step" id="skip-s3a">SKIP LOCKED &rarr; no row returned (contended)<br>OR count &ge; maxFirstWindow (full)</div>
                     <div class="skip-step" id="skip-s3b" style="border-left-color: var(--primary);">
-                        Return start_ts + window_size<br>
-                        <span style="color: var(--primary);">Next window after first</span>
+                        Fall through to Phase 2<br>
+                        <span style="color: var(--primary);">findAndLockFirstAvailable()</span>
                     </div>
                 </div>
             </div>
             <div class="skip-result" id="skip-result-8">
-                <span style="color: var(--text-muted);">Result:</span> searchLimit = first_open_window + headroom &rarr; walk from there
+                <span style="color: var(--text-muted);">Result:</span> Either slot claimed in first window, or proceed to frontier-tracked find+lock
             </div>
         </div>
         <div class="db-tables-panel" id="db-tables-8"></div>
@@ -882,17 +894,17 @@
         </div>
     </section>
 
-    <!-- ===== SCENE 9: WINDOW WALK ===== -->
+    <!-- ===== SCENE 9: PHASE 2 — FRONTIER-TRACKED FIND+LOCK ===== -->
     <section class="scene" id="scene-9">
-        <div class="scene-title">Step 3: Single PL/SQL Round Trip</div>
-        <div class="scene-subtitle">Step 3.c &mdash; try_lock_window() &mdash; Threads race for windows, losers skip</div>
+        <div class="scene-title">Step 3: Single Transaction</div>
+        <div class="scene-subtitle">Phase 2 &mdash; Frontier-Tracked Find+Lock</div>
         <div class="walk-container">
-            <div class="jdbc-banner">Single JDBC Round Trip &mdash; 1 network hop to Oracle</div>
+            <div class="jdbc-banner">Single Transaction &mdash; all phases in one atomic unit</div>
             <div class="plsql-bar" id="plsql-bar-9">
-                <div class="plsql-func done">check_existing_slot()</div>
-                <div class="plsql-func done">find_first_open_window()</div>
-                <div class="plsql-func active" id="func-lock-9">try_lock_window()</div>
-                <div class="plsql-func" id="func-claim-9">claim_slot_in_window()</div>
+                <div class="plsql-func done">checkExistingSlot</div>
+                <div class="plsql-func done">tryLockFirstWindow</div>
+                <div class="plsql-func active" id="func-find-9">findAndLockFirstAvailable</div>
+                <div class="plsql-func" id="func-claim-9">claimSlot</div>
             </div>
             <div class="thread-legend">
                 <div class="thread-tag"><div class="thread-dot" style="background: #4a9eff;"></div> Thread 1</div>
@@ -911,9 +923,9 @@
                 <div class="walk-window" id="ww-3"><div class="win-time">12:00:12</div><div class="win-lock" id="lock-3">&#128274;</div><div class="win-status" id="status-3"></div></div>
             </div>
             <div class="sql-caption" id="sql-caption-9">
-                SELECT slot_count FROM rate_limit_window_counter WHERE window_start = ? <span style="color: var(--warning); font-weight: 600;">FOR UPDATE NOWAIT</span>
+                SELECT window_start FROM window_counter WHERE slot_count &lt; maxPerWindow ORDER BY window_start <span style="color: var(--warning); font-weight: 600;">FOR UPDATE SKIP LOCKED</span> FETCH FIRST 1 ROW ONLY
             </div>
-            <div class="nowait-label" id="nowait-label-9">Skip, don't block!</div>
+            <div class="nowait-label" id="nowait-label-9">SKIP LOCKED &mdash; skip contended rows atomically!</div>
         </div>
         <div class="db-tables-panel" id="db-tables-9"></div>
         <div class="step-controls" id="step-controls-9">
@@ -925,15 +937,15 @@
 
     <!-- ===== SCENE 10: CLAIM SLOT ===== -->
     <section class="scene" id="scene-10">
-        <div class="scene-title">Step 3: Single PL/SQL Round Trip</div>
-        <div class="scene-subtitle">Step 3.d &mdash; claim_slot_in_window() &mdash; Insert with jitter, increment counter</div>
+        <div class="scene-title">Step 3: Single Transaction</div>
+        <div class="scene-subtitle">Phase 3 &mdash; Claim Slot &mdash; Insert with jitter, increment counter</div>
         <div class="claim-container">
-            <div class="jdbc-banner">Single JDBC Round Trip &mdash; 1 network hop to Oracle</div>
+            <div class="jdbc-banner">Single Transaction &mdash; all phases in one atomic unit</div>
             <div class="plsql-bar" id="plsql-bar-10">
-                <div class="plsql-func done">check_existing_slot()</div>
-                <div class="plsql-func done">find_first_open_window()</div>
-                <div class="plsql-func done">try_lock_window()</div>
-                <div class="plsql-func active" id="func-claim-10">claim_slot_in_window()</div>
+                <div class="plsql-func done">checkExistingSlot</div>
+                <div class="plsql-func done">tryLockFirstWindow</div>
+                <div class="plsql-func done">findAndLockFirstAvailable</div>
+                <div class="plsql-func active" id="func-claim-10">claimSlot</div>
             </div>
             <!-- App Server note (outside jitter box) -->
             <div id="app-server-note-10" style="text-align: center; margin-bottom: 5px; padding: 5px 12px; border-radius: 8px; background: rgba(46,204,113,0.08); border: 1px dashed var(--success); font-size: 11px; color: var(--success); opacity: 0; transition: opacity 0.5s;">
@@ -1050,6 +1062,7 @@
         </div>
     </section>
 
+
 </div>
 
 <!-- Navigation Controls -->
@@ -1083,9 +1096,11 @@
     const dbState = {
         windowCounter: [],  // [{windowStart, slotCount, status, cssClass}]
         eventSlot: [],      // [{eventId, windowStart, scheduledTime, cssClass}]
+        trackWindowEnd: [], // [{requestedTime, windowEnd, cssClass}]
         label: '',
         sqlHint: '',
-        esSqlHint: ''       // SQL hint displayed under event_slot table
+        esSqlHint: '',      // SQL hint displayed under event_slot table
+        tweSqlHint: ''      // SQL hint displayed under track_window_end table
     };
 
     function renderDbTables(sceneNum) {
@@ -1115,9 +1130,21 @@
             esRows += '</table>';
         }
 
+        let tweRows = '';
+        if (dbState.trackWindowEnd.length === 0) {
+            tweRows = '<div class="empty-label">(no rows)</div>';
+        } else {
+            tweRows = '<table><tr><th>requested_time</th><th>window_end</th></tr>';
+            dbState.trackWindowEnd.forEach(r => {
+                tweRows += `<tr class="${r.cssClass || ''}"><td>${r.requestedTime}</td><td>${r.windowEnd}</td></tr>`;
+            });
+            tweRows += '</table>';
+        }
+
         const labelHtml = dbState.label ? `<div class="db-label">${dbState.label}</div>` : '';
         const sqlHintHtml = dbState.sqlHint ? `<div class="sql-hint">${dbState.sqlHint}</div>` : '';
         const esSqlHintHtml = dbState.esSqlHint ? `<div class="sql-hint">${dbState.esSqlHint}</div>` : '';
+        const tweSqlHintHtml = dbState.tweSqlHint ? `<div class="sql-hint">${dbState.tweSqlHint}</div>` : '';
 
         panel.innerHTML = `
             ${labelHtml}
@@ -1125,6 +1152,11 @@
                 <div class="table-title">rate_limit_window_counter</div>
                 ${wcRows}
                 ${sqlHintHtml}
+            </div>
+            <div class="db-mini-table">
+                <div class="table-title">track_window_end</div>
+                ${tweRows}
+                ${tweSqlHintHtml}
             </div>
             <div class="db-mini-table">
                 <div class="table-title">rate_limit_event_slot</div>
@@ -1137,9 +1169,11 @@
     function resetDbState() {
         dbState.windowCounter = [];
         dbState.eventSlot = [];
+        dbState.trackWindowEnd = [];
         dbState.label = '';
         dbState.sqlHint = '';
         dbState.esSqlHint = '';
+        dbState.tweSqlHint = '';
     }
 
     // ===== NAVIGATION =====
@@ -1394,7 +1428,7 @@
 
         // Scene 6: Compute Search Params (step controls, card per variable)
         5: (() => {
-            const paramIds = ['param-1','param-2','param-3','param-4','param-5','param-6','param-7'];
+            const paramIds = ['param-1','param-2','param-3','param-4','param-5','param-6','param-7','param-8'];
             const descriptions = [
                 'requestedTime: the timestamp from the incoming API call',
                 'windowStart: snap to the nearest window boundary (floor alignment)',
@@ -1402,7 +1436,8 @@
                 'maxFirstWindow: proportional capacity for the partial first window',
                 'firstJitterMs: constrained jitter so scheduledTime \u2265 requestedTime',
                 'fullJitterMs: unconstrained jitter for subsequent full windows',
-                'headroomSecs: how far ahead to search. All 7 values are now ready for the PL/SQL call.'
+                'maxWindowsInChunk: how many windows to provision per chunk',
+                'maxChunksToSearch: how many chunks to search before giving up. All 8 values are now ready for the transaction.'
             ];
             function applyStep(step) {
                 paramIds.forEach((id, i) => {
@@ -1412,7 +1447,7 @@
                 });
                 document.getElementById('s6-desc').textContent = descriptions[step] || '';
             }
-            const ctrl = makeStepController(6, 7, applyStep);
+            const ctrl = makeStepController(6, 8, applyStep);
             return {
                 enter() { ctrl.enter(); },
                 exit() {
@@ -1436,7 +1471,7 @@
                 resetDbState();
 
                 // Step 0: JDBC banner + functions bar
-                dbState.label = 'PL/SQL block begins \u2014 check_existing_slot()';
+                dbState.label = 'Transaction begins \u2014 checkExistingSlot()';
 
                 if (step >= 1) {
                     // First call: SELECT, NO_DATA_FOUND
@@ -1479,7 +1514,7 @@
             };
         })(),
 
-        // Scene 8: find_first_open_window() (step controls + DB tables)
+        // Scene 8: Phase 1 — First Window (step controls + DB tables)
         7: (() => {
             function applyStep(step) {
                 const sql = document.getElementById('skip-sql-8');
@@ -1494,60 +1529,54 @@
 
                 resetDbState();
 
-                // Step 0: Show SQL query + DB state
-                dbState.windowCounter = [
-                    { windowStart: '12:00:00', slotCount: 100, status: 'CLOSED', cssClass: 'row-full' },
-                    { windowStart: '12:00:04', slotCount: 100, status: 'CLOSED', cssClass: 'row-full' },
-                    { windowStart: '12:00:08', slotCount: 42, status: 'OPEN', cssClass: '' }
-                ];
-                dbState.label = 'find_first_open_window(): Skip CLOSED windows via index scan.';
-                dbState.sqlHint = 'SELECT MIN(window_start) WHERE status = \'OPEN\' AND window_start > start_ts';
+                // Step 0: Show SQL + initial state
+                dbState.label = 'Phase 1: ensureWindowExists(alignedStart) + tryLockFirstWindow()';
+                dbState.sqlHint = 'INSERT window_counter ... ON DUP catch; SELECT slot_count FOR UPDATE SKIP LOCKED';
 
                 if (step >= 0) {
                     sql.classList.add('visible');
                 }
                 if (step >= 1) {
-                    // Case 1: OPEN row found
+                    // ensureWindowExists
                     document.getElementById('skip-case-1').style.display = '';
                     document.getElementById('skip-case-1').classList.add('visible');
                     ['skip-s1a','skip-s1b'].forEach(id => document.getElementById(id).classList.add('visible'));
-                    dbState.windowCounter[2].cssClass = 'row-highlight';
-                    dbState.label = 'Case 1: OPEN row found at 12:00:08 \u2014 skip 2 CLOSED windows instantly!';
-                    dbState.sqlHint = 'MIN(window_start) WHERE status=\'OPEN\' \u2192 12:00:08';
+                    dbState.windowCounter = [
+                        { windowStart: '12:00:00', slotCount: 0, status: 'OPEN', cssClass: 'row-insert' }
+                    ];
+                    dbState.label = 'ensureWindowExists: INSERT window_counter for 12:00:00 (catch DUP if exists)';
+                    dbState.sqlHint = 'INSERT INTO window_counter(window_start, slot_count) VALUES(12:00:00, 0)';
                 }
                 if (step >= 2) {
-                    // Case 2: No OPEN, but rows exist (with merged DB state)
+                    // tryLockFirstWindow
                     document.getElementById('skip-case-2').style.display = '';
                     document.getElementById('skip-case-2').classList.add('visible');
                     ['skip-s2a','skip-s2b','skip-s2c'].forEach(id => document.getElementById(id).classList.add('visible'));
                     dbState.windowCounter = [
-                        { windowStart: '12:00:00', slotCount: 100, status: 'CLOSED', cssClass: 'row-full' },
-                        { windowStart: '12:00:04', slotCount: 100, status: 'CLOSED', cssClass: 'row-full' },
-                        { windowStart: '12:00:08', slotCount: 100, status: 'CLOSED', cssClass: 'row-full' }
+                        { windowStart: '12:00:00', slotCount: 42, status: 'OPEN', cssClass: 'row-locked' }
                     ];
-                    dbState.label = 'Case 2: All CLOSED. max_ts = 12:00:08. Return 12:00:08 + 4s = 12:00:12 (jump past all).';
-                    dbState.sqlHint = 'open_ts IS NULL \u2192 MAX(window_start) + window_size \u2192 12:00:12';
+                    dbState.label = 'tryLockFirstWindow: SELECT slot_count FOR UPDATE SKIP LOCKED. count(42) < maxFirstWindow(62) \u2192 has capacity!';
+                    dbState.sqlHint = 'SELECT slot_count FROM window_counter WHERE window_start = 12:00:00 FOR UPDATE SKIP LOCKED';
                 }
                 if (step >= 3) {
-                    // Case 3: No rows at all — new window identified after start_ts
+                    // First window full or locked fallthrough
                     document.getElementById('skip-case-3').style.display = '';
                     document.getElementById('skip-case-3').classList.add('visible');
                     ['skip-s3a','skip-s3b'].forEach(id => document.getElementById(id).classList.add('visible'));
-                    dbState.windowCounter = [];
-                    dbState.label = 'Case 3: No rows at all after start_ts. Return start_ts + window_size.';
-                    dbState.sqlHint = 'open_ts IS NULL, max_ts IS NULL \u2192 start_ts + window_size';
+                    dbState.windowCounter = [
+                        { windowStart: '12:00:00', slotCount: 62, status: 'OPEN', cssClass: 'row-full' }
+                    ];
+                    dbState.label = 'First window full (count \u2265 maxFirstWindow) or SKIP LOCKED returned no row \u2192 fall through to Phase 2.';
+                    dbState.sqlHint = 'count(62) \u2265 maxFirstWindow(62) \u2192 full; proceed to findAndLockFirstAvailable()';
                 }
                 if (step >= 4) {
-                    // Final: searchLimit result + back to our 3-thread example
+                    // Summary result
                     result.classList.add('visible');
                     dbState.windowCounter = [
-                        { windowStart: '12:00:00', slotCount: 100, status: 'CLOSED', cssClass: 'row-full' },
-                        { windowStart: '12:00:04', slotCount: 0, status: 'OPEN', cssClass: 'row-highlight' },
-                        { windowStart: '12:00:08', slotCount: 0, status: 'OPEN', cssClass: '' },
-                        { windowStart: '12:00:12', slotCount: 0, status: 'OPEN', cssClass: '' }
+                        { windowStart: '12:00:00', slotCount: 42, status: 'OPEN', cssClass: 'row-highlight' }
                     ];
-                    dbState.label = 'Our example: T1\u219212:00:04, T2\u219212:00:08, T3\u219212:00:12. Each thread proceeds to try_lock_window().';
-                    dbState.sqlHint = 'search_limit := first_open_window + headroom';
+                    dbState.label = 'In our example: first window has capacity \u2192 claimSlot with constrained jitter [elapsedMs, windowSizeMs).';
+                    dbState.sqlHint = 'If capacity: claimSlot(); otherwise: findAndLockFirstAvailable()';
                 }
                 renderDbTables(8);
             }
@@ -1565,7 +1594,7 @@
             };
         })(),
 
-        // Scene 9: Window Walk & NOWAIT Locking (step controls + DB tables)
+        // Scene 9: Phase 2 — Frontier-Tracked Find+Lock (step controls + DB tables)
         8: (() => {
             // Compute center-X of a window box relative to the thread-anim-area
             function getWinX(idx) {
@@ -1611,7 +1640,7 @@
                 dbState.windowCounter = [
                     { windowStart: '12:00:00', slotCount: 100, status: 'CLOSED', cssClass: 'row-full' }
                 ];
-                dbState.label = 'Phase 1: All threads try the first window (12:00:00)';
+                dbState.label = 'fetchWindowEnd(): SELECT MAX(window_end) FROM track_window_end \u2192 NULL (first request)';
 
                 // Compute window center positions dynamically
                 const w0 = getWinX(0), w1 = getWinX(1), w2 = getWinX(2), w3 = getWinX(3);
@@ -1622,7 +1651,25 @@
                 }
 
                 if (step >= 1) {
-                    // Phase 1: All threads race for window 12:00:00
+                    // Batch provisioning: ensureChunkProvisioned() + INSERT track_window_end
+                    resetThreads();
+                    dbState.windowCounter = [
+                        { windowStart: '12:00:00', slotCount: 100, status: 'CLOSED', cssClass: 'row-full' },
+                        { windowStart: '12:00:04', slotCount: 0, status: 'OPEN', cssClass: 'row-insert' },
+                        { windowStart: '12:00:08', slotCount: 0, status: 'OPEN', cssClass: 'row-insert' },
+                        { windowStart: '12:00:12', slotCount: 0, status: 'OPEN', cssClass: 'row-insert' }
+                    ];
+                    dbState.trackWindowEnd = [
+                        { requestedTime: '12:00:00', windowEnd: '12:00:16', cssClass: 'row-insert' }
+                    ];
+                    dbState.label = 'initWindowEnd(): batch INSERT 3 window_counter rows + INSERT track_window_end frontier';
+                    dbState.sqlHint = 'INSERT INTO window_counter VALUES (12:00:04,0),(12:00:08,0),(12:00:12,0)';
+                    dbState.tweSqlHint = 'INSERT INTO track_window_end (12:00:00, 12:00:16)';
+                }
+                if (step >= 2) {
+                    // All threads scan provisioned range with findAndLockFirstAvailable
+                    dbState.trackWindowEnd = [{ requestedTime: '12:00:00', windowEnd: '12:00:16', cssClass: '' }];
+                    dbState.tweSqlHint = '';
                     t1.style.transition = 'all 0.6s ease';
                     t2.style.transition = 'all 0.6s ease';
                     t3.style.transition = 'all 0.6s ease';
@@ -1631,22 +1678,21 @@
                     t3.style.left = (w0 + 18) + 'px'; t3.style.top = '42px';
                     t1.classList.remove('bounce'); t2.classList.remove('bounce'); t3.classList.remove('bounce');
                     document.getElementById('lock-0').classList.add('visible');
-                    document.getElementById('lock-0').style.color = '#4a9eff';
-                    document.getElementById('status-0').textContent = 'Window is FULL';
+                    document.getElementById('lock-0').style.color = 'var(--error)';
+                    document.getElementById('status-0').textContent = 'FULL (skipped)';
                     document.getElementById('status-0').style.color = 'var(--error)';
                     document.getElementById('status-0').classList.add('visible');
                     document.getElementById('sql-caption-9').classList.add('visible');
-                    dbState.label = 'T1 tries 12:00:00: count=100 \u2265 maxFirstWindow(62). FULL \u2014 skip! T2/T3 get ORA-00054 (NOWAIT) and also skip.';
-                    dbState.sqlHint = 'SELECT slot_count ... FOR UPDATE NOWAIT \u2192 T1 wins lock, sees FULL; T2/T3 skip';
+                    dbState.windowCounter[1].cssClass = ''; dbState.windowCounter[2].cssClass = ''; dbState.windowCounter[3].cssClass = '';
+                    dbState.label = 'findAndLockFirstAvailable: scans provisioned range. 12:00:00 is FULL (count=100) \u2014 SKIP LOCKED skips contended rows.';
+                    dbState.sqlHint = 'SELECT window_start FROM window_counter WHERE slot_count < 100 FOR UPDATE SKIP LOCKED FETCH FIRST 1 ROW ONLY';
                 }
-                if (step >= 2) {
-                    // Phase 2: All 3 threads race for 12:00:04, T1 wins lock
+                if (step >= 3) {
+                    // T1 locks first available, T2/T3 get next available atomically
                     t1.style.transition = 'all 0.8s cubic-bezier(0.25, -0.3, 0.25, 1.3)';
                     t2.style.transition = 'all 0.8s cubic-bezier(0.25, -0.3, 0.25, 1.3)';
                     t3.style.transition = 'all 0.8s cubic-bezier(0.25, -0.3, 0.25, 1.3)';
-                    // T1 locks window 1 — centered on it
                     t1.style.left = w1 + 'px'; t1.style.top = '15px';
-                    // T2 & T3 cluster around window 1 (not yet locked)
                     t2.style.left = (w1 - 18) + 'px'; t2.style.top = '42px';
                     t3.style.left = (w1 + 18) + 'px'; t3.style.top = '42px';
                     document.getElementById('lock-1').classList.add('visible');
@@ -1656,15 +1702,15 @@
                     document.getElementById('status-1').classList.add('visible');
                     dbState.windowCounter = [
                         { windowStart: '12:00:00', slotCount: 100, status: 'CLOSED', cssClass: 'row-full' },
-                        { windowStart: '12:00:04', slotCount: 0, status: 'OPEN', cssClass: 'row-insert' }
+                        { windowStart: '12:00:04', slotCount: 0, status: 'OPEN', cssClass: 'row-locked' },
+                        { windowStart: '12:00:08', slotCount: 0, status: 'OPEN', cssClass: '' },
+                        { windowStart: '12:00:12', slotCount: 0, status: 'OPEN', cssClass: '' }
                     ];
-                    dbState.label = 'Phase 2: find_first_open_window() \u2192 12:00:04. T1 locks it (count=0, has capacity!). T2/T3 bounce.';
-                    dbState.sqlHint = 'All threads skip to first OPEN window via index scan';
+                    dbState.label = 'T1 locks 12:00:04 (first available). T2/T3 see it as SKIP LOCKED \u2192 skipped atomically.';
+                    dbState.sqlHint = 'SKIP LOCKED: T1 gets 12:00:04; T2/T3 skip to next available row';
                 }
-                if (step >= 3) {
-                    // T1 stays at window 1 (already locked)
+                if (step >= 4) {
                     t1.style.left = w1 + 'px'; t1.style.top = '25px';
-                    // T2 locks window 2, T3 clusters near it
                     t2.style.transition = 'all 0.8s cubic-bezier(0.25, -0.3, 0.25, 1.3)';
                     t3.style.transition = 'all 0.8s cubic-bezier(0.25, -0.3, 0.25, 1.3)';
                     t2.style.left = w2 + 'px'; t2.style.top = '15px';
@@ -1677,13 +1723,13 @@
                     dbState.windowCounter = [
                         { windowStart: '12:00:00', slotCount: 100, status: 'CLOSED', cssClass: 'row-full' },
                         { windowStart: '12:00:04', slotCount: 0, status: 'OPEN', cssClass: 'row-locked' },
-                        { windowStart: '12:00:08', slotCount: 0, status: 'OPEN', cssClass: 'row-insert' }
+                        { windowStart: '12:00:08', slotCount: 0, status: 'OPEN', cssClass: 'row-locked' },
+                        { windowStart: '12:00:12', slotCount: 0, status: 'OPEN', cssClass: '' }
                     ];
-                    dbState.label = 'T2 locks 12:00:08 (count=0, capacity!). T3 bounces to 12:00:12.';
-                    dbState.sqlHint = '';
+                    dbState.label = 'T2 locks 12:00:08. If no available window in chunk \u2192 extension loop: provision new chunk + INSERT track_window_end.';
+                    dbState.sqlHint = 'Extension loop: ensureChunkProvisioned() then findAndLockFirstAvailable() in new range';
                 }
-                if (step >= 4) {
-                    // T1 stays at window 1, T2 stays at window 2, T3 locks window 3
+                if (step >= 5) {
                     t1.style.left = w1 + 'px'; t1.style.top = '25px';
                     t2.style.left = w2 + 'px'; t2.style.top = '25px';
                     t3.style.transition = 'all 0.8s cubic-bezier(0.25, -0.3, 0.25, 1.3)';
@@ -1700,13 +1746,13 @@
                         { windowStart: '12:00:08', slotCount: 0, status: 'OPEN', cssClass: 'row-pulse' },
                         { windowStart: '12:00:12', slotCount: 0, status: 'OPEN', cssClass: 'row-pulse' }
                     ];
-                    dbState.label = 'All threads locked their own windows! T1\u219212:00:04, T2\u219212:00:08, T3\u219212:00:12. Each proceeds to claim_slot_in_window().';
-                    dbState.sqlHint = 'SELECT FOR UPDATE NOWAIT \u2014 Skip, don\u2019t block!';
+                    dbState.label = 'All threads locked their own windows! T1\u219212:00:04, T2\u219212:00:08, T3\u219212:00:12. Each proceeds to claimSlot().';
+                    dbState.sqlHint = 'FOR UPDATE SKIP LOCKED \u2014 skip contended rows atomically!';
                 }
                 renderDbTables(9);
             }
 
-            const ctrl = makeStepController(9, 5, applyStep);
+            const ctrl = makeStepController(9, 6, applyStep);
             return {
                 enter() {
                     ctrl.enter();
@@ -1770,7 +1816,10 @@
                     { windowStart: '12:00:08', slotCount: 0, status: 'OPEN', cssClass: 'row-locked' },
                     { windowStart: '12:00:12', slotCount: 0, status: 'OPEN', cssClass: 'row-locked' }
                 ];
-                dbState.label = 'claim_slot_in_window() \u2014 All 3 threads compute jitter in parallel on the app server';
+                dbState.trackWindowEnd = [
+                    { requestedTime: '12:00:00', windowEnd: '12:00:16', cssClass: '' }
+                ];
+                dbState.label = 'claimSlot() \u2014 All 3 threads compute jitter in parallel on the app server';
 
                 if (step >= 0) {
                     // Show app server note + 3 spinning jitter reels
@@ -1882,7 +1931,7 @@
                     header: 'Response (503 Service Unavailable)',
                     headerColor: 'var(--error)',
                     body: `{<br>&nbsp;&nbsp;<span class="field-name">"error":</span> <span class="field-val">"SlotAssignmentException"</span>,<br>&nbsp;&nbsp;<span class="field-name">"message":</span> <span class="field-val">"All windows exhausted within search limit"</span>,<br>&nbsp;&nbsp;<span class="field-name">"windowsSearched":</span> <span class="field-val">100</span><br>}`,
-                    note: 'Caller should retry later or increase headroom-windows config',
+                    note: 'Caller should retry later or increase maxChunksToSearch config',
                     noteColor: 'var(--error)'
                 }
             };

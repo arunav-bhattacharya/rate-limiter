@@ -1,7 +1,7 @@
 package com.ratelimiter.admin
 
 import com.ratelimiter.config.RateLimitConfig
-import com.ratelimiter.config.RateLimitConfigRepository
+import com.ratelimiter.repo.RateLimitConfigRepository
 import jakarta.inject.Inject
 import jakarta.ws.rs.Consumes
 import jakarta.ws.rs.GET
@@ -80,6 +80,7 @@ class RateLimitAdminResource @Inject constructor(
         }
 
         require(!windowSize.isZero && !windowSize.isNegative) { "windowSize must be positive" }
+        require(windowSize.toSeconds() >= 1) { "windowSize must be at least 1 second" }
 
         val config = configRepository.createConfig(
             configName = request.configName,
