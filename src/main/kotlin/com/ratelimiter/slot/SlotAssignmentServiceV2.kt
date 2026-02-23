@@ -36,7 +36,7 @@ class SlotAssignmentServiceV2 @Inject constructor(
             } else {
                 // No available slots found, add another chunk of windows
                 val nextWindowStart = currWindowEnd + WINDOW_SIZE
-                val newWindowEnd = currWindowEnd + WINDOW_CHUNK_SIZE
+                val newWindowEnd = nextWindowStart + WINDOW_CHUNK_SIZE
                 with(windowSlotCounterRepository) { batchInsertWindows(generateWindows(nextWindowStart)) }
                 with(windowEndTrackerRepository) { updateWindowEnd(requestedTime, currWindowEnd, newWindowEnd) }
 
