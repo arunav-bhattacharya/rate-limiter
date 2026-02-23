@@ -169,9 +169,9 @@ CREATE INDEX idx_event_slot_window ON rate_limit_event_slot (window_start);
 CREATE INDEX idx_event_slot_created ON rate_limit_event_slot (created_at);
 
 
-CREATE TABLE latest_window_start
+CREATE TABLE track_window_end
 (
     requested_time TIMESTAMP NOT NULL,
-    window_start   TIMESTAMP NOT NULL,
+    window_end     TIMESTAMP NOT NULL,
     CONSTRAINT pk_window_start PRIMARY KEY (requested_time)
 );

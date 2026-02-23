@@ -1,7 +1,7 @@
 package com.ratelimiter.slot
 
 import com.ratelimiter.config.RateLimitConfig
-import com.ratelimiter.config.RateLimitConfigRepository
+import com.ratelimiter.repo.RateLimitConfigRepository
 import jakarta.enterprise.context.ApplicationScoped
 import jakarta.inject.Inject
 import org.eclipse.microprofile.config.inject.ConfigProperty

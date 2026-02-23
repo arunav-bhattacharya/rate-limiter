@@ -1,7 +1,7 @@
 package com.ratelimiter.admin
 
 import com.ratelimiter.config.RateLimitConfig
-import com.ratelimiter.config.RateLimitConfigRepository
+import com.ratelimiter.repo.RateLimitConfigRepository
 import jakarta.inject.Inject
 import jakarta.ws.rs.Consumes
 import jakarta.ws.rs.GET

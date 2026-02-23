@@ -1,6 +1,7 @@
 package com.ratelimiter.slot
 
 import jakarta.enterprise.context.ApplicationScoped
+import org.jetbrains.exposed.sql.transactions.transaction
 import java.time.Duration
 import java.time.Instant
 
@@ -15,24 +16,26 @@ class SlotAssignmentServiceV2 {
         // Get the current window to search
         val currWindowEnd = currentWindowEnd(requestedTime)
 
-        val firstAvailableSlot = lockFirstAvailableSlot(requestedTime, currWindowEnd)
+        return transaction {
+            val firstAvailableSlot = lockFirstAvailableSlot(requestedTime, currWindowEnd)
 
-        return if (firstAvailableSlot != null) {
-            claimSlot(eventId, requestedTime, requestedTime)
-        } else {
-            // No available slots found, add another chunk of windows
-            val nextWindowStart = currWindowEnd + WINDOW_SIZE
-            val newWindowEnd = currWindowEnd + WINDOW_CHUNK_SIZE
-            loadChunkOfWindows(nextWindowStart)
-            updateWindowEnd(requestedTime, currWindowEnd, newWindowEnd)
+            if (firstAvailableSlot != null) {
+                claimSlot(eventId, requestedTime, requestedTime)
+            } else {
+                // No available slots found, add another chunk of windows
+                val nextWindowStart = currWindowEnd + WINDOW_SIZE
+                val newWindowEnd = currWindowEnd + WINDOW_CHUNK_SIZE
+                loadChunkOfWindows(nextWindowStart)
+                updateWindowEnd(requestedTime, currWindowEnd, newWindowEnd)
 
-            // Try to claim a slot again after loading a new chunk of windows
-            lockFirstAvailableSlot(requestedTime, newWindowEnd)
-                ?: throw RuntimeException(
-                    "Couldn't find a slot to assign for eventId: " +
-                            "$eventId, requestedTime: $requestedTime. No existing windows, and failed to assign in new window."
-                )
-            claimSlot(eventId, requestedTime, requestedTime)
+                // Try to claim a slot again after loading a new chunk of windows
+                lockFirstAvailableSlot(requestedTime, newWindowEnd)
+                    ?: throw RuntimeException(
+                        "Couldn't find a slot to assign for eventId: " +
+                                "$eventId, requestedTime: $requestedTime. No existing windows, and failed to assign in new window."
+                    )
+                claimSlot(eventId, requestedTime, requestedTime)
+            }
         }
     }
 
@@ -96,6 +99,8 @@ class SlotAssignmentServiceV2 {
         *   FETCH FIRST 1 ROW ONLY
         *   SKIP LOCKED;
         *
+        *
+        *   fetchFirstWindowHavingAvailableSlot()
         * */
 
         // Return the window_start from the above query, or null if no windows are available
