@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Slot Assignment Service - Animated Presentation</title>
+    <title>Slot Assignment Service - Animated Presentation (V1 / V2 / V3)</title>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
     <style>
         /* ===== RESET & BASE ===== */
@@ -552,6 +552,75 @@
         #scene-11 .replay-node.active-node { border-color: var(--primary); background: rgba(74,158,255,0.15); }
         #scene-11 .replay-arrow { color: var(--primary); font-size: 14px; opacity: 0; transition: opacity 0.2s ease; }
         #scene-11 .replay-arrow.visible { opacity: 1; }
+
+        /* ===== SCENE 12: V3 ALGORITHM ===== */
+        #scene-12 .v3-container { width: 100%; max-width: 900px; }
+        #scene-12 .v3-phase {
+            padding: 14px 18px; border-radius: 10px;
+            background: var(--surface); border: 1px solid var(--border);
+            margin-bottom: 12px; opacity: 0; transition: all 0.4s ease;
+        }
+        #scene-12 .v3-phase.visible { opacity: 1; }
+        #scene-12 .v3-phase h4 { font-size: 14px; margin-bottom: 8px; }
+        #scene-12 .v3-phase .v3-detail {
+            font-size: 12px; color: var(--text-muted); margin-bottom: 4px;
+            padding-left: 10px; border-left: 2px solid var(--border);
+        }
+        #scene-12 .v3-phase .v3-sql {
+            font-family: var(--mono); font-size: 11px;
+            padding: 6px 10px; border-radius: 6px;
+            background: var(--code-bg); border: 1px solid var(--border);
+            margin-top: 6px; display: inline-block;
+        }
+        #scene-12 .v3-impl-row {
+            display: flex; gap: 12px; margin-top: 12px;
+            opacity: 0; transition: all 0.4s ease;
+        }
+        #scene-12 .v3-impl-row.visible { opacity: 1; }
+        #scene-12 .v3-impl-card {
+            flex: 1; padding: 12px 16px; border-radius: 10px;
+            background: var(--surface); border: 1px solid var(--border);
+        }
+        #scene-12 .v3-impl-card h5 { font-size: 13px; margin-bottom: 6px; }
+        #scene-12 .v3-impl-card .v3-impl-detail { font-size: 11px; color: var(--text-muted); line-height: 1.6; }
+
+        /* ===== SCENE 13: V1/V2/V3 COMPARISON ===== */
+        #scene-13 { padding-top: 20px; }
+        #scene-13 .compare-container { width: 100%; max-width: 960px; }
+        #scene-13 .compare-table {
+            width: 100%; border-collapse: collapse;
+            font-size: 12px; font-family: var(--mono);
+        }
+        #scene-13 .compare-table th {
+            padding: 8px 10px; text-align: left;
+            border-bottom: 2px solid var(--border);
+            font-weight: 700; font-size: 13px;
+        }
+        #scene-13 .compare-table th:nth-child(2) { color: var(--warning); }
+        #scene-13 .compare-table th:nth-child(3) { color: var(--error); }
+        #scene-13 .compare-table th:nth-child(4) { color: var(--success); }
+        #scene-13 .compare-table td {
+            padding: 7px 10px;
+            border-bottom: 1px solid rgba(255,255,255,0.05);
+            font-size: 11px; color: var(--text-muted);
+            vertical-align: top;
+        }
+        #scene-13 .compare-table td:first-child {
+            color: var(--text); font-weight: 600; min-width: 120px;
+        }
+        #scene-13 .compare-table tr { opacity: 0; transition: opacity 0.3s ease; }
+        #scene-13 .compare-table tr.visible { opacity: 1; }
+        #scene-13 .compare-table tr:first-child { opacity: 1; }
+        #scene-13 .cmp-good { color: var(--success) !important; }
+        #scene-13 .cmp-bad { color: var(--error) !important; }
+        #scene-13 .cmp-neutral { color: var(--warning) !important; }
+        #scene-13 .verdict-box {
+            margin-top: 16px; padding: 14px 20px; border-radius: 10px;
+            background: rgba(46,204,113,0.08); border: 1px solid rgba(46,204,113,0.3);
+            text-align: center; font-size: 14px; font-weight: 600;
+            color: var(--success); opacity: 0; transition: opacity 0.5s ease;
+        }
+        #scene-13 .verdict-box.visible { opacity: 1; }
     </style>
 </head>
 <body>
@@ -568,6 +637,9 @@
         <div class="main-subtitle anim-item">Oracle-based Rate Limiter for High-Throughput Event Scheduling</div>
         <div style="margin-top: 4px; font-size: 15px; color: var(--text-muted);" class="anim-item">
             Supports up to <span style="color: var(--primary); font-weight: 700;">1,000,000</span> events / day
+        </div>
+        <div style="margin-top: 8px; font-size: 13px; color: var(--text-muted);" class="anim-item">
+            V1 (PL/SQL) &bull; V2 (Exposed) &bull; <span style="color: var(--success); font-weight: 600;">V3 (Hybrid)</span>
         </div>
         <div class="badge-row">
             <div class="tech-badge badge-blue">Quarkus 3.x</div>
@@ -1050,6 +1122,155 @@
         </div>
     </section>
 
+    <!-- ===== SCENE 12: V3 ALGORITHM ===== -->
+    <section class="scene" id="scene-12">
+        <div class="scene-title anim-item">V3: Chunked Find+Lock</div>
+        <div class="scene-subtitle anim-item">Combines V2's combined find+lock with V1's correctness &mdash; simpler than both</div>
+        <div class="v3-container">
+            <div class="v3-phase" id="v3-phase-0">
+                <h4 style="color: var(--primary);">Phase 0: Idempotency Check (inside transaction)</h4>
+                <div class="v3-detail">SELECT FROM event_slot WHERE event_id = ? &mdash; same as V1</div>
+                <div class="v3-detail">Runs inside the transaction (no TOCTOU race like V2)</div>
+            </div>
+            <div class="v3-phase" id="v3-phase-1">
+                <h4 style="color: var(--success);">Phase 1: First Window (proportional capacity)</h4>
+                <div class="v3-detail">ensureWindowExists(alignedStart) &mdash; INSERT, catch DUP</div>
+                <div class="v3-detail">tryLockFirstWindow: SELECT slot_count FOR UPDATE <span style="color: var(--warning); font-weight: 600;">SKIP LOCKED</span></div>
+                <div class="v3-detail">If count < maxFirstWindow &rarr; claimSlot with constrained jitter</div>
+                <div class="v3-detail" style="border-left-color: var(--success);">Epoch-aligned window boundary + proportional capacity (from V1)</div>
+            </div>
+            <div class="v3-phase" id="v3-phase-2">
+                <h4 style="color: var(--warning);">Phase 2: Chunked Find+Lock Loop</h4>
+                <div class="v3-detail">For each chunk (0 to maxSearchChunks-1):</div>
+                <div class="v3-detail" style="padding-left: 20px; border-left-color: var(--warning);">
+                    <strong>1.</strong> ensureChunkProvisioned &mdash; check last window exists, batch insert if not
+                </div>
+                <div class="v3-detail" style="padding-left: 20px; border-left-color: var(--warning);">
+                    <strong>2.</strong> findAndLockFirstAvailable &mdash; the V2-style combined query:
+                </div>
+                <div class="v3-sql">
+                    <span style="color: #c792ea;">SELECT</span> window_start <span style="color: #c792ea;">FROM</span> window_counter<br>
+                    <span style="color: #c792ea;">WHERE</span> window_start &gt;= ? <span style="color: #c792ea;">AND</span> &lt; ?<br>
+                    <span style="color: #c792ea;">AND</span> slot_count &lt; max_per_window<br>
+                    <span style="color: #c792ea;">ORDER BY</span> window_start<br>
+                    <span style="color: #c792ea;">FETCH FIRST 1 ROW ONLY</span><br>
+                    <span style="color: var(--warning); font-weight: 600;">FOR UPDATE SKIP LOCKED</span>
+                </div>
+                <div class="v3-detail" style="margin-top: 8px; border-left-color: var(--success);">
+                    One query replaces V1's entire inner walk loop.<br>
+                    SKIP LOCKED skips all contended rows atomically (not one-by-one like NOWAIT).
+                </div>
+            </div>
+            <div class="v3-phase" id="v3-phase-3">
+                <h4 style="color: #c792ea;">Key Improvement: Existence-Check Guard</h4>
+                <div class="v3-detail">V2's thundering herd: N threads all batch-insert 100 windows simultaneously</div>
+                <div class="v3-detail" style="border-left-color: var(--success);">
+                    V3 fix: Check if <strong>last window</strong> in chunk already exists. If yes &rarr; skip provisioning entirely.<br>
+                    First thread provisions, all others skip. No thundering herd.
+                </div>
+            </div>
+            <div class="v3-impl-row" id="v3-impl-row">
+                <div class="v3-impl-card" style="border-color: var(--warning);">
+                    <h5 style="color: var(--warning);">V3-SQL (PL/SQL)</h5>
+                    <div class="v3-impl-detail">
+                        Single JDBC round trip<br>
+                        1 anonymous PL/SQL block<br>
+                        Same 11 IN / 5 OUT params<br>
+                        assign-slot-v3.sql
+                    </div>
+                </div>
+                <div class="v3-impl-card" style="border-color: var(--primary);">
+                    <h5 style="color: var(--primary);">V3-Exposed (Kotlin)</h5>
+                    <div class="v3-impl-detail">
+                        Single transaction{} block<br>
+                        ~5-7 DB statements<br>
+                        Exposed DSL + raw SQL exec()<br>
+                        Fresh jitter per claim
+                    </div>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <!-- ===== SCENE 13: V1/V2/V3 COMPARISON ===== -->
+    <section class="scene" id="scene-13">
+        <div class="scene-title anim-item">V1 vs V2 vs V3</div>
+        <div class="scene-subtitle anim-item">Side-by-side comparison across all dimensions</div>
+        <div class="compare-container">
+            <table class="compare-table" id="compare-table-13">
+                <tr>
+                    <th>Dimension</th>
+                    <th>V1 (PL/SQL)</th>
+                    <th>V2 (Exposed)</th>
+                    <th>V3 (Hybrid)</th>
+                </tr>
+                <tr id="cmp-1">
+                    <td>Window alignment</td>
+                    <td class="cmp-good">Epoch-aligned</td>
+                    <td class="cmp-bad">Raw requestedTime</td>
+                    <td class="cmp-good">Epoch-aligned</td>
+                </tr>
+                <tr id="cmp-2">
+                    <td>Algorithm</td>
+                    <td class="cmp-neutral">Nested loops +<br>3-tier skip</td>
+                    <td>Single find+lock,<br>one extension</td>
+                    <td class="cmp-good">Chunk loop +<br>find+lock per chunk</td>
+                </tr>
+                <tr id="cmp-3">
+                    <td>DB round trips</td>
+                    <td class="cmp-good">1 PL/SQL call</td>
+                    <td class="cmp-bad">3-5 transactions</td>
+                    <td class="cmp-good">1 txn (~5-7 stmts)<br>or 1 PL/SQL call</td>
+                </tr>
+                <tr id="cmp-4">
+                    <td>Lock strategy</td>
+                    <td class="cmp-neutral">NOWAIT<br>(per-window)</td>
+                    <td class="cmp-good">SKIP LOCKED<br>(set-based)</td>
+                    <td class="cmp-good">SKIP LOCKED<br>(set-based)</td>
+                </tr>
+                <tr id="cmp-5">
+                    <td>Provisioning</td>
+                    <td class="cmp-good">Lazy per-window</td>
+                    <td class="cmp-bad">Thundering herd</td>
+                    <td class="cmp-good">Batch + existence<br>check guard</td>
+                </tr>
+                <tr id="cmp-6">
+                    <td>Search depth</td>
+                    <td class="cmp-good">1000 windows</td>
+                    <td class="cmp-bad">~200 then throw</td>
+                    <td class="cmp-good">1000 windows</td>
+                </tr>
+                <tr id="cmp-7">
+                    <td>First window</td>
+                    <td class="cmp-good">Proportional +<br>constrained jitter</td>
+                    <td class="cmp-bad">None</td>
+                    <td class="cmp-good">Proportional +<br>constrained jitter</td>
+                </tr>
+                <tr id="cmp-8">
+                    <td>Config</td>
+                    <td class="cmp-good">Dynamic (DB)</td>
+                    <td class="cmp-bad">Hardcoded</td>
+                    <td class="cmp-good">Dynamic (DB)</td>
+                </tr>
+                <tr id="cmp-9">
+                    <td>Extra tables</td>
+                    <td class="cmp-good">None</td>
+                    <td class="cmp-bad">track_window_end</td>
+                    <td class="cmp-good">None</td>
+                </tr>
+                <tr id="cmp-10">
+                    <td>Complexity</td>
+                    <td class="cmp-neutral">High</td>
+                    <td>Low (incomplete)</td>
+                    <td class="cmp-good">Medium (simplest<br>correct solution)</td>
+                </tr>
+            </table>
+            <div class="verdict-box" id="verdict-13">
+                V3 = V2's elegance + V1's correctness. Simpler than both.
+            </div>
+        </div>
+    </section>
+
 </div>
 
 <!-- Navigation Controls -->
@@ -1075,7 +1296,7 @@
 (function() {
     'use strict';
 
-    const TOTAL_SCENES = 11;
+    const TOTAL_SCENES = 13;
     let currentScene = 0;
     let animationTimeouts = [];
 
@@ -1917,6 +2138,56 @@
                 exit() {
                     resetScene('scene-11');
                     document.getElementById('response-json-11').style.opacity = '0';
+                }
+            };
+        })(),
+
+        // Scene 12: V3 Algorithm (step controls)
+        11: (() => {
+            const phaseIds = ['v3-phase-0', 'v3-phase-1', 'v3-phase-2', 'v3-phase-3'];
+            function applyStep(step) {
+                phaseIds.forEach((id, i) => {
+                    const el = document.getElementById(id);
+                    if (i <= step) el.classList.add('visible');
+                    else el.classList.remove('visible');
+                });
+                const implRow = document.getElementById('v3-impl-row');
+                if (step >= 4) implRow.classList.add('visible');
+                else implRow.classList.remove('visible');
+            }
+            const ctrl = makeStepController(12, 5, applyStep);
+            return {
+                enter() { ctrl.enter(); },
+                exit() {
+                    resetScene('scene-12');
+                    phaseIds.forEach(id => document.getElementById(id).classList.remove('visible'));
+                    document.getElementById('v3-impl-row').classList.remove('visible');
+                    ctrl.reset();
+                }
+            };
+        })(),
+
+        // Scene 13: V1/V2/V3 Comparison
+        12: (() => {
+            const rowIds = ['cmp-1','cmp-2','cmp-3','cmp-4','cmp-5','cmp-6','cmp-7','cmp-8','cmp-9','cmp-10'];
+            function applyStep(step) {
+                rowIds.forEach((id, i) => {
+                    const el = document.getElementById(id);
+                    if (i <= step) el.classList.add('visible');
+                    else el.classList.remove('visible');
+                });
+                const verdict = document.getElementById('verdict-13');
+                if (step >= 10) verdict.classList.add('visible');
+                else verdict.classList.remove('visible');
+            }
+            const ctrl = makeStepController(13, 11, applyStep);
+            return {
+                enter() { ctrl.enter(); },
+                exit() {
+                    resetScene('scene-13');
+                    rowIds.forEach(id => document.getElementById(id).classList.remove('visible'));
+                    document.getElementById('verdict-13').classList.remove('visible');
+                    ctrl.reset();
                 }
             };
         })()
