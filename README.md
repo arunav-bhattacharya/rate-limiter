@@ -356,6 +356,79 @@ flowchart TD
 
 ---
 
+## Algorithm: Analysis
+
+### Key Features
+
+| Feature | Mechanism |
+|---|---|
+| **Epoch-aligned windows** | `windowStart = epochSec - (epochSec % windowSizeSecs)` — deterministic, no drift |
+| **Proportional first-window capacity** | `maxFirstWindow = floor(maxPerWindow × remainingMs / windowSizeMs)` — prevents overscheduling in a partially-elapsed window |
+| **Frontier-tracked search** | Append-only `track_window_end` table tracks the provisioned boundary per `alignedStart`. New requests jump directly to the frontier instead of scanning from chunk 0 |
+| **Single find+lock query** | `SELECT ... WHERE slot_count < max ORDER BY window_start FOR UPDATE SKIP LOCKED` — atomically finds the earliest available window and locks it in one query |
+| **Configurable chunk extensions** | `max-chunks-to-search` (default 2) controls how many additional chunks are provisioned and searched when the initial range is full |
+| **Idempotency** | Phase 0 pre-check + `UNIQUE(event_id)` constraint with `DUP_VAL_ON_INDEX` recovery — duplicate calls return the same slot without incrementing counters |
+| **SKIP LOCKED concurrency** | Row-level locking skips contended rows instead of blocking — concurrent threads don't wait for each other |
+| **JVM-local first-window cache** | `ConcurrentHashMap<Instant, Boolean>` caches exhausted first windows to skip re-locking |
+| **Config-agnostic counters** | `slot_count` tracks total usage regardless of which config version assigned each slot — capacity changes take effect immediately on existing windows |
+| **Random jitter** | Events spread uniformly within windows via `ThreadLocalRandom`. First window: `[elapsedMs, windowSizeMs)`. Subsequent windows: `[0, windowSizeMs)` |
+
+### Performance Bottlenecks
+
+#### 1. Chunk Provisioning Cost
+
+`ensureChunkProvisioned()` inserts `maxWindowsInChunk` (default 100) rows per chunk. The PL/SQL implementation uses a loop with individual INSERTs (each catching `DUP_VAL_ON_INDEX`). The Kotlin implementation uses `batchInsert` but still issues 100 rows per chunk. The first thread to hit an unprovisioned chunk pays the full provisioning cost; subsequent threads skip via the existence-check guard on the last window.
+
+#### 2. Full-Range Scan Degradation
+
+`findAndLockFirstAvailableWindow()` scans `WHERE slot_count < maxPerWindow ORDER BY window_start FOR UPDATE SKIP LOCKED`. As windows fill up, the query walks past all full rows before finding an available one. The index `idx_window_counter_slot_start` on `(slot_count, window_start)` helps when `slot_count < maxPerWindow` is selective, but degrades as most windows approach capacity.
+
+#### 3. Sequential Extension Loop
+
+Each extension chunk must be provisioned and scanned before the next. There is no parallelism between chunks — the loop is strictly sequential within one transaction.
+
+#### 4. Long-Held Transaction Locks
+
+A single transaction spans all phases: idempotency check, first-window lock, frontier read, chunk provisioning, find+lock scan, and extension loop. The locked window row is held for the entire duration, which includes provisioning new chunks (100 INSERTs each).
+
+#### 5. Frontier Read Overhead
+
+`SELECT MAX(window_end) FROM track_window_end WHERE requested_time = ?` scans all frontier rows for a given `requestedTime`. The row count grows linearly with extension iterations across all clients — each extension appends a new row.
+
+#### 6. JVM-Local First-Window Cache
+
+`firstWindowFull` is a `ConcurrentHashMap` — not shared across nodes. In a multi-node deployment, each node independently discovers full first-windows by attempting and failing the lock. There is no cross-node eviction.
+
+### Functional Limitations
+
+#### 1. First-Window Cache Memory Leak
+
+`firstWindowFull` has no TTL eviction in production. `evictFirstWindowCache()` exists for tests only. Long-running instances accumulate stale entries for past windows that will never be used again.
+
+#### 2. Other Limitations
+
+See [Known Limitations](#known-limitations) for: shared windows across `requestedTime` values, config propagation delay (5s cache TTL), no business-hours awareness, and search depth exhaustion.
+
+### Time Complexity
+
+Let **W** = `max-windows-in-chunk` (default 100), **C** = `max-chunks-to-search` (default 2), **M** = `max_per_window`.
+
+| Scenario | Time Complexity | DB Operations | Windows Scanned | Rows Provisioned |
+|---|---|---|---|---|
+| **Best: Idempotent hit** (Phase 0) | O(1) | 1 SELECT | 0 | 0 |
+| **Best: First window available** (Phase 1) | O(1) | ~5 (SELECT + INSERT + SELECT FOR UPDATE + INSERT + UPDATE) | 1 | 0–1 |
+| **Average: Slot in provisioned range** (Phase 2) | O(W) | ~5 + 1 SELECT MAX + 1 range scan | up to W | 0 (or W if first to provision) |
+| **Worst: Extension loop** (Phase 3) | O(W × (1 + C)) | Phase 2 + C × (W INSERTs + 1 INSERT frontier + 1 range scan) | W × (1 + C) | C × W |
+| **Worst: Exhaustion** | O(W × (1 + C)) | Same as Phase 3 | W × (1 + C) | C × W |
+
+With defaults (W=100, C=2): worst case scans up to **300 windows** and provisions up to **200 additional rows**.
+
+**Throughput ceiling**: At steady state with concurrent load, throughput is bounded by:
+- **Lock contention**: Each `claimSlot()` holds a row lock for INSERT + UPDATE. With M slots per window and W windows provisioned, up to W concurrent threads can claim simultaneously (one per window).
+- **Provisioning bottleneck**: The first thread to exhaust a range pays O(W) INSERTs while holding the transaction open. Other threads hitting the same range are either SKIP LOCKED'd or wait for provisioning.
+
+---
+
 ## Configuration Reference
 
 All properties are set in `src/main/resources/application.yaml`:
