@@ -6,7 +6,7 @@ import org.jetbrains.exposed.exceptions.ExposedSQLException
 import org.jetbrains.exposed.sql.IntegerColumnType
 import org.jetbrains.exposed.sql.SqlExpressionBuilder
 import org.jetbrains.exposed.sql.Transaction
-import org.jetbrains.exposed.sql.insert
+import org.jetbrains.exposed.sql.batchInsert
 import org.jetbrains.exposed.sql.javatime.JavaInstantColumnType
 import org.jetbrains.exposed.sql.statements.StatementType
 import org.jetbrains.exposed.sql.update
@@ -48,15 +48,10 @@ class WindowSlotCounterRepository {
     }
 
     fun Transaction.batchInsertWindows(windows: List<Instant>) {
-        windows.forEach { window ->
-            try {
-                WindowCounterTable.insert {
-                    it[windowStart] = window
-                    it[slotCount] = 0
-                }
-            } catch (_: ExposedSQLException) {
-                // Window already exists — ignore duplicate
-            }
+
+        WindowCounterTable.batchInsert(windows, true, false) { window ->
+            this[WindowCounterTable.windowStart] = window
+            this[WindowCounterTable.slotCount] = 0
         }
     }
 
