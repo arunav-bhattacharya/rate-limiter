@@ -21,21 +21,23 @@ import java.util.concurrent.ThreadLocalRandom
  * slot insertion, and counter update — executes as a single anonymous PL/SQL block
  * in one JDBC round trip. This minimizes network latency and lock hold time.
  *
- * The PL/SQL block uses Oracle `SELECT FOR UPDATE NOWAIT` for pessimistic locking.
- * Threads that lose the lock race skip to the next window instead of blocking,
+ * The PL/SQL block uses Oracle `SELECT FOR UPDATE SKIP LOCKED` for pessimistic locking.
+ * Threads that can't lock a window silently skip it and move to the next window,
  * distributing load across windows naturally under concurrent access.
  *
- * The search limit is computed dynamically within the PL/SQL block: after a skip
- * query finds the first available window, the search limit is set to
- * `first_open_window + headroom`. This is request-scoped — each invocation computes its
- * own limit relative to the requested time's neighborhood, so events at different
- * time horizons never interfere with each other.
+ * The search uses a chunked adaptive approach: after a skip query finds the first
+ * available window, the search limit is set to `first_available + headroom`. If the
+ * chunk is exhausted, a re-skip finds the next available window and another chunk
+ * begins. This continues for up to `max_search_chunks` chunks, preventing false
+ * exhaustion when capacity exists beyond a single headroom range.
  */
 @ApplicationScoped
 class SlotAssignmentService @Inject constructor(
     private val configRepository: RateLimitConfigRepository,
     @param:ConfigProperty(name = "rate-limiter.headroom-windows", defaultValue = "100")
-    private val headroomWindows: Int
+    private val headroomWindows: Int,
+    @param:ConfigProperty(name = "rate-limiter.max-search-chunks", defaultValue = "10")
+    private val maxSearchChunks: Int
 ) {
     private val logger = LoggerFactory.getLogger(SlotAssignmentService::class.java)
 
@@ -121,7 +123,7 @@ class SlotAssignmentService @Inject constructor(
 
     /**
      * Execute the PL/SQL slot assignment block via CallableStatement.
-     * Single JDBC round trip: binds 10 IN params, registers 5 OUT params, executes,
+     * Single JDBC round trip: binds 11 IN params, registers 5 OUT params, executes,
      * reads results.
      */
     private fun executeSlotAssignment(
@@ -137,7 +139,7 @@ class SlotAssignmentService @Inject constructor(
         return transaction {
             val rawConnection = this.connection.connection as java.sql.Connection
             rawConnection.prepareCall(SlotAssignmentSql.ASSIGN_SLOT_PLSQL).use { cs ->
-                // Bind IN parameters (positions 1-10)
+                // Bind IN parameters (positions 1-11)
                 cs.setString(1, eventId)                              // in_event_id
                 cs.setTimestamp(2, Timestamp.from(windowStart))       // in_window_start
                 cs.setTimestamp(3, Timestamp.from(requestedTime))     // in_requested_time
@@ -148,22 +150,23 @@ class SlotAssignmentService @Inject constructor(
                 cs.setLong(8, firstJitterMs)                          // in_first_jitter_ms
                 cs.setLong(9, fullJitterMs)                           // in_full_jitter_ms
                 cs.setLong(10, headroomSecs)                          // in_headroom_secs
+                cs.setInt(11, maxSearchChunks)                        // in_max_search_chunks
 
-                // Register OUT parameters (positions 11-15)
-                cs.registerOutParameter(11, Types.INTEGER)            // ou_status
-                cs.registerOutParameter(12, Types.BIGINT)             // ou_slot_id
-                cs.registerOutParameter(13, Types.TIMESTAMP)          // ou_scheduled_time
-                cs.registerOutParameter(14, Types.TIMESTAMP)          // ou_window_start
-                cs.registerOutParameter(15, Types.INTEGER)            // ou_windows_searched
+                // Register OUT parameters (positions 12-16)
+                cs.registerOutParameter(12, Types.INTEGER)            // ou_status
+                cs.registerOutParameter(13, Types.BIGINT)             // ou_slot_id
+                cs.registerOutParameter(14, Types.TIMESTAMP)          // ou_scheduled_time
+                cs.registerOutParameter(15, Types.TIMESTAMP)          // ou_window_start
+                cs.registerOutParameter(16, Types.INTEGER)            // ou_windows_searched
 
                 cs.execute()
 
                 SlotAssignmentResult(
-                    status = cs.getInt(11),
-                    slotId = cs.getLong(12),
-                    scheduledTime = cs.getTimestamp(13)?.toInstant() ?: Instant.EPOCH,
-                    windowStart = cs.getTimestamp(14)?.toInstant() ?: Instant.EPOCH,
-                    windowsSearched = cs.getInt(15)
+                    status = cs.getInt(12),
+                    slotId = cs.getLong(13),
+                    scheduledTime = cs.getTimestamp(14)?.toInstant() ?: Instant.EPOCH,
+                    windowStart = cs.getTimestamp(15)?.toInstant() ?: Instant.EPOCH,
+                    windowsSearched = cs.getInt(16)
                 )
             }
         }

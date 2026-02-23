@@ -265,22 +265,26 @@ class SlotAssignmentServiceTest {
     }
 
     @Test
-    fun `window status transitions to CLOSED when full`() {
-        configRepository.createConfig("test-status", 2, Duration.ofSeconds(4))
+    fun `full window counter matches max_per_window`() {
+        configRepository.createConfig("test-full-counter", 2, Duration.ofSeconds(4))
         val requestedTime = Instant.parse("2025-06-01T12:00:00Z")
 
         // Fill window with 2 events (max)
-        service.assignSlot("evt-st-1", "test-status", requestedTime)
-        service.assignSlot("evt-st-2", "test-status", requestedTime)
+        service.assignSlot("evt-fc-1", "test-full-counter", requestedTime)
+        service.assignSlot("evt-fc-2", "test-full-counter", requestedTime)
 
-        // Verify status is CLOSED in DB
-        val status = transaction {
+        // Verify slot_count equals max_per_window in DB
+        val slotCount = transaction {
             WindowCounterTable.selectAll()
                 .where { WindowCounterTable.windowStart eq Instant.parse("2025-06-01T12:00:00Z") }
                 .firstOrNull()
-                ?.get(WindowCounterTable.status)
+                ?.get(WindowCounterTable.slotCount)
         }
-        assertThat(status).isEqualTo("CLOSED")
+        assertThat(slotCount).isEqualTo(2)
+
+        // Third event should overflow to next window
+        val third = service.assignSlot("evt-fc-3", "test-full-counter", requestedTime)
+        assertThat(third.scheduledTime).isAfterOrEqualTo(requestedTime.plusSeconds(4))
     }
 
     @Test
@@ -300,5 +304,47 @@ class SlotAssignmentServiceTest {
         assertThat(nearSlot.scheduledTime).isAfterOrEqualTo(nearTerm)
         assertThat(nearSlot.scheduledTime).isBefore(nearTerm.plusSeconds(4))
         assertThat(nearSlot.delay).isLessThan(Duration.ofSeconds(4))
+    }
+
+    // ==================== Sparse window and chunked search tests ====================
+
+    @Test
+    fun `sparse counter rows - adjacent empty window is found immediately`() {
+        configRepository.createConfig("test-sparse", 2, Duration.ofSeconds(4))
+        val requestedTime = Instant.parse("2025-06-01T12:00:00Z")
+
+        // Fill window 0 (W0 at 12:00:00) completely
+        service.assignSlot("evt-sparse-1", "test-sparse", requestedTime)
+        service.assignSlot("evt-sparse-2", "test-sparse", requestedTime)
+
+        // Create a far-future counter row to simulate sparse data
+        // (e.g., someone scheduled events at 12:01:00 earlier)
+        val farWindow = Instant.parse("2025-06-01T12:01:00Z")
+        service.assignSlot("evt-sparse-far-1", "test-sparse", farWindow)
+
+        // Now assign at requestedTime — should go to W1 (12:00:04), not W252 (after far window)
+        val slot = service.assignSlot("evt-sparse-3", "test-sparse", requestedTime)
+        assertThat(slot.scheduledTime).isAfterOrEqualTo(requestedTime.plusSeconds(4))
+        assertThat(slot.scheduledTime).isBefore(requestedTime.plusSeconds(8))
+    }
+
+    @Test
+    fun `chunked search finds capacity beyond single headroom range`() {
+        // Use max_per_window=1 so each window holds exactly 1 event
+        // headroom_windows=100 means chunk size is 100 windows (400s at 4s windows)
+        configRepository.createConfig("test-chunked", 1, Duration.ofSeconds(4))
+        val requestedTime = Instant.parse("2025-06-01T12:00:00Z")
+
+        // Fill 101 events: window 0 + 100 headroom windows (windows 1-100)
+        // This exhausts the first chunk's search range
+        val events = (1..101).map { i ->
+            service.assignSlot("evt-chunk-$i", "test-chunked", requestedTime)
+        }
+        assertThat(events).hasSize(101)
+
+        // 102nd event should succeed via chunk 2 (re-skip finds window 101)
+        val overflow = service.assignSlot("evt-chunk-102", "test-chunked", requestedTime)
+        assertThat(overflow.scheduledTime).isAfterOrEqualTo(requestedTime.plusSeconds(101 * 4L))
+        assertThat(overflow.delay).isGreaterThanOrEqualTo(Duration.ofSeconds(101 * 4L))
     }
 }

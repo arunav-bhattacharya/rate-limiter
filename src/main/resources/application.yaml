@@ -25,6 +25,7 @@ quarkus:
 rate-limiter:
   default-config-name: default
   headroom-windows: 100
+  max-search-chunks: 10
 
 # Test profile — longer timeouts for Oracle XE under ARM emulation
 "%test":

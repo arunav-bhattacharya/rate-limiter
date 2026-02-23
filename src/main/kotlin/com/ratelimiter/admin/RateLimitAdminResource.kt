@@ -80,6 +80,7 @@ class RateLimitAdminResource @Inject constructor(
         }
 
         require(!windowSize.isZero && !windowSize.isNegative) { "windowSize must be positive" }
+        require(windowSize.toSeconds() >= 1) { "windowSize must be at least 1 second" }
 
         val config = configRepository.createConfig(
             configName = request.configName,
