@@ -305,18 +305,25 @@ flowchart TD
     G --> TXN[BEGIN TRANSACTION]
 
     subgraph TX ["Single Transaction"]
-        IDEM{checkExistingSlot?}
-        IDEM -- Yes --> C2[/Return existing/]
+        IDEM{Phase 0<br/>queryAssignedSlot?}
+        IDEM -- "Found" --> C2[/Return existing/]
 
-        IDEM -- No --> EW[ensureWindowExists<br/>INSERT catch DUP]
+        IDEM -- "Not found" --> CACHE_CHK{firstWindowFull<br/>cache hit?}
+
+        CACHE_CHK -- "Yes (skip Phase 1)" --> FRONTIER
+
+        CACHE_CHK -- "No" --> EW[ensureWindowExists<br/>INSERT catch DUP]
         EW --> TLF[tryLockFirstWindow<br/>SELECT slot_count<br/>FOR UPDATE SKIP LOCKED]
-        TLF --> TLF_C{count >= 0 AND<br/>count < maxFirstWindow?}
-        TLF_C -- Yes --> CLAIM1[claimSlot<br/>firstJitterMs]
+        TLF --> TLF_C{Result?}
+        TLF_C -- "true<br/>(has capacity)" --> CLAIM1[claimSlot<br/>firstJitterMs]
         CLAIM1 --> NEW1[/NEW/]
+        TLF_C -- "false<br/>(full)" --> CACHE_SET["firstWindowFull[alignedStart] = true"]
+        CACHE_SET --> FRONTIER
+        TLF_C -- "null<br/>(SKIP LOCKED)" --> FRONTIER
 
-        TLF_C -- No --> FRONTIER[fetchOrInitWindowEnd<br/>SELECT MAX window_end<br/>from track_window_end]
+        FRONTIER[fetchOrInitWindowEnd<br/>SELECT MAX window_end<br/>from track_window_end]
 
-        FRONTIER --> FULL_SCAN[findAndLockFirstAvailable<br/>over entire provisioned range<br/>FOR UPDATE SKIP LOCKED]
+        FRONTIER --> FULL_SCAN["findAndLockFirstAvailable<br/>over [alignedStart + windowSize, windowEnd)<br/>FOR UPDATE SKIP LOCKED"]
         FULL_SCAN --> FS_C{Window found?}
         FS_C -- Yes --> CLAIM2[claimSlot<br/>fullJitterMs]
         CLAIM2 --> NEW2[/NEW/]
@@ -352,6 +359,8 @@ flowchart TD
     style TXN fill:#3498db,color:#fff
     style FULL_SCAN fill:#9b59b6,color:#fff
     style EXT_FIND fill:#9b59b6,color:#fff
+    style CACHE_CHK fill:#f39c12,color:#fff
+    style CACHE_SET fill:#f39c12,color:#fff
 ```
 
 ---
