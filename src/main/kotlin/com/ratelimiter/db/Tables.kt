@@ -37,7 +37,7 @@ object RateLimitEventSlotTable : Table("rate_limit_event_slot") {
     override val primaryKey = PrimaryKey(slotId)
 }
 
-object WindowEndTrackerTable : Table("window_end_tracker") {
+object WindowEndTrackerTable : Table("track_window_end") {
     val requestedTime = timestamp("requested_time")
     val windowEnd = timestamp("window_end")
 

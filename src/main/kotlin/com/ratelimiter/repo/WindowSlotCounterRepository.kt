@@ -1,12 +1,15 @@
 package com.ratelimiter.repo
 
+import com.ratelimiter.db.WindowCounterTable
 import jakarta.enterprise.context.ApplicationScoped
+import org.jetbrains.exposed.exceptions.ExposedSQLException
 import org.jetbrains.exposed.sql.IntegerColumnType
+import org.jetbrains.exposed.sql.SqlExpressionBuilder
 import org.jetbrains.exposed.sql.Transaction
-import org.jetbrains.exposed.sql.intParam
+import org.jetbrains.exposed.sql.insert
 import org.jetbrains.exposed.sql.javatime.JavaInstantColumnType
-import org.jetbrains.exposed.sql.javatime.timestampParam
 import org.jetbrains.exposed.sql.statements.StatementType
+import org.jetbrains.exposed.sql.update
 import java.time.Instant
 
 @ApplicationScoped
@@ -19,14 +22,14 @@ class WindowSlotCounterRepository {
     ): Instant? {
         val sql = """
                     SELECT WINDOW_START
-                    FROM   WINDOW_COUNTER
+                    FROM   rate_limit_window_counter
                     WHERE
                            WINDOW_START >= ?
                     AND    WINDOW_START <= ?
                     AND    SLOT_COUNT < ?
                     ORDER BY WINDOW_START ASC
                     FETCH FIRST 1 ROW ONLY
-                    FOR UPDATE SKIP LOCKED;
+                    FOR UPDATE SKIP LOCKED
                 """.trimIndent()
 
         return exec(
@@ -41,6 +44,27 @@ class WindowSlotCounterRepository {
             if (rs.next()) {
                 rs.getTimestamp("WINDOW_START").toInstant()
             } else null
+        }
+    }
+
+    fun Transaction.batchInsertWindows(windows: List<Instant>) {
+        windows.forEach { window ->
+            try {
+                WindowCounterTable.insert {
+                    it[windowStart] = window
+                    it[slotCount] = 0
+                }
+            } catch (_: ExposedSQLException) {
+                // Window already exists — ignore duplicate
+            }
+        }
+    }
+
+    fun Transaction.incrementSlotCount(windowStart: Instant) {
+        WindowCounterTable.update({ WindowCounterTable.windowStart eq windowStart }) {
+            with(SqlExpressionBuilder) {
+                it[slotCount] = slotCount + 1
+            }
         }
     }
 }
