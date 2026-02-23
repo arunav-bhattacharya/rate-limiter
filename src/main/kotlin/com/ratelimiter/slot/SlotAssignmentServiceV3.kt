@@ -1,23 +1,15 @@
 package com.ratelimiter.slot
 
-import com.ratelimiter.config.RateLimitConfig
-import com.ratelimiter.db.RateLimitEventSlotTable
-import com.ratelimiter.db.WindowCounterTable
+import com.ratelimiter.repo.EventSlotRepository
 import com.ratelimiter.repo.RateLimitConfigRepository
+import com.ratelimiter.repo.WindowEndTrackerRepository
+import com.ratelimiter.repo.WindowSlotCounterRepository
 import jakarta.enterprise.context.ApplicationScoped
 import jakarta.inject.Inject
 import org.eclipse.microprofile.config.inject.ConfigProperty
 import org.jetbrains.exposed.exceptions.ExposedSQLException
-import org.jetbrains.exposed.sql.IntegerColumnType
-import org.jetbrains.exposed.sql.SqlExpressionBuilder
 import org.jetbrains.exposed.sql.Transaction
-import org.jetbrains.exposed.sql.batchInsert
-import org.jetbrains.exposed.sql.insert
-import org.jetbrains.exposed.sql.javatime.JavaInstantColumnType
-import org.jetbrains.exposed.sql.selectAll
-import org.jetbrains.exposed.sql.statements.StatementType
 import org.jetbrains.exposed.sql.transactions.transaction
-import org.jetbrains.exposed.sql.update
 import org.slf4j.LoggerFactory
 import java.time.Duration
 import java.time.Instant
@@ -28,9 +20,13 @@ import java.util.concurrent.ThreadLocalRandom
  *
  * Combines V2's combined find+lock pattern with V1's correctness guarantees:
  * epoch-aligned windows, proportional first-window capacity, dynamic config,
- * and multi-chunk search. Pre-provisions windows in chunks (guarded by an
- * existence check) then uses a single `SELECT ... FOR UPDATE SKIP LOCKED
- * FETCH FIRST 1 ROW ONLY` per chunk instead of V1's nested window-walk loop.
+ * and frontier-tracked search with configurable extension.
+ *
+ * Phase 2 uses `track_window_end` (append-only) to track the provisioning frontier
+ * per alignedStart. A single find+lock over the entire provisioned range replaces
+ * scanning chunk-by-chunk from chunk 0. When the range is full, a configurable
+ * extension loop (`max-chunks-to-search`, default 2) provisions new chunks from
+ * the frontier. Client retries naturally extend further.
  *
  * All DB work runs in a single transaction. Uses raw SQL for lock queries
  * (Exposed DSL doesn't support FOR UPDATE SKIP LOCKED) and Exposed DSL for
@@ -39,10 +35,13 @@ import java.util.concurrent.ThreadLocalRandom
 @ApplicationScoped
 class SlotAssignmentServiceV3 @Inject constructor(
     private val configRepository: RateLimitConfigRepository,
+    private val eventSlotRepository: EventSlotRepository,
+    private val windowSlotCounterRepository: WindowSlotCounterRepository,
+    private val windowEndTrackerRepository: WindowEndTrackerRepository,
     @param:ConfigProperty(name = "rate-limiter.max-windows-in-chunk", defaultValue = "100")
     private val maxWindowsInChunk: Int,
-    @param:ConfigProperty(name = "rate-limiter.max-search-chunks", defaultValue = "10")
-    private val maxSearchChunks: Int
+    @param:ConfigProperty(name = "rate-limiter.max-chunks-to-search", defaultValue = "2")
+    private val maxChunksToSearch: Int
 ) {
     private val logger = LoggerFactory.getLogger(SlotAssignmentServiceV3::class.java)
 
@@ -56,33 +55,56 @@ class SlotAssignmentServiceV3 @Inject constructor(
         val firstJitterMs = computeFirstWindowJitterMs(elapsedMs, config.windowSizeMs)
 
         return transaction {
-            // 1. Idempotency check
-            checkExistingSlot(eventId)?.let { return@transaction it }
+            // Phase 0: Idempotency check
+            with(eventSlotRepository) { queryAssignedSlot(eventId) }?.let { return@transaction it }
 
-            // 2. Phase 1: First window (proportional capacity)
-            ensureWindowExists(alignedStart)
-            val firstCount = tryLockFirstWindow(alignedStart)
-            if (firstCount >= 0 && firstCount < maxFirstWindow) {
+            // Phase 1: First window (proportional capacity)
+            with(windowSlotCounterRepository) { ensureWindowExists(alignedStart) }
+            val firstWindowLocked = with(windowSlotCounterRepository) { tryLockFirstWindow(alignedStart, maxFirstWindow) }
+            if (firstWindowLocked) {
                 return@transaction claimSlot(
                     eventId, alignedStart, firstJitterMs, requestedTime, config.configId
                 )
             }
 
-            // 3. Phase 2: Chunked find+lock
+            // Phase 2: Frontier-tracked find+lock
             val windowSize = config.windowSize
-            var searchFrom = alignedStart.plus(windowSize)
 
-            for (chunkIdx in 0 until maxSearchChunks) {
+            val windowEnd = fetchWindowEnd(alignedStart) ?: initWindowEnd(alignedStart, windowSize)
+
+            val foundInRange = with(windowSlotCounterRepository) {
+                findAndLockFirstAvailableWindow(alignedStart.plus(windowSize), windowEnd, config.maxPerWindow)
+            }
+            if (foundInRange != null) {
+                val jitterMs = computeFullWindowJitterMs(config.windowSizeMs)
+                logger.info(
+                    "Assigned slot for eventId={} in window={} (initial range)",
+                    eventId, foundInRange
+                )
+                return@transaction claimSlot(
+                    eventId, foundInRange, jitterMs, requestedTime, config.configId
+                )
+            }
+
+            // Extension loop — extend from frontier
+            var searchFrom = windowEnd
+            for (chunk in 0 until maxChunksToSearch) {
                 val chunkEnd = searchFrom.plus(windowSize.multipliedBy(maxWindowsInChunk.toLong()))
 
                 ensureChunkProvisioned(searchFrom, maxWindowsInChunk, windowSize)
 
-                val foundWindow = findAndLockFirstAvailable(searchFrom, chunkEnd, config.maxPerWindow)
+                with(windowEndTrackerRepository) {
+                    insertWindowEnd(alignedStart, chunkEnd)
+                }
+
+                val foundWindow = with(windowSlotCounterRepository) {
+                    findAndLockFirstAvailableWindow(searchFrom, chunkEnd, config.maxPerWindow)
+                }
                 if (foundWindow != null) {
                     val jitterMs = computeFullWindowJitterMs(config.windowSizeMs)
                     logger.info(
-                        "Assigned slot for eventId={} in window={} (chunk {})",
-                        eventId, foundWindow, chunkIdx
+                        "Assigned slot for eventId={} in window={} (extension chunk {})",
+                        eventId, foundWindow, chunk
                     )
                     return@transaction claimSlot(
                         eventId, foundWindow, jitterMs, requestedTime, config.configId
@@ -94,39 +116,29 @@ class SlotAssignmentServiceV3 @Inject constructor(
 
             throw SlotAssignmentException(
                 eventId = eventId,
-                windowsSearched = maxSearchChunks * maxWindowsInChunk,
+                windowsSearched = maxWindowsInChunk + (maxChunksToSearch * maxWindowsInChunk),
                 message = "Could not assign slot for event $eventId after searching " +
-                        "${maxSearchChunks * maxWindowsInChunk} windows across $maxSearchChunks chunks"
+                        "initial range + $maxChunksToSearch extension chunks"
             )
         }
     }
 
     // ---- Transaction helpers ----
 
-    private fun Transaction.checkExistingSlot(eventId: String): AssignedSlot? {
-        return RateLimitEventSlotTable
-            .selectAll()
-            .where { RateLimitEventSlotTable.eventId eq eventId }
-            .firstOrNull()
-            ?.let { row ->
-                val scheduledTime = row[RateLimitEventSlotTable.scheduledTime]
-                val reqTime = row[RateLimitEventSlotTable.requestedTime]
-                val delay = Duration.between(reqTime, scheduledTime).let { d ->
-                    if (d.isNegative) Duration.ZERO else d
-                }
-                AssignedSlot(eventId = eventId, scheduledTime = scheduledTime, delay = delay)
-            }
+    private fun Transaction.fetchWindowEnd(alignedStart: Instant): Instant? {
+        return with(windowEndTrackerRepository) {
+            fetchMaxWindowEnd(alignedStart)
+        }
     }
 
-    private fun Transaction.ensureWindowExists(window: Instant) {
-        try {
-            WindowCounterTable.insert {
-                it[windowStart] = window
-                it[slotCount] = 0
-            }
-        } catch (_: ExposedSQLException) {
-            // Duplicate key — window already exists
+    private fun Transaction.initWindowEnd(alignedStart: Instant, windowSize: Duration): Instant {
+        val chunkStart = alignedStart.plus(windowSize)
+        val windowEnd = chunkStart.plus(windowSize.multipliedBy(maxWindowsInChunk.toLong()))
+        ensureChunkProvisioned(chunkStart, maxWindowsInChunk, windowSize)
+        with(windowEndTrackerRepository) {
+            insertWindowEnd(alignedStart, windowEnd)
         }
+        return windowEnd
     }
 
     /**
@@ -140,73 +152,16 @@ class SlotAssignmentServiceV3 @Inject constructor(
         windowSize: Duration
     ) {
         val lastWindow = from.plus(windowSize.multipliedBy((windowCount - 1).toLong()))
-        val exists = WindowCounterTable
-            .selectAll()
-            .where { WindowCounterTable.windowStart eq lastWindow }
-            .count() > 0
+        val exists = with(windowSlotCounterRepository) { windowExists(lastWindow) }
         if (exists) return
 
         val windows = (0 until windowCount).map { i ->
             from.plus(windowSize.multipliedBy(i.toLong()))
         }
-        WindowCounterTable.batchInsert(windows, ignore = true, shouldReturnGeneratedValues = false) { window ->
-            this[WindowCounterTable.windowStart] = window
-            this[WindowCounterTable.slotCount] = 0
-        }
-    }
-
-    /**
-     * Lock the first window's counter row via SELECT FOR UPDATE SKIP LOCKED.
-     * Returns slot_count on success, -1 if the row is locked by another session.
-     */
-    private fun Transaction.tryLockFirstWindow(window: Instant): Int {
-        val sql = """
-            SELECT SLOT_COUNT
-            FROM   rate_limit_window_counter
-            WHERE  WINDOW_START = ?
-            FOR UPDATE SKIP LOCKED
-        """.trimIndent()
-
-        return exec(
-            sql,
-            listOf(Pair(JavaInstantColumnType(), window)),
-            StatementType.SELECT
-        ) { rs ->
-            if (rs.next()) rs.getInt("SLOT_COUNT") else -1
-        } ?: -1
-    }
-
-    /**
-     * Combined find+lock: atomically finds the earliest non-full, non-contended
-     * window in [from, to) and acquires a row lock on it.
-     * Returns the window_start, or null if no available window was found.
-     */
-    private fun Transaction.findAndLockFirstAvailable(
-        from: Instant,
-        to: Instant,
-        maxSlots: Int
-    ): Instant? {
-        val sql = """
-            SELECT WINDOW_START
-            FROM   rate_limit_window_counter
-            WHERE  WINDOW_START >= ?
-            AND    WINDOW_START < ?
-            AND    SLOT_COUNT < ?
-            ORDER BY WINDOW_START ASC
-            FETCH FIRST 1 ROW ONLY
-            FOR UPDATE SKIP LOCKED
-        """.trimIndent()
-
-        return exec(
-            sql,
-            listOf(
-                Pair(JavaInstantColumnType(), from),
-                Pair(JavaInstantColumnType(), to),
-                Pair(IntegerColumnType(), maxSlots)
-            ),
-            StatementType.SELECT
-        ) { rs ->
-            if (rs.next()) rs.getTimestamp("WINDOW_START").toInstant() else null
+        try {
+            with(windowSlotCounterRepository) { batchInsertWindows(windows) }
+        } catch (_: ExposedSQLException) {
+            // Concurrent thread already provisioned some/all rows — safe to ignore
         }
     }
 
@@ -223,29 +178,16 @@ class SlotAssignmentServiceV3 @Inject constructor(
     ): AssignedSlot {
         val scheduledTime = window.plusMillis(jitterMs)
 
-        val inserted = try {
-            RateLimitEventSlotTable.insert {
-                it[RateLimitEventSlotTable.eventId] = eventId
-                it[RateLimitEventSlotTable.requestedTime] = requestedTime
-                it[RateLimitEventSlotTable.windowStart] = window
-                it[RateLimitEventSlotTable.scheduledTime] = scheduledTime
-                it[RateLimitEventSlotTable.configId] = configId
-            }
-            true
-        } catch (_: ExposedSQLException) {
-            false
+        val inserted = with(eventSlotRepository) {
+            insertEventSlot(eventId, requestedTime, window, scheduledTime, configId)
         }
 
         if (!inserted) {
-            return checkExistingSlot(eventId)
+            return with(eventSlotRepository) { queryAssignedSlot(eventId) }
                 ?: error("Failed to re-read slot for eventId=$eventId after duplicate key")
         }
 
-        WindowCounterTable.update({ WindowCounterTable.windowStart eq window }) {
-            with(SqlExpressionBuilder) {
-                it[slotCount] = slotCount + 1
-            }
-        }
+        with(windowSlotCounterRepository) { incrementSlotCount(window) }
 
         val delay = Duration.between(requestedTime, scheduledTime).let { d ->
             if (d.isNegative) Duration.ZERO else d

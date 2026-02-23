@@ -10,7 +10,7 @@ DECLARE
     in_first_jitter_ms     NUMBER        := ?;  /* 8  */
     in_full_jitter_ms      NUMBER        := ?;  /* 9  */
     in_max_windows_in_chunk NUMBER       := ?;  /* 10 */
-    in_max_search_chunks   NUMBER        := ?;  /* 11 */
+    in_max_chunks_to_search NUMBER       := ?;  /* 11 */
 
     -- Output result locals (marshalled to OUT bind vars at end)
     ou_status           NUMBER := -1;  -- default: EXHAUSTED
@@ -28,6 +28,7 @@ DECLARE
     found_window     TIMESTAMP;
     search_from      TIMESTAMP;
     chunk_end        TIMESTAMP;
+    v_window_end     TIMESTAMP;
 
     STATUS_NEW       CONSTANT NUMBER := 1;
     STATUS_EXISTING  CONSTANT NUMBER := 0;
@@ -111,7 +112,6 @@ DECLARE
     ---------------------------------------------------------------
     -- find_and_lock: Combined find + lock. Returns the earliest
     -- non-full, non-contended window in the range, or NULL.
-    -- Replaces V1's find_first_available_window + inner walk loop.
     ---------------------------------------------------------------
 
     FUNCTION find_and_lock(from_ts IN TIMESTAMP, to_ts IN TIMESTAMP) RETURN TIMESTAMP IS
@@ -129,6 +129,41 @@ DECLARE
     EXCEPTION
         WHEN NO_DATA_FOUND THEN RETURN NULL;
     END find_and_lock;
+
+    ---------------------------------------------------------------
+    -- fetch_or_init_window_end: Get (or initialize) the provisioning
+    -- frontier for this alignedStart from the append-only
+    -- track_window_end table.
+    ---------------------------------------------------------------
+
+    FUNCTION fetch_or_init_window_end RETURN TIMESTAMP IS
+        v_end TIMESTAMP;
+    BEGIN
+        SELECT MAX(window_end) INTO v_end
+        FROM   track_window_end
+        WHERE  requested_time = in_window_start;
+
+        IF v_end IS NOT NULL THEN
+            RETURN v_end;
+        END IF;
+
+        -- First request for this alignedStart — provision initial chunk
+        v_end := in_window_start + window_size + chunk_size;
+        ensure_chunk_provisioned(in_window_start + window_size);
+
+        BEGIN
+            INSERT INTO track_window_end(requested_time, window_end)
+            VALUES (in_window_start, v_end);
+        EXCEPTION
+            WHEN DUP_VAL_ON_INDEX THEN
+                -- Another thread beat us — re-read the max
+                SELECT MAX(window_end) INTO v_end
+                FROM   track_window_end
+                WHERE  requested_time = in_window_start;
+        END;
+
+        RETURN v_end;
+    END fetch_or_init_window_end;
 
     ---------------------------------------------------------------
     -- claim_slot: Insert event slot + increment counter.
@@ -188,24 +223,45 @@ BEGIN
             slot_claimed := claim_slot(in_window_start, in_first_jitter_ms);
         END IF;
 
-        -- Phase 2: Chunked find+lock
+        -- Phase 2: Frontier-tracked find+lock
         IF NOT slot_claimed THEN
-            search_from := in_window_start + window_size;
+            -- Step 1: Get (or initialize) provisioning frontier
+            v_window_end := fetch_or_init_window_end();
 
-            FOR chunk_idx IN 0..in_max_search_chunks - 1 LOOP
-                EXIT WHEN slot_claimed;
-
-                chunk_end := search_from + chunk_size;
-                ensure_chunk_provisioned(search_from);
+            -- Step 2: find+lock over ENTIRE provisioned range
+            found_window := find_and_lock(in_window_start + window_size, v_window_end);
+            IF found_window IS NOT NULL THEN
                 windows_searched := windows_searched + in_max_windows_in_chunk;
+                slot_claimed := claim_slot(found_window, in_full_jitter_ms);
+            END IF;
 
-                found_window := find_and_lock(search_from, chunk_end);
-                IF found_window IS NOT NULL THEN
-                    slot_claimed := claim_slot(found_window, in_full_jitter_ms);
-                END IF;
+            -- Step 3: Extension loop — extend from frontier
+            IF NOT slot_claimed THEN
+                search_from := v_window_end;
 
-                search_from := chunk_end;
-            END LOOP;
+                FOR chunk_idx IN 0 .. in_max_chunks_to_search - 1 LOOP
+                    EXIT WHEN slot_claimed;
+
+                    chunk_end := search_from + chunk_size;
+                    ensure_chunk_provisioned(search_from);
+                    windows_searched := windows_searched + in_max_windows_in_chunk;
+
+                    -- Append new frontier row (catch DUP — no contention)
+                    BEGIN
+                        INSERT INTO track_window_end(requested_time, window_end)
+                        VALUES (in_window_start, chunk_end);
+                    EXCEPTION
+                        WHEN DUP_VAL_ON_INDEX THEN NULL;
+                    END;
+
+                    found_window := find_and_lock(search_from, chunk_end);
+                    IF found_window IS NOT NULL THEN
+                        slot_claimed := claim_slot(found_window, in_full_jitter_ms);
+                    END IF;
+
+                    search_from := chunk_end;
+                END LOOP;
+            END IF;
         END IF;
 
         IF NOT slot_claimed THEN

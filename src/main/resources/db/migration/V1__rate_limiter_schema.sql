@@ -16,40 +16,13 @@ CREATE SEQUENCE rate_limit_config_config_id_seq START WITH 1 INCREMENT BY 1 NOCA
 
 CREATE TABLE rate_limit_config
 (
-    -- Surrogate primary key, auto-generated via sequence.
     config_id      NUMBER(19) DEFAULT rate_limit_config_config_id_seq.NEXTVAL PRIMARY KEY,
-
-    -- Logical name identifying this config (e.g., "default", "bulk-payments").
-    -- Multiple rows can share the same name (versioning), but only one should
-    -- be active at a time.
     config_name    VARCHAR2(128)  NOT NULL,
-
-    -- Maximum number of events allowed per time window. This is the capacity
-    -- check used by SlotAssignmentService: if slot_count >= max_per_window,
-    -- the window is considered full.
     max_per_window NUMBER(10)     NOT NULL,
-
-    -- Duration of each time window as an ISO-8601 duration string
-    -- (e.g., 'PT4S' = 4 seconds, 'PT1M30S' = 90 seconds, 'PT500MS' = 500ms).
-    -- Stored as a string for flexibility; parsed to java.time.Duration at load time.
-    -- Changing this while events are in-flight breaks window alignment —
-    -- existing counter rows become meaningless. Only change between quiet periods.
     window_size    VARCHAR2(50)   NOT NULL,
-
-    -- Timestamp from which this config version takes effect. Used for auditing
-    -- when a config change was intended to go live.
     effective_from TIMESTAMP                      NOT NULL,
-
-    -- Whether this config version is the current active one.
-    -- 1 = active (used by the application), 0 = superseded/deactivated.
-    -- Only one row per config_name should be active at any time.
     is_active      NUMBER(1)      DEFAULT 1 NOT NULL,
-
-    -- When this config row was inserted. Auto-populated by Oracle.
     created_at     TIMESTAMP DEFAULT SYSTIMESTAMP NOT NULL,
-
-    -- Guard against misconfiguration: zero or negative values would break
-    -- the window walk algorithm (infinite loop or division by zero).
     CONSTRAINT chk_max_per_window CHECK (max_per_window > 0)
 );
 
@@ -77,18 +50,8 @@ CREATE INDEX idx_config_name_active ON rate_limit_config (config_name, is_active
 -- ============================================================================
 CREATE TABLE rate_limit_window_counter
 (
-    -- The aligned start timestamp of the time window.
-    -- Windows are aligned to epoch: windowStart = requestedTime - (requestedTime % windowSizeSecs).
-    -- This is the PRIMARY KEY and the target of SELECT FOR UPDATE SKIP LOCKED.
     window_start TIMESTAMP NOT NULL,
-
-    -- Number of events assigned to this window so far. Incremented after each
-    -- successful INSERT into rate_limit_event_slot. Compared against
-    -- max_per_window to determine if the window is full.
-    -- Only incremented after the event slot row is confirmed inserted, so it
-    -- is never inflated by failed idempotency-race inserts.
     slot_count   NUMBER(10) DEFAULT 0 NOT NULL,
-
     CONSTRAINT pk_window_counter PRIMARY KEY (window_start)
 );
 
@@ -119,45 +82,13 @@ CREATE SEQUENCE rate_limit_event_slot_slot_id_seq START WITH 1 INCREMENT BY 1 NO
 
 CREATE TABLE rate_limit_event_slot
 (
-    -- Surrogate primary key, auto-generated via sequence.
     slot_id        NUMBER(19) DEFAULT rate_limit_event_slot_slot_id_seq.NEXTVAL PRIMARY KEY,
-
-    -- Caller-provided unique event identifier. Acts as the idempotency key.
-    -- If two concurrent threads try to insert the same event_id, Oracle raises
-    -- ORA-00001 on the UNIQUE constraint, and the loser re-reads the winner's row.
     event_id       VARCHAR2(256)  NOT NULL,
-
-    -- When the caller originally requested this event to be processed.
-    -- Captured at INSERT time as Instant.now(). Used for auditing how far
-    -- the actual scheduled_time diverged from the request.
     requested_time TIMESTAMP                      NOT NULL,
-
-    -- The time window this event was assigned to. Matches a row in
-    -- rate_limit_window_counter. Multiple events share the same window_start.
     window_start   TIMESTAMP                      NOT NULL,
-
-    -- The actual execution time assigned to this event, computed as:
-    --   windowStart + random(0, windowSizeMs)
-    -- Returned to the caller as part of the AssignedSlot response.
-    -- Random jitter ensures uniform distribution within the window.
     scheduled_time TIMESTAMP                      NOT NULL,
-
-    -- The rate_limit_config.config_id that was active when this slot was assigned.
-    -- Stored for audit purposes — allows reconstructing which max_per_window
-    -- and window_size were in effect for this event.
-    -- No foreign key constraint: the application guarantees validity by loading
-    -- the config before inserting, and decoupling avoids FK check overhead on
-    -- every insert.
     config_id      NUMBER(19)     NOT NULL,
-
-    -- When this slot was assigned. Auto-populated by Oracle.
-    -- Used by the reconciliation query to find potentially leaked slots
-    -- (e.g., WHERE created_at < SYSDATE - INTERVAL '10' MINUTE).
     created_at     TIMESTAMP DEFAULT SYSTIMESTAMP NOT NULL,
-
-    -- Idempotency enforcement. Prevents duplicate slot assignments for the
-    -- same event under concurrent access. On violation (ORA-00001), the
-    -- application re-reads the existing row instead of inserting.
     CONSTRAINT uq_event_id UNIQUE (event_id)
 );
 
@@ -168,10 +99,16 @@ CREATE INDEX idx_event_slot_window ON rate_limit_event_slot (window_start);
 -- Speeds up the reconciliation query that finds recently assigned slots.
 CREATE INDEX idx_event_slot_created ON rate_limit_event_slot (created_at);
 
-
+-- ============================================================================
+-- TABLE: track_window_end
+-- ============================================================================
+-- Append-only frontier tracker for provisioned window ranges.
+-- Allows multiple frontier rows per requested_time (one per extension).
+-- Read via SELECT MAX(window_end); write via INSERT only — no UPDATE contention.
+-- ============================================================================
 CREATE TABLE track_window_end
 (
     requested_time TIMESTAMP NOT NULL,
     window_end     TIMESTAMP NOT NULL,
-    CONSTRAINT pk_window_start PRIMARY KEY (requested_time)
+    CONSTRAINT pk_window_start PRIMARY KEY (requested_time, window_end)
 );

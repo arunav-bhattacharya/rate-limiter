@@ -17,20 +17,20 @@ import java.util.concurrent.ThreadLocalRandom
  * V3 slot assignment — PL/SQL implementation.
  *
  * Same algorithm as [SlotAssignmentServiceV3] but executes entirely as a single
- * anonymous PL/SQL block in one JDBC round trip. Pre-provisions windows in chunks
- * (guarded by an existence check) then uses a combined find+lock query per chunk
- * instead of V1's nested window-walk loop.
+ * anonymous PL/SQL block in one JDBC round trip. Uses `track_window_end` (append-only)
+ * to track the provisioning frontier, then a single find+lock over the entire
+ * provisioned range followed by a configurable extension loop from the frontier.
  *
- * Parameter 10 is `max_windows_in_chunk` (a count) instead of V1's `headroom_secs`
- * (a duration). The PL/SQL block computes chunk boundaries internally.
+ * Parameter 10 is `max_windows_in_chunk` (a count). Parameter 11 is
+ * `max_chunks_to_search` (extension iterations, default 2).
  */
 @ApplicationScoped
 class SlotAssignmentServiceV3Sql @Inject constructor(
     private val configRepository: RateLimitConfigRepository,
     @param:ConfigProperty(name = "rate-limiter.max-windows-in-chunk", defaultValue = "100")
     private val maxWindowsInChunk: Int,
-    @param:ConfigProperty(name = "rate-limiter.max-search-chunks", defaultValue = "10")
-    private val maxSearchChunks: Int
+    @param:ConfigProperty(name = "rate-limiter.max-chunks-to-search", defaultValue = "2")
+    private val maxChunksToSearch: Int
 ) {
     private val logger = LoggerFactory.getLogger(SlotAssignmentServiceV3Sql::class.java)
 
@@ -107,7 +107,7 @@ class SlotAssignmentServiceV3Sql @Inject constructor(
                 cs.setLong(8, firstJitterMs)
                 cs.setLong(9, fullJitterMs)
                 cs.setInt(10, maxWindowsInChunk)
-                cs.setInt(11, maxSearchChunks)
+                cs.setInt(11, maxChunksToSearch)
 
                 // Register OUT parameters (positions 12-16)
                 cs.registerOutParameter(12, Types.INTEGER)

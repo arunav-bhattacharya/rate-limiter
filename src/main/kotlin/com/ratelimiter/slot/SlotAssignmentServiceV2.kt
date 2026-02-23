@@ -38,7 +38,7 @@ class SlotAssignmentServiceV2 @Inject constructor(
                 val nextWindowStart = currWindowEnd + WINDOW_SIZE
                 val newWindowEnd = nextWindowStart + WINDOW_CHUNK_SIZE
                 with(windowSlotCounterRepository) { batchInsertWindows(generateWindows(nextWindowStart)) }
-                with(windowEndTrackerRepository) { updateWindowEnd(requestedTime, currWindowEnd, newWindowEnd) }
+                with(windowEndTrackerRepository) { insertWindowEnd(requestedTime, newWindowEnd) }
 
                 // Try to claim a slot again after loading a new chunk of windows
                 val window = with(windowSlotCounterRepository) {

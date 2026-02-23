@@ -37,9 +37,10 @@ object RateLimitEventSlotTable : Table("rate_limit_event_slot") {
     override val primaryKey = PrimaryKey(slotId)
 }
 
+/** Append-only provisioning frontier tracker. Composite PK = (requested_time, window_end). */
 object WindowEndTrackerTable : Table("track_window_end") {
     val requestedTime = timestamp("requested_time")
     val windowEnd = timestamp("window_end")
 
-    override val primaryKey = PrimaryKey(requestedTime)
+    override val primaryKey = PrimaryKey(requestedTime, windowEnd)
 }

@@ -3,10 +3,9 @@
 Oracle-based rate limiter for high-throughput event scheduling. Exposes a REST API that assigns
 rate-limited time slots to events, enforcing a configurable maximum events per time window.
 
-Three implementation versions exist with different trade-offs:
-- **V1** — Single PL/SQL round trip with nested window-walk loop
-- **V2** — Kotlin/Exposed with combined find+lock query
-- **V3** — Hybrid: V2's combined find+lock elegance with V1's correctness guarantees (two implementations: PL/SQL and Kotlin/Exposed)
+Two equivalent implementations with identical logic:
+- **Kotlin/Exposed** (`SlotAssignmentServiceV3`) — single `transaction {}` block
+- **PL/SQL** (`SlotAssignmentServiceV3Sql`) — single JDBC round trip
 
 ## Quick Start
 
@@ -79,16 +78,15 @@ Response:
                 |    SlotAssignmentResource      |
                 +-------------------------------+
                                 |
-          +---------------------+---------------------+
-          |                     |                     |
-   +-----------+         +-----------+         +-----------+
-   |    V1     |         |    V2     |         |    V3     |
-   | PL/SQL    |         | Exposed   |         | PL/SQL or |
-   | 1 round   |         | multi-txn |         | Exposed   |
-   | trip      |         |           |         | 1 txn     |
-   +-----------+         +-----------+         +-----------+
-          |                     |                     |
-          +---------------------+---------------------+
+                  +-------------+-------------+
+                  |                           |
+           +-----------+               +-----------+
+           | Kotlin/   |               | PL/SQL    |
+           | Exposed   |               | Single    |
+           | 1 txn     |               | round trip|
+           +-----------+               +-----------+
+                  |                           |
+                  +-------------+-------------+
                                 |
            +--------------------+--------------------+
            |                    |                    |
@@ -141,7 +139,7 @@ Assigns a rate-limited time slot for the given event. Idempotent: calling with t
 
 **Error Responses:**
 - `404` — Config not found for the given `configName`
-- `503` — All windows within the dynamic lookahead range are full
+- `503` — All windows within the search depth are full
 
 ### Admin: Config Management
 
@@ -174,6 +172,36 @@ capacity (default: 100 events). When an event requests execution at time T:
 5. **If available**: insert slot record, increment counter, compute `scheduled_time = windowStart + jitter`
 6. **If full or contended**: skip to next available window
 7. **Return** the `AssignedSlot` with `scheduledTime` and `delay`
+
+### Algorithm
+
+Three-phase approach within a single transaction:
+
+**Phase 0 — Idempotency**: Check if event already has a slot. If yes, return it.
+
+**Phase 1 — First Window**: Try the epoch-aligned window at `alignedStart` with proportional capacity and constrained jitter. Uses `SELECT FOR UPDATE SKIP LOCKED` to acquire a lock.
+
+**Phase 2 — Frontier-Tracked Find+Lock**:
+1. **Get frontier**: Read `SELECT MAX(window_end) FROM track_window_end WHERE requested_time = alignedStart`. If null, provision the initial chunk and insert the frontier row.
+2. **Full-range scan**: `findAndLockFirstAvailable(alignedStart + windowSize, windowEnd)` — a single `SELECT ... FOR UPDATE SKIP LOCKED FETCH FIRST 1 ROW ONLY` over the entire provisioned range.
+3. **Extension loop**: If the range is full, extend from the frontier up to `max-chunks-to-search` (default 2) chunks. Each iteration: provision a chunk, append a new frontier row, and run find+lock over the new range. Client retries naturally extend further.
+
+### Frontier Tracking (`track_window_end`)
+
+The `track_window_end` table is **append-only** with a composite PK `(requested_time, window_end)`:
+- **Read**: `SELECT MAX(window_end)` — returns the furthest provisioned boundary
+- **Write**: `INSERT (alignedStart, chunkEnd)` — catch DUP silently
+- **No UPDATEs**: Concurrent threads inserting the same frontier row deduplicate via the PK constraint. No contention.
+
+This eliminates the tail-end scanning problem: instead of starting from chunk 0 every time, requests jump directly to the provisioning frontier.
+
+### Concurrency
+
+`SELECT ... FOR UPDATE SKIP LOCKED FETCH FIRST 1 ROW ONLY` — atomically finds the earliest non-full window while skipping any rows locked by other sessions. One query skips all contended rows (set-based), not one-by-one.
+
+### Pre-Provisioning
+
+Windows are batch-provisioned in chunks (`max-windows-in-chunk`, default 100). An existence-check guard on the last window in each chunk prevents thundering herd: the first thread provisions, subsequent threads skip via the guard.
 
 ### Random Jitter
 
@@ -208,122 +236,7 @@ regardless of which config version was active when each slot was assigned. This 
 
 ---
 
-## V1: SlotAssignmentService (PL/SQL)
-
-The entire slot assignment executes as a **single anonymous PL/SQL block** in one JDBC round trip.
-
-**Algorithm**: Two-phase approach with nested loops:
-- **Phase 1**: Try the first (floor-aligned) window with proportional capacity and constrained jitter
-- **Phase 2**: If Phase 1 fails, use `find_first_open_window()` (indexed skip query via `status='OPEN'`) to jump past full windows. Then walk sequentially within a `headroom` range. If the headroom is exhausted, re-skip and start another chunk (up to `max_search_chunks` chunks).
-
-**Concurrency**: `SELECT FOR UPDATE NOWAIT` — threads that lose the lock race immediately skip to the next window inside the PL/SQL loop (zero additional network hops).
-
-**Key PL/SQL functions**: `check_existing_slot`, `find_first_open_window`, `try_lock_window`, `claim_slot_in_window`
-
-### V1 Pros
-
-- **Minimum latency**: Single JDBC round trip for entire operation. Network cost = 1 hop.
-- **Epoch-aligned windows**: `windowStart = T - (T % windowSizeSecs)` ensures all concurrent requests agree on window boundaries regardless of arrival time. Critical for correctness.
-- **Proportional first-window capacity**: When requestedTime falls mid-window, capacity is scaled down proportionally. Prevents over-scheduling in partial windows.
-- **Constrained first-window jitter**: `jitter ∈ [elapsedMs, windowSizeMs)` guarantees `scheduledTime >= requestedTime`.
-- **Dynamic config**: Config loaded from DB with 5-second cache. No hardcoded constants.
-- **Multi-chunk adaptive search**: `find_first_open_window()` + re-skip across up to `max_search_chunks` chunks. Searches 1000+ windows without false exhaustion.
-- **Skip query via status index**: O(log N) jump past full windows using `(status, window_start)` composite index.
-- **Lazy provisioning**: Counter rows created on-demand, one at a time. No thundering herd.
-
-### V1 Cons
-
-- **Complex nested loop**: Outer chunk loop + inner window-walk + 3-tier skip heuristic. Hard to reason about.
-- **PL/SQL maintenance**: Algorithm lives in SQL, not Kotlin. Harder to unit test and refactor.
-- **Per-window locking**: `NOWAIT` bounces threads one window at a time. Under extreme contention, threads may walk many windows.
-- **Status column overhead**: Requires maintaining `OPEN/CLOSED` status on every counter update. Extra write cost.
-
----
-
-## V2: SlotAssignmentServiceV2 (Kotlin/Exposed)
-
-Pure Kotlin implementation using Exposed ORM with a **combined find+lock query** that atomically locates and locks the first available window.
-
-**Algorithm**: Single find+lock: `SELECT window_start FROM window_counter WHERE slot_count < max AND window_start >= ? ORDER BY window_start FETCH FIRST 1 ROW ONLY FOR UPDATE SKIP LOCKED`. If no window found, extend with one more chunk of pre-provisioned windows and retry once.
-
-**Concurrency**: `SELECT FOR UPDATE SKIP LOCKED` — set-based lock skipping. One query skips all contended rows, not just the immediately next one.
-
-### V2 Pros
-
-- **Elegant find+lock**: Single query atomically finds AND locks the first available window. Replaces V1's entire inner loop.
-- **Set-based SKIP LOCKED**: Skips all contended rows in one query (not one-by-one like V1's NOWAIT).
-- **Pre-provisioned windows**: Batch-inserts window counter rows upfront. Less per-call provisioning overhead.
-- **Pure Kotlin**: Algorithm lives in Kotlin, not PL/SQL. Easier to test and refactor.
-- **No status column**: Uses `slot_count < max` directly — no OPEN/CLOSED state to maintain.
-
-### V2 Cons
-
-- **No epoch-aligned windows**: Uses raw `requestedTime` as window start. Two requests arriving 1ms apart may create different window boundaries. **Breaks rate-limiting guarantees.**
-- **Thundering herd on provisioning**: Multiple threads call `batchInsertWindows()` simultaneously with no existence check. Each batch of 100 windows generates ~50M failed DUP_VAL_ON_INDEX inserts under 500K traffic.
-- **Limited search depth**: Tries one chunk extension then throws. ~200 windows max. Not enough for production bursts.
-- **Hardcoded constants**: `WINDOW_SIZE=4s`, `MAX_SLOTS_PER_WINDOW=10`, `CONFIG_ID=0`. No dynamic config.
-- **Multiple transactions**: Idempotency check runs outside the main transaction (TOCTOU race between check and insert).
-- **Extra coordination table**: `track_window_end` required to coordinate provisioning across threads.
-- **No proportional first-window**: Full capacity assigned even when requestedTime is 3.9s into a 4s window.
-- **Unconstrained jitter**: `jitter ∈ [0, windowSizeMs)` means scheduledTime can be before requestedTime.
-
----
-
-## V3: SlotAssignmentServiceV3 / V3Sql (Hybrid)
-
-Combines V2's combined find+lock elegance with V1's correctness guarantees. Two implementations with identical logic:
-- `SlotAssignmentServiceV3` — Kotlin/Exposed (single `transaction {}` block)
-- `SlotAssignmentServiceV3Sql` — PL/SQL (single JDBC round trip)
-
-**Algorithm**:
-1. **Idempotency check** (inside the transaction)
-2. **Phase 1**: Try first window with proportional capacity. `ensureWindowExists()` + `tryLockFirstWindow()` via `SELECT FOR UPDATE SKIP LOCKED`.
-3. **Phase 2**: Chunked find+lock loop. For each chunk: `ensureChunkProvisioned()` (batch insert with existence-check guard on last window) + `findAndLockFirstAvailable()` (combined find+lock query per chunk). Up to `max_search_chunks` chunks.
-
-**Concurrency**: `SELECT FOR UPDATE SKIP LOCKED` — same set-based lock skipping as V2, but applied per-chunk across a much larger search space.
-
-### V3 Pros
-
-- **V2's elegance + V1's correctness**: Combined find+lock query replaces V1's nested inner loop. Epoch alignment, proportional capacity, and constrained jitter from V1.
-- **Simpler than both**: Outer chunk loop only — no inner walk, no 3-tier skip heuristic, no status column.
-- **Existence-check guard on provisioning**: First thread provisions a chunk, subsequent threads skip via check on last window. Eliminates thundering herd.
-- **Deep search**: `max_search_chunks × max_windows_in_chunk` (default 1000 windows). Same depth as V1.
-- **Dynamic config**: Loaded from DB with 5-second cache. No hardcoded constants.
-- **Single transaction**: Entire operation (idempotency + search + claim) runs in one transaction. No TOCTOU.
-- **No extra tables**: No `track_window_end` coordination table needed.
-- **No status column**: Uses `slot_count < max` directly (from V2).
-- **Dual implementation**: Choose PL/SQL (1 JDBC round trip) or Kotlin/Exposed (1 transaction, ~5-7 statements) based on preference.
-- **Fresh jitter per claim**: Kotlin/Exposed version computes jitter inline via `ThreadLocalRandom` for each claim, avoiding stale pre-computed values.
-
-### V3 Cons
-
-- **Kotlin/Exposed version has more DB round trips**: ~5-7 statements vs V1's single PL/SQL call. Acceptable for most workloads but adds ~2-5ms latency.
-- **Batch provisioning cost**: First request per chunk inserts up to 100 rows. Amortized across subsequent requests but the first thread pays the cost.
-- **PL/SQL version shares V1's maintenance concern**: Algorithm in SQL is harder to test (though V3's PL/SQL is simpler than V1's).
-
----
-
-## Side-by-Side Comparison
-
-| Dimension | V1 (PL/SQL) | V2 (Exposed) | V3 (Hybrid) |
-|---|---|---|---|
-| **Window alignment** | Epoch-aligned | Raw requestedTime (broken) | Epoch-aligned |
-| **Algorithm** | Nested loops: outer chunks + inner walk + 3-tier skip | Single find+lock, one extension attempt | Outer chunk loop + find+lock per chunk |
-| **DB round trips** | 1 PL/SQL call | 3-5 transactions | V3-Exposed: 1 txn (~5-7 stmts). V3-SQL: 1 PL/SQL call |
-| **Lock strategy** | `FOR UPDATE NOWAIT` (per-window) | `FOR UPDATE SKIP LOCKED` (set-based) | `FOR UPDATE SKIP LOCKED` (set-based) |
-| **Provisioning** | Lazy per-window. No thundering herd | Batch upfront. Massive thundering herd | Batch + existence-check guard |
-| **Search depth** | max_search_chunks × headroom (1000) | ~200 then throw | max_search_chunks × chunk_size (1000) |
-| **First-window** | Proportional capacity + constrained jitter | None | Proportional capacity + constrained jitter |
-| **Config** | Dynamic (DB + 5s cache) | Hardcoded constants | Dynamic (DB + 5s cache) |
-| **Extra tables** | None | `track_window_end` | None |
-| **Status column** | Required (`OPEN/CLOSED`) | Not used | Not used |
-| **Complexity** | High (PL/SQL + nested loops) | Low (but incomplete) | Medium (cleanest correct solution) |
-
----
-
-## Sequence Diagrams
-
-### V1 Sequence Diagram
+## Sequence Diagram
 
 ```mermaid
 sequenceDiagram
@@ -342,223 +255,45 @@ sequenceDiagram
     end
     Cache-->>SAS: RateLimitConfig
 
-    Note over SAS: Step 2 — Compute params + jitter
-    SAS->>SAS: windowStart = align(requestedTime)<br/>maxFirstWindow = proportional<br/>firstJitterMs, fullJitterMs<br/>headroomSecs
-
-    Note over SAS: Step 3 — Single PL/SQL round trip
-    SAS->>DB: CallableStatement (10 IN, 5 OUT params)
-
-    Note over DB: PL/SQL block:<br/>1. check_existing_slot<br/>2. Phase 1: try first window<br/>3. Phase 2: find_first_open_window<br/>   + walk loop with NOWAIT<br/>4. claim_slot_in_window
-
-    DB-->>SAS: ou_status, ou_slot_id,<br/>ou_scheduled_time, ou_window_start
-
-    alt status = NEW
-        SAS-->>Caller: AssignedSlot
-    else status = EXISTING
-        SAS-->>Caller: AssignedSlot (idempotent)
-    else status = EXHAUSTED
-        SAS-->>Caller: throw SlotAssignmentException
-    end
-```
-
-### V2 Sequence Diagram
-
-```mermaid
-sequenceDiagram
-    participant Caller
-    participant SAS as SlotAssignmentServiceV2
-    participant Repo as Repositories
-    participant DB as Oracle DB
-
-    Caller->>SAS: assignSlot(eventId, requestedTime)
-
-    Note over SAS: Step 1 — Idempotency (separate query)
-    SAS->>Repo: fetchAssignedSlot(eventId)
-    Repo->>DB: SELECT FROM event_slot WHERE event_id = ?
-    DB-->>Repo: null (not found)
-    Repo-->>SAS: null
-
-    Note over SAS: Step 2 — Get current window end
-    SAS->>Repo: fetchWindowEnd(requestedTime)
-    Repo->>DB: SELECT FROM track_window_end
-    alt No rows
-        Repo->>DB: batchInsert 100 windows (thundering herd!)
-        Repo->>DB: INSERT track_window_end
-    end
-    DB-->>SAS: windowEnd
-
-    Note over SAS: Step 3 — Combined find+lock (Transaction 1)
-    SAS->>DB: BEGIN TRANSACTION
-    SAS->>DB: SELECT window_start FROM window_counter<br/>WHERE slot_count < 10<br/>ORDER BY window_start<br/>FETCH FIRST 1 ROW ONLY<br/>FOR UPDATE SKIP LOCKED
-    DB-->>SAS: window (or null)
-
-    alt window found
-        SAS->>DB: INSERT event_slot + UPDATE counter
-        SAS-->>Caller: AssignedSlot
-    else null — extend once
-        SAS->>DB: batchInsert next 100 windows
-        SAS->>DB: UPDATE track_window_end
-        SAS->>DB: Re-run find+lock query
-        alt found
-            SAS->>DB: INSERT + UPDATE
-            SAS-->>Caller: AssignedSlot
-        else still null
-            SAS-->>Caller: throw RuntimeException
-        end
-    end
-```
-
-### V3 Sequence Diagram
-
-```mermaid
-sequenceDiagram
-    participant Caller
-    participant SAS as SlotAssignmentServiceV3
-    participant Cache as ConfigCache
-    participant DB as Oracle DB
-
-    Caller->>SAS: assignSlot(eventId, configName, requestedTime)
-
-    Note over SAS: Step 1 — Load config
-    SAS->>Cache: loadActiveConfig(configName)
-    alt Cache miss
-        Cache->>DB: SELECT FROM rate_limit_config
-        DB-->>Cache: config row
-    end
-    Cache-->>SAS: RateLimitConfig
-
-    Note over SAS: Step 2 — Compute params + jitter
-    SAS->>SAS: alignedStart = align(requestedTime)<br/>maxFirstWindow = proportional<br/>firstJitterMs, fullJitterMs
+    Note over SAS: Step 2 — Compute params
+    SAS->>SAS: alignedStart = align(requestedTime)<br/>maxFirstWindow = proportional<br/>firstJitterMs
 
     Note over SAS: Step 3 — Single transaction
     SAS->>DB: BEGIN TRANSACTION
 
-    Note over DB: 1. Idempotency check
+    Note over DB: Phase 0: Idempotency
     SAS->>DB: SELECT FROM event_slot WHERE event_id = ?
     DB-->>SAS: null (not found)
 
-    Note over DB: 2. Phase 1: First window
+    Note over DB: Phase 1: First window
     SAS->>DB: INSERT window_counter (catch DUP)
     SAS->>DB: SELECT slot_count FOR UPDATE SKIP LOCKED
-    DB-->>SAS: count (if < maxFirstWindow → claim)
+    DB-->>SAS: count (if < maxFirstWindow, claim)
 
-    Note over DB: 3. Phase 2: Chunked find+lock
-    loop for each chunk (up to max_search_chunks)
-        SAS->>DB: Check last window exists?
-        alt not provisioned
-            SAS->>DB: batchInsert chunk windows
+    Note over DB: Phase 2: Frontier-tracked find+lock
+    SAS->>DB: SELECT MAX(window_end) FROM track_window_end
+    DB-->>SAS: windowEnd (or null → provision + insert frontier)
+
+    SAS->>DB: SELECT window_start FROM window_counter<br/>WHERE window_start >= ? AND < windowEnd<br/>AND slot_count < max<br/>FOR UPDATE SKIP LOCKED FETCH FIRST 1 ROW ONLY
+    alt window found
+        SAS->>DB: INSERT event_slot + UPDATE counter
+        SAS-->>Caller: AssignedSlot
+    else range full — extension loop
+        loop up to max-chunks-to-search
+            SAS->>DB: batchInsert chunk + INSERT track_window_end
+            SAS->>DB: find+lock in new chunk range
+            alt window found
+                SAS->>DB: INSERT event_slot + UPDATE counter
+                SAS-->>Caller: AssignedSlot
+            end
         end
-        SAS->>DB: SELECT window_start FROM window_counter<br/>WHERE window_start >= ? AND < ?<br/>AND slot_count < max<br/>ORDER BY window_start<br/>FETCH FIRST 1 ROW ONLY<br/>FOR UPDATE SKIP LOCKED
-        alt window found
-            SAS->>DB: INSERT event_slot + UPDATE counter
-            SAS-->>Caller: AssignedSlot
-        end
+        SAS-->>Caller: throw SlotAssignmentException
     end
-
-    SAS-->>Caller: throw SlotAssignmentException (if exhausted)
 ```
 
 ---
 
-## Flow Diagrams
-
-### V1 Flow Diagram
-
-```mermaid
-flowchart TD
-    A([assignSlot called]) --> D[Load RateLimitConfig<br/>from cache or DB]
-    D --> E{Config found?}
-    E -- No --> F([Throw ConfigLoadException])
-    E -- Yes --> G[Compute params + jitter<br/>windowStart, maxFirstWindow,<br/>firstJitterMs, fullJitterMs,<br/>headroomSecs]
-
-    G --> PL[Execute PL/SQL block<br/>single JDBC round trip]
-
-    subgraph PLSQL ["PL/SQL Block (server-side)"]
-        B{check_existing_slot?}
-        B -- Yes --> C2[/EXISTING/]
-
-        B -- No --> P1[Phase 1: try_lock_window<br/>first window with<br/>proportional capacity]
-        P1 --> P1C{count < maxFirstWindow<br/>and lock acquired?}
-        P1C -- Yes --> P1Q[claim_slot_in_window<br/>firstJitterMs]
-        P1Q --> U[/NEW/]
-
-        P1C -- No --> SKIP[find_first_open_window<br/>MIN window_start<br/>WHERE status = OPEN]
-
-        SKIP --> SL[searchLimit = firstOpen + headroom]
-        SL --> H{current > searchLimit?}
-        H -- Yes --> RESKIP{chunks remaining?}
-        RESKIP -- Yes --> SKIP
-        RESKIP -- No --> I2[/EXHAUSTED/]
-
-        H -- No --> J[try_lock_window<br/>FOR UPDATE NOWAIT]
-        J --> L{Lock acquired?}
-
-        L -- No/contended --> N[current += window_size]
-        N --> H
-
-        L -- Yes --> O{slot_count >= max?}
-        O -- Yes --> N
-        O -- No --> Q[claim_slot_in_window<br/>fullJitterMs]
-        Q --> U
-    end
-
-    PL --> B
-    C2 --> RET
-    I2 --> RET
-    U --> RET
-
-    RET[Marshal OUT params]
-    RET --> INT{Interpret status}
-    INT -- NEW --> Y([Return AssignedSlot])
-    INT -- EXISTING --> C([Return existing AssignedSlot])
-    INT -- EXHAUSTED --> I([Throw SlotAssignmentException])
-
-    style A fill:#4a9eff,color:#fff
-    style C fill:#2ecc71,color:#fff
-    style Y fill:#2ecc71,color:#fff
-    style F fill:#e74c3c,color:#fff
-    style I fill:#e74c3c,color:#fff
-    style PL fill:#3498db,color:#fff
-    style SKIP fill:#9b59b6,color:#fff
-```
-
-### V2 Flow Diagram
-
-```mermaid
-flowchart TD
-    A([assignSlot called]) --> IDEM[fetchAssignedSlot eventId<br/>separate query]
-    IDEM --> IDEM_C{Slot exists?}
-    IDEM_C -- Yes --> RET_EXIST([Return existing AssignedSlot])
-
-    IDEM_C -- No --> WE[fetchWindowEnd requestedTime]
-    WE --> WE_C{Window end exists?}
-    WE_C -- No --> PROV1[batchInsert 100 windows<br/>from requestedTime<br/>no existence check!]
-    PROV1 --> PROV1_T[insertWindowEnd<br/>track_window_end]
-    PROV1_T --> FL
-
-    WE_C -- Yes --> FL[Combined find+lock<br/>SELECT window_start<br/>WHERE slot_count < 10<br/>FOR UPDATE SKIP LOCKED]
-    FL --> FL_C{Window found?}
-    FL_C -- Yes --> CLAIM[claimSlot<br/>INSERT event_slot<br/>UPDATE counter]
-    CLAIM --> CLAIM_C{DUP_VAL?}
-    CLAIM_C -- Yes --> RE_READ([Return existing slot])
-    CLAIM_C -- No --> RET_NEW([Return new AssignedSlot])
-
-    FL_C -- No --> EXT[Extend: batchInsert<br/>next 100 windows]
-    EXT --> EXT_T[updateWindowEnd<br/>track_window_end]
-    EXT_T --> FL2[Re-run find+lock<br/>in extended range]
-    FL2 --> FL2_C{Window found?}
-    FL2_C -- Yes --> CLAIM
-    FL2_C -- No --> ERR([Throw RuntimeException])
-
-    style A fill:#4a9eff,color:#fff
-    style RET_EXIST fill:#2ecc71,color:#fff
-    style RET_NEW fill:#2ecc71,color:#fff
-    style RE_READ fill:#2ecc71,color:#fff
-    style ERR fill:#e74c3c,color:#fff
-    style PROV1 fill:#e74c3c,color:#fff
-```
-
-### V3 Flow Diagram
+## Flow Diagram
 
 ```mermaid
 flowchart TD
@@ -579,23 +314,26 @@ flowchart TD
         TLF_C -- Yes --> CLAIM1[claimSlot<br/>firstJitterMs]
         CLAIM1 --> NEW1[/NEW/]
 
-        TLF_C -- No --> CHUNK_LOOP
+        TLF_C -- No --> FRONTIER[fetchOrInitWindowEnd<br/>SELECT MAX window_end<br/>from track_window_end]
 
-        subgraph CHUNK_LOOP ["Phase 2: Chunk Loop"]
+        FRONTIER --> FULL_SCAN[findAndLockFirstAvailable<br/>over entire provisioned range<br/>FOR UPDATE SKIP LOCKED]
+        FULL_SCAN --> FS_C{Window found?}
+        FS_C -- Yes --> CLAIM2[claimSlot<br/>fullJitterMs]
+        CLAIM2 --> NEW2[/NEW/]
+
+        FS_C -- No --> EXT_LOOP
+
+        subgraph EXT_LOOP ["Extension Loop (max-chunks-to-search)"]
             direction TB
-            CK_START[chunk 0..maxSearchChunks-1]
-            CK_START --> PROV{Last window<br/>exists?}
-            PROV -- Yes --> FIND
-            PROV -- No --> BATCH[batchInsert chunk<br/>ignore duplicates]
-            BATCH --> FIND
-
-            FIND[findAndLockFirstAvailable<br/>SELECT window_start<br/>WHERE slot_count < max<br/>FOR UPDATE SKIP LOCKED<br/>FETCH FIRST 1 ROW ONLY]
-            FIND --> FIND_C{Window found?}
-            FIND_C -- Yes --> CLAIM2[claimSlot<br/>fullJitterMs]
-            CLAIM2 --> NEW2[/NEW/]
-            FIND_C -- No --> NEXT{More chunks?}
-            NEXT -- Yes --> CK_START
-            NEXT -- No --> EXH[/EXHAUSTED/]
+            EXT_START[chunk 0..maxChunksToSearch-1]
+            EXT_START --> EXT_PROV[ensureChunkProvisioned<br/>+ INSERT track_window_end]
+            EXT_PROV --> EXT_FIND[findAndLockFirstAvailable<br/>in extension chunk]
+            EXT_FIND --> EXT_C{Window found?}
+            EXT_C -- Yes --> CLAIM3[claimSlot<br/>fullJitterMs]
+            CLAIM3 --> NEW3[/NEW/]
+            EXT_C -- No --> EXT_NEXT{More chunks?}
+            EXT_NEXT -- Yes --> EXT_START
+            EXT_NEXT -- No --> EXH[/EXHAUSTED/]
         end
     end
 
@@ -603,6 +341,7 @@ flowchart TD
     C2 --> RET_E([Return existing AssignedSlot])
     NEW1 --> RET_N([Return new AssignedSlot])
     NEW2 --> RET_N
+    NEW3 --> RET_N
     EXH --> RET_X([Throw SlotAssignmentException])
 
     style A fill:#4a9eff,color:#fff
@@ -611,7 +350,8 @@ flowchart TD
     style F fill:#e74c3c,color:#fff
     style RET_X fill:#e74c3c,color:#fff
     style TXN fill:#3498db,color:#fff
-    style FIND fill:#9b59b6,color:#fff
+    style FULL_SCAN fill:#9b59b6,color:#fff
+    style EXT_FIND fill:#9b59b6,color:#fff
 ```
 
 ---
@@ -623,9 +363,9 @@ All properties are set in `src/main/resources/application.yaml`:
 | Property | Description | Default |
 |---|---|---|
 | `rate-limiter.default-config-name` | Name of the default rate limit config | `default` |
-| `rate-limiter.headroom-windows` | V1: windows beyond skip target to search | `100` |
-| `rate-limiter.max-windows-in-chunk` | V3: windows per provisioning chunk | `100` |
-| `rate-limiter.max-search-chunks` | V1/V3: max chunks before giving up | `10` |
+| `rate-limiter.max-windows-in-chunk` | Windows per provisioning chunk | `100` |
+| `rate-limiter.max-chunks-to-search` | Extension iterations after initial range scan | `2` |
+| `rate-limiter.headroom-windows` | Legacy: windows beyond skip target to search | `100` |
 | `quarkus.datasource.db-kind` | Database type | `oracle` |
 | `quarkus.datasource.jdbc.url` | Oracle JDBC URL | `jdbc:oracle:thin:@localhost:1521/ORCLPDB1` |
 | `quarkus.datasource.username` | Oracle username | `rate_limiter` |
@@ -712,9 +452,9 @@ curl -X POST http://localhost:8080/admin/rate-limit/cache/flush
 
 ### Key Log Messages
 
-- `INFO  SlotAssignmentService - Assigned slot for eventId={} in window={} after searching {} windows`
+- `INFO  SlotAssignmentService - Assigned slot for eventId={} in window={}`
 - `DEBUG SlotAssignmentService - Idempotent hit for eventId={}`
-- `ERROR SlotAssignmentService - Could not assign slot for event {} after searching {} windows`
+- `ERROR SlotAssignmentService - Could not assign slot for event {} after searching`
 - `INFO  RateLimitConfigRepository - Config cache miss for {configName}, loaded from DB`
 
 ## Known Limitations
@@ -723,8 +463,8 @@ curl -X POST http://localhost:8080/admin/rate-limit/cache/flush
    instantaneous bursts can theoretically exceed the per-window limit for brief
    sub-second intervals.
 
-2. **Lookahead exhaustion**: If a single burst exceeds `max_search_chunks * max_windows_in_chunk * maxPerWindow`
-   events (default: 10 * 100 * 100 = 100,000), slot assignment fails for remaining events.
+2. **Search depth exhaustion**: If a single burst exceeds `(max_windows_in_chunk + max_chunks_to_search * max_windows_in_chunk) * maxPerWindow`
+   events per request, slot assignment fails. Client retries naturally extend the frontier further.
 
 3. **Config propagation delay**: Config changes take up to 5 seconds (cache TTL) to
    propagate to all nodes. Use the cache flush endpoint for immediate propagation.
@@ -734,14 +474,15 @@ curl -X POST http://localhost:8080/admin/rate-limit/cache/flush
 
 ## Operational Runbook
 
-### Windows Filling Up (Lookahead Approaching Limit)
+### Windows Filling Up (Search Depth Approaching Limit)
 
-**Symptom**: Logs show `Lookahead exhausted` errors or high lookahead depths.
+**Symptom**: Logs show slot assignment exceptions or high search depths.
 
 **Action**:
 1. Check current config: `GET /admin/rate-limit/config`
 2. If safe, increase `maxPerWindow`: `POST /admin/rate-limit/config`
-3. Check logs for `SlotAssignmentException` — if present, events are being rejected.
+3. Increase `max-chunks-to-search` to allow deeper in-request searching
+4. Check logs for `SlotAssignmentException` — if present, events are being rejected. Client retries will naturally extend the frontier.
 
 ### Oracle Slow / Unavailable
 
