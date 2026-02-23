@@ -115,39 +115,44 @@ DECLARE
     ---------------------------------------------------------------
 
     FUNCTION find_and_lock(from_ts IN TIMESTAMP, to_ts IN TIMESTAMP) RETURN TIMESTAMP IS
+        CURSOR c IS
+            SELECT window_start
+            FROM   rate_limit_window_counter
+            WHERE  window_start >= from_ts
+            AND    window_start < to_ts
+            AND    slot_count < in_max_per_window
+            ORDER BY window_start
+            FOR UPDATE SKIP LOCKED;
         found TIMESTAMP;
     BEGIN
-        SELECT window_start INTO found
-        FROM   rate_limit_window_counter
-        WHERE  window_start >= from_ts
-        AND    window_start < to_ts
-        AND    slot_count < in_max_per_window
-        ORDER BY window_start
-        FETCH FIRST 1 ROW ONLY
-        FOR UPDATE SKIP LOCKED;
+        OPEN c;
+        FETCH c INTO found;
+        CLOSE c;
         RETURN found;
-    EXCEPTION
-        WHEN NO_DATA_FOUND THEN RETURN NULL;
     END find_and_lock;
 
     ---------------------------------------------------------------
-    -- fetch_or_init_window_end: Get (or initialize) the provisioning
-    -- frontier for this alignedStart from the append-only
-    -- track_window_end table.
+    -- fetch_window_end: Read the current provisioning frontier
+    -- for this alignedStart. Returns NULL if no frontier exists.
     ---------------------------------------------------------------
 
-    FUNCTION fetch_or_init_window_end RETURN TIMESTAMP IS
+    FUNCTION fetch_window_end RETURN TIMESTAMP IS
         v_end TIMESTAMP;
     BEGIN
         SELECT MAX(window_end) INTO v_end
         FROM   track_window_end
         WHERE  requested_time = in_window_start;
+        RETURN v_end;
+    END fetch_window_end;
 
-        IF v_end IS NOT NULL THEN
-            RETURN v_end;
-        END IF;
+    ---------------------------------------------------------------
+    -- init_window_end: Provision the initial chunk and record
+    -- the frontier. Called when fetch_window_end returns NULL.
+    ---------------------------------------------------------------
 
-        -- First request for this alignedStart — provision initial chunk
+    FUNCTION init_window_end RETURN TIMESTAMP IS
+        v_end TIMESTAMP;
+    BEGIN
         v_end := in_window_start + window_size + chunk_size;
         ensure_chunk_provisioned(in_window_start + window_size);
 
@@ -163,7 +168,7 @@ DECLARE
         END;
 
         RETURN v_end;
-    END fetch_or_init_window_end;
+    END init_window_end;
 
     ---------------------------------------------------------------
     -- claim_slot: Insert event slot + increment counter.
@@ -226,7 +231,10 @@ BEGIN
         -- Phase 2: Frontier-tracked find+lock
         IF NOT slot_claimed THEN
             -- Step 1: Get (or initialize) provisioning frontier
-            v_window_end := fetch_or_init_window_end();
+            v_window_end := fetch_window_end();
+            IF v_window_end IS NULL THEN
+                v_window_end := init_window_end();
+            END IF;
 
             -- Step 2: find+lock over ENTIRE provisioned range
             found_window := find_and_lock(in_window_start + window_size, v_window_end);

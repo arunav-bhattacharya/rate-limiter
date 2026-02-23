@@ -472,6 +472,18 @@ curl -X POST http://localhost:8080/admin/rate-limit/cache/flush
 4. **No business-hours awareness**: The window model advances linearly through time
    with no concept of business hours or blackout periods.
 
+5. **Shared windows across different `requestedTime` values**: When two requests with
+   different `requestedTime` values share the same epoch-aligned window, the capacity
+   limit applied depends on which request's phase touches the window first. For example,
+   request A at `12:00:01` has `alignedStart=12:00:00` and overflows to window `12:00:04`
+   using `maxPerWindow` (Phase 2). Request B at `12:00:05` has `alignedStart=12:00:04`
+   and treats that same window as its first window with proportional capacity
+   (`maxFirstWindow`). If request A already filled `12:00:04` to `maxPerWindow`, request B
+   sees it as full even though its own proportional limit hasn't been reached. The
+   `slot_count` column tracks total usage regardless of which `requestedTime` caused it,
+   so per-requestedTime capacity enforcement on a shared window is not possible without a
+   schema change (e.g., per-`requestedTime` slot tracking per window).
+
 ## Operational Runbook
 
 ### Windows Filling Up (Search Depth Approaching Limit)

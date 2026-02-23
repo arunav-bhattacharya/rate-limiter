@@ -13,6 +13,7 @@ import org.jetbrains.exposed.sql.transactions.transaction
 import org.slf4j.LoggerFactory
 import java.time.Duration
 import java.time.Instant
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ThreadLocalRandom
 
 /**
@@ -44,6 +45,9 @@ class SlotAssignmentServiceV3 @Inject constructor(
     private val maxChunksToSearch: Int
 ) {
     private val logger = LoggerFactory.getLogger(SlotAssignmentServiceV3::class.java)
+    private val firstWindowFull = ConcurrentHashMap<Instant, Boolean>()
+
+    fun evictFirstWindowCache() = firstWindowFull.clear()
 
     fun assignSlot(eventId: String, configName: String, requestedTime: Instant): AssignedSlot {
         val config = configRepository.loadActiveConfig(configName)
@@ -59,12 +63,15 @@ class SlotAssignmentServiceV3 @Inject constructor(
             with(eventSlotRepository) { queryAssignedSlot(eventId) }?.let { return@transaction it }
 
             // Phase 1: First window (proportional capacity)
-            with(windowSlotCounterRepository) { ensureWindowExists(alignedStart) }
-            val firstWindowLocked = with(windowSlotCounterRepository) { tryLockFirstWindow(alignedStart, maxFirstWindow) }
-            if (firstWindowLocked) {
-                return@transaction claimSlot(
-                    eventId, alignedStart, firstJitterMs, requestedTime, config.configId
-                )
+            if (!firstWindowFull.containsKey(alignedStart)) {
+                with(windowSlotCounterRepository) { ensureWindowExists(alignedStart) }
+                when (with(windowSlotCounterRepository) { tryLockFirstWindow(alignedStart, maxFirstWindow) }) {
+                    true -> return@transaction claimSlot(
+                        eventId, alignedStart, firstJitterMs, requestedTime, config.configId
+                    )
+                    false -> firstWindowFull[alignedStart] = true
+                    null -> {} // SKIP LOCKED — contended, try again next request
+                }
             }
 
             // Phase 2: Frontier-tracked find+lock

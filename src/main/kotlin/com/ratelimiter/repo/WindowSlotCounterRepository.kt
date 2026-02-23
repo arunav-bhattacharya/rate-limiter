@@ -100,29 +100,27 @@ class WindowSlotCounterRepository {
     }
 
     /**
-     * Attempt to lock the first window's counter row only if it has capacity.
-     * Returns true if the lock was acquired (capacity available), false if the
-     * row is full or locked by another session (SKIP LOCKED).
+     * Attempt to lock the first window's counter row and check capacity.
+     * Returns:
+     *   true  — lock acquired, has capacity (slot_count < maxSlots)
+     *   false — lock acquired, full (slot_count >= maxSlots)
+     *   null  — row skipped by another session's lock (SKIP LOCKED)
      */
-    fun Transaction.tryLockFirstWindow(window: Instant, maxSlots: Int): Boolean {
+    fun Transaction.tryLockFirstWindow(window: Instant, maxSlots: Int): Boolean? {
         val sql = """
-            SELECT WINDOW_START
+            SELECT SLOT_COUNT
             FROM   rate_limit_window_counter
             WHERE  WINDOW_START = ?
-            AND    SLOT_COUNT < ?
             FOR UPDATE SKIP LOCKED
         """.trimIndent()
 
         return exec(
             sql,
-            listOf(
-                Pair(JavaInstantColumnType(), window),
-                Pair(IntegerColumnType(), maxSlots)
-            ),
+            listOf(Pair(JavaInstantColumnType(), window)),
             StatementType.SELECT
         ) { rs ->
-            rs.next()
-        } ?: false
+            if (rs.next()) rs.getInt("SLOT_COUNT") < maxSlots else null
+        }
     }
 
     /**
