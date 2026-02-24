@@ -22,9 +22,6 @@ dependencies {
     implementation("io.quarkus:quarkus-config-yaml")
     implementation("io.quarkus:quarkus-jdbc-oracle")
 
-    // Flyway
-    implementation("io.quarkus:quarkus-flyway")
-
     // Exposed 0.61.0
     implementation("org.jetbrains.exposed:exposed-core:0.61.0")
     implementation("org.jetbrains.exposed:exposed-jdbc:0.61.0")

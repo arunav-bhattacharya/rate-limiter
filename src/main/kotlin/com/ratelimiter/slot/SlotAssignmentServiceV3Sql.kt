@@ -35,8 +35,12 @@ class SlotAssignmentServiceV3Sql @Inject constructor(
     private val logger = LoggerFactory.getLogger(SlotAssignmentServiceV3Sql::class.java)
 
     fun assignSlot(eventId: String, configName: String, requestedTime: Instant): AssignedSlot {
+        val totalStart = System.nanoTime()
+
+        var t0 = System.nanoTime()
         val config = configRepository.loadActiveConfig(configName)
             ?: throw ConfigLoadException(configName, "No active rate limit config found for: $configName")
+        logger.debug("eventId={} | loadConfig took {}ms", eventId, nanosToMs(System.nanoTime() - t0))
 
         val windowStart = alignToWindowBoundary(requestedTime, config.windowSizeSecs)
         val elapsedMs = elapsedInWindowMs(windowStart, requestedTime)
@@ -44,26 +48,29 @@ class SlotAssignmentServiceV3Sql @Inject constructor(
         val firstJitterMs = computeFirstWindowJitterMs(elapsedMs, config.windowSizeMs)
         val fullJitterMs = computeFullWindowJitterMs(config.windowSizeMs)
 
+        t0 = System.nanoTime()
         val result = executeSlotAssignment(
             eventId, windowStart, requestedTime, config,
             maxFirstWindow, firstJitterMs, fullJitterMs
         )
+        logger.debug("eventId={} | executeSlotAssignment (PL/SQL) took {}ms", eventId, nanosToMs(System.nanoTime() - t0))
 
         return when (result.status) {
             SlotAssignmentV3Sql.STATUS_NEW -> {
                 logger.info(
-                    "Assigned slot for eventId={} in window={} after searching {} windows",
-                    eventId, result.windowStart, result.windowsSearched
+                    "eventId={} | totalTime={}ms (new, window={}, windowsSearched={})",
+                    eventId, nanosToMs(System.nanoTime() - totalStart), result.windowStart, result.windowsSearched
                 )
                 buildAssignedSlot(eventId, result.scheduledTime, requestedTime)
             }
 
             SlotAssignmentV3Sql.STATUS_EXISTING -> {
-                logger.debug("Idempotent hit for eventId={}", eventId)
+                logger.info("eventId={} | totalTime={}ms (idempotent hit)", eventId, nanosToMs(System.nanoTime() - totalStart))
                 buildAssignedSlot(eventId, result.scheduledTime, requestedTime)
             }
 
             SlotAssignmentV3Sql.STATUS_EXHAUSTED -> {
+                logger.warn("eventId={} | totalTime={}ms (exhausted, windowsSearched={})", eventId, nanosToMs(System.nanoTime() - totalStart), result.windowsSearched)
                 throw SlotAssignmentException(
                     eventId = eventId,
                     windowsSearched = result.windowsSearched,
@@ -75,6 +82,8 @@ class SlotAssignmentServiceV3Sql @Inject constructor(
             else -> error("Unexpected PL/SQL status: ${result.status}")
         }
     }
+
+    private fun nanosToMs(nanos: Long): String = "%.3f".format(nanos / 1_000_000.0)
 
     private data class SlotAssignmentResult(
         val status: Int,
