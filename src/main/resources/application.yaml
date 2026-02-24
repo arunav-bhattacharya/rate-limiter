@@ -6,14 +6,20 @@ quarkus:
     username: ${DB_USERNAME:rate_limiter}
     password: ${DB_PASSWORD:rate_limiter}
     jdbc:
-      url: ${DB_URL:jdbc:oracle:thin:@localhost:1521/ORCLPDB1}
-      min-size: 35
-      max-size: 60
-      acquisition-timeout: 10S
+      url: ${DB_URL:jdbc:oracle:thin:@(DESCRIPTION=(ADDRESS=(PROTOCOL=TCP)(HOST=localhost)(PORT=1521))(CONNECT_DATA=(SERVICE_NAME=ORCLPDB1))(TRANSPORT_CONNECT_TIMEOUT=5000)(CONNECT_TIMEOUT=10000)(RETRY_COUNT=3))}
+      min-size: 50
+      max-size: 150
+      acquisition-timeout: 20S
       idle-removal-timeout: 5M
       background-validation-interval: 2M
       leak-detection-interval: 10S
       new-connection-sql: SELECT 1 FROM DUAL
+      additional-jdbc-properties:
+        # Redundant safety — applies even if DB_URL is overridden with a simple URL
+        oracle.net.CONNECT_TIMEOUT: "10000"
+        # Must exceed slowest query (batch inserts take 5-6s)
+        oracle.jdbc.ReadTimeout: "60000"
+        oracle.net.READ_TIMEOUT: "60000"
 
   log:
     category:
@@ -35,3 +41,7 @@ rate-limiter:
     datasource:
       jdbc:
         acquisition-timeout: 60S
+        additional-jdbc-properties:
+          oracle.net.CONNECT_TIMEOUT: "30000"
+          oracle.jdbc.ReadTimeout: "60000"
+          oracle.net.READ_TIMEOUT: "60000"

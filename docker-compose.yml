@@ -9,8 +9,18 @@ services:
       - "5500:5500"
     environment:
       ORACLE_PWD: rate_limiter_pwd
+    shm_size: 2g
+    deploy:
+      resources:
+        limits:
+          cpus: "4.0"
+          memory: 4g
+        reservations:
+          cpus: "2.0"
+          memory: 2g
     volumes:
       - oracle_data:/opt/oracle/oradata
+      - ./oracle-init:/opt/oracle/scripts/startup
     healthcheck:
       test: ["CMD", "sqlplus", "-L", "sys/rate_limiter_pwd@//localhost:1521/ORCLPDB1 as sysdba", "@/dev/null"]
       interval: 30s
