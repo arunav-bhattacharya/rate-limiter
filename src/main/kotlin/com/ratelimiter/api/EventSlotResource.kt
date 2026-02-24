@@ -1,6 +1,7 @@
 package com.ratelimiter.api
 
 import com.ratelimiter.repo.EventSlotRepository
+import io.quarkus.logging.Log
 import jakarta.inject.Inject
 import jakarta.ws.rs.Consumes
 import jakarta.ws.rs.POST
@@ -27,6 +28,7 @@ class EventSlotResource @Inject constructor(
 
     @POST
     fun insertEventSlot(request: EventSlotRequest): Response {
+        val start = System.nanoTime()
         val inserted = eventSlotRepository.insertEventSlotInNewTransaction(
             eventId = request.eventId,
             requestedTime = Instant.parse(request.requestedTime),
@@ -34,6 +36,8 @@ class EventSlotResource @Inject constructor(
             scheduledTime = Instant.parse(request.scheduledTime),
             configId = request.configId
         )
+        val elapsedMs = (System.nanoTime() - start) / 1_000_000.0
+        Log.infof("EventSlot insert eventId=%s inserted=%s took=%.2fms", request.eventId, inserted, elapsedMs)
 
         return if (inserted) {
             Response.status(Response.Status.CREATED)
