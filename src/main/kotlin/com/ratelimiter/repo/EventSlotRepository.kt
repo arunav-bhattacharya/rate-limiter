@@ -10,6 +10,7 @@ import org.jetbrains.exposed.sql.selectAll
 import org.jetbrains.exposed.sql.transactions.transaction
 import java.time.Duration
 import java.time.Instant
+import java.time.temporal.ChronoUnit
 
 @ApplicationScoped
 class EventSlotRepository {
@@ -44,7 +45,36 @@ class EventSlotRepository {
     }
 
     /**
-     * Insert a new event slot row.
+     * Insert a new event slot row, managing its own transaction.
+     * Used by the REST endpoint (EventSlotResource) for direct inserts.
+     */
+    fun insertEventSlotInNewTransaction(
+        eventId: String,
+        requestedTime: Instant,
+        windowStart: Instant,
+        scheduledTime: Instant,
+        configId: Long
+    ): Boolean {
+        return transaction {
+            val now = Instant.now().truncatedTo(ChronoUnit.MILLIS)
+            try {
+                RateLimitEventSlotTable.insert {
+                    it[RateLimitEventSlotTable.eventId] = eventId
+                    it[RateLimitEventSlotTable.requestedTime] = requestedTime
+                    it[RateLimitEventSlotTable.windowStart] = windowStart
+                    it[RateLimitEventSlotTable.scheduledTime] = scheduledTime
+                    it[RateLimitEventSlotTable.configId] = configId
+                    it[RateLimitEventSlotTable.createdAt] = now
+                }
+                true
+            } catch (_: ExposedSQLException) {
+                false
+            }
+        }
+    }
+
+    /**
+     * Insert a new event slot row within an existing transaction.
      * Returns true if the row was inserted, false if a duplicate eventId already exists.
      */
     fun Transaction.insertEventSlot(
@@ -54,6 +84,7 @@ class EventSlotRepository {
         scheduledTime: Instant,
         configId: Long
     ): Boolean {
+        val now = Instant.now().truncatedTo(ChronoUnit.MILLIS)
         return try {
             RateLimitEventSlotTable.insert {
                 it[RateLimitEventSlotTable.eventId] = eventId
@@ -61,6 +92,7 @@ class EventSlotRepository {
                 it[RateLimitEventSlotTable.windowStart] = windowStart
                 it[RateLimitEventSlotTable.scheduledTime] = scheduledTime
                 it[RateLimitEventSlotTable.configId] = configId
+                it[RateLimitEventSlotTable.createdAt] = now
             }
             true
         } catch (_: ExposedSQLException) {

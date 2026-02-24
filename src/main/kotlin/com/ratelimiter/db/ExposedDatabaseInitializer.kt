@@ -5,6 +5,7 @@ import jakarta.annotation.PostConstruct
 import jakarta.enterprise.context.ApplicationScoped
 import jakarta.inject.Inject
 import org.jetbrains.exposed.sql.Database
+import org.jetbrains.exposed.sql.DatabaseConfig
 import org.jetbrains.exposed.sql.SchemaUtils
 import org.jetbrains.exposed.sql.transactions.transaction
 import org.slf4j.LoggerFactory
@@ -29,7 +30,12 @@ class ExposedDatabaseInitializer @Inject constructor(
 
     @PostConstruct
     fun init() {
-        Database.connect(dataSource)
+        val dbConfig = DatabaseConfig {
+            defaultMaxAttempts = 1          // No retries (1 attempt only)
+            defaultMinRetryDelay = 0
+            defaultMaxRetryDelay = 0
+        }
+        Database.connect(dataSource, databaseConfig = dbConfig)
 
         transaction {
             SchemaUtils.create(

@@ -7,9 +7,13 @@ quarkus:
     password: ${DB_PASSWORD:rate_limiter}
     jdbc:
       url: ${DB_URL:jdbc:oracle:thin:@localhost:1521/ORCLPDB1}
-      min-size: 5
-      max-size: 30
-      acquisition-timeout: 5S
+      min-size: 35
+      max-size: 60
+      acquisition-timeout: 10S
+      idle-removal-timeout: 5M
+      background-validation-interval: 2M
+      leak-detection-interval: 10S
+      new-connection-sql: SELECT 1 FROM DUAL
 
   log:
     category:
