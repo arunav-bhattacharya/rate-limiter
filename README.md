@@ -51,11 +51,11 @@ curl -X POST http://localhost:8080/admin/rate-limit/config \
 ```bash
 curl -X POST http://localhost:8080/api/v1/slots \
   -H 'Content-Type: application/json' \
-  -d '{
-    "eventId": "pay-123",
-    "configName": "default",
-    "requestedTime": "2025-06-01T12:00:00Z"
-  }'
+  -d "{
+    \"eventId\": \"$(uuidgen)\",
+    \"configName\": \"default\",
+    \"requestedTime\": \"2025-06-01T12:00:00Z\"
+  }"
 ```
 
 Response:

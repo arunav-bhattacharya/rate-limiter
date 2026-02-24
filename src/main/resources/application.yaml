@@ -11,10 +11,6 @@ quarkus:
       max-size: 30
       acquisition-timeout: 5S
 
-  flyway:
-    migrate-at-start: true
-    locations: db/migration
-
   log:
     category:
       "com.payments.ratelimiter":
@@ -35,5 +31,3 @@ rate-limiter:
     datasource:
       jdbc:
         acquisition-timeout: 60S
-    flyway:
-      clean-at-start: true

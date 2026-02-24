@@ -5,11 +5,17 @@ import jakarta.annotation.PostConstruct
 import jakarta.enterprise.context.ApplicationScoped
 import jakarta.inject.Inject
 import org.jetbrains.exposed.sql.Database
+import org.jetbrains.exposed.sql.SchemaUtils
+import org.jetbrains.exposed.sql.transactions.transaction
+import org.slf4j.LoggerFactory
 import javax.sql.DataSource
 
 /**
- * Connects the Kotlin Exposed library to the Quarkus-managed Agroal DataSource.
- * Without this, all `transaction {}` blocks will fail with "Database not found".
+ * Connects the Kotlin Exposed library to the Quarkus-managed Agroal DataSource
+ * and creates the schema if it doesn't already exist.
+ *
+ * Replaces Flyway: tables, indexes, and constraints are defined in the Exposed
+ * table objects and created via [SchemaUtils.create].
  *
  * The @Startup annotation ensures this bean is eagerly initialized at application start,
  * since nothing injects it directly.
@@ -19,8 +25,20 @@ import javax.sql.DataSource
 class ExposedDatabaseInitializer @Inject constructor(
     private val dataSource: DataSource
 ) {
+    private val logger = LoggerFactory.getLogger(ExposedDatabaseInitializer::class.java)
+
     @PostConstruct
     fun init() {
         Database.connect(dataSource)
+
+        transaction {
+            SchemaUtils.create(
+                RateLimitConfigTable,
+                WindowCounterTable,
+                RateLimitEventSlotTable,
+                WindowEndTrackerTable
+            )
+        }
+        logger.info("Exposed database schema initialized")
     }
 }

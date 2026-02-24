@@ -4,6 +4,7 @@ import com.ratelimiter.slot.AssignedSlot
 import com.ratelimiter.slot.ConfigLoadException
 import com.ratelimiter.slot.SlotAssignmentException
 import com.ratelimiter.slot.SlotAssignmentService
+import com.ratelimiter.slot.SlotAssignmentServiceV3
 import jakarta.inject.Inject
 import jakarta.ws.rs.Consumes
 import jakarta.ws.rs.POST
@@ -25,7 +26,7 @@ import java.time.Instant
 @Produces(MediaType.APPLICATION_JSON)
 @Consumes(MediaType.APPLICATION_JSON)
 class SlotAssignmentResource @Inject constructor(
-    private val slotAssignmentService: SlotAssignmentService
+    private val slotAssignmentService: SlotAssignmentServiceV3
 ) {
     private val logger = LoggerFactory.getLogger(SlotAssignmentResource::class.java)
 
@@ -80,11 +81,13 @@ class SlotAssignmentResource @Inject constructor(
         } catch (e: SlotAssignmentException) {
             logger.error("Slot assignment failed for event={}: {}", request.eventId, e.message)
             Response.status(Response.Status.SERVICE_UNAVAILABLE)
-                .entity(mapOf(
-                    "error" to e.message,
-                    "eventId" to e.eventId,
-                    "windowsSearched" to e.windowsSearched
-                ))
+                .entity(
+                    mapOf(
+                        "error" to e.message,
+                        "eventId" to e.eventId,
+                        "windowsSearched" to e.windowsSearched
+                    )
+                )
                 .build()
         } catch (e: Exception) {
             logger.error("Unexpected error assigning slot for event={}", request.eventId, e)
