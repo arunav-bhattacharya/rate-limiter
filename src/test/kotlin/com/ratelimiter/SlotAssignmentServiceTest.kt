@@ -8,11 +8,10 @@ import com.ratelimiter.slot.SlotAssignmentService
 import io.quarkus.test.common.QuarkusTestResource
 import io.quarkus.test.junit.QuarkusTest
 import jakarta.inject.Inject
-import org.assertj.core.api.Assertions.assertThat
-import org.assertj.core.api.Assertions.assertThatThrownBy
 import org.jetbrains.exposed.sql.deleteAll
 import org.jetbrains.exposed.sql.selectAll
 import org.jetbrains.exposed.sql.transactions.transaction
+import org.junit.jupiter.api.Assertions.*
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
 import java.time.Duration
@@ -45,11 +44,11 @@ class SlotAssignmentServiceTest {
 
         val slot = service.assignSlot("evt-basic-1", "test-basic", requestedTime)
 
-        assertThat(slot.eventId).isEqualTo("evt-basic-1")
-        assertThat(slot.scheduledTime).isAfterOrEqualTo(requestedTime)
-        assertThat(slot.scheduledTime).isBefore(requestedTime.plusSeconds(4))
+        assertEquals("evt-basic-1", slot.eventId)
+        assertFalse(slot.scheduledTime.isBefore(requestedTime))
+        assertTrue(slot.scheduledTime.isBefore(requestedTime.plusSeconds(4)))
         // Event lands in the requested window, so delay is within the window size
-        assertThat(slot.delay).isLessThan(Duration.ofSeconds(4))
+        assertTrue(slot.delay < Duration.ofSeconds(4))
     }
 
     @Test
@@ -60,9 +59,9 @@ class SlotAssignmentServiceTest {
         val first = service.assignSlot("evt-idem-1", "test-idempotent", requestedTime)
         val second = service.assignSlot("evt-idem-1", "test-idempotent", requestedTime)
 
-        assertThat(second.eventId).isEqualTo(first.eventId)
-        assertThat(second.scheduledTime).isEqualTo(first.scheduledTime)
-        assertThat(second.delay).isEqualTo(first.delay)
+        assertEquals(first.eventId, second.eventId)
+        assertEquals(first.scheduledTime, second.scheduledTime)
+        assertEquals(first.delay, second.delay)
 
         // Verify only one row exists in the DB
         val count = transaction {
@@ -70,7 +69,7 @@ class SlotAssignmentServiceTest {
                 .where { RateLimitEventSlotTable.eventId eq "evt-idem-1" }
                 .count()
         }
-        assertThat(count).isEqualTo(1)
+        assertEquals(1L, count)
     }
 
     @Test
@@ -84,8 +83,8 @@ class SlotAssignmentServiceTest {
 
         // Third event should go to window 1 (4s later), so delay >= 4s
         val third = service.assignSlot("evt-skip-3", "test-skip", requestedTime)
-        assertThat(third.scheduledTime).isAfterOrEqualTo(requestedTime.plusSeconds(4))
-        assertThat(third.delay).isGreaterThanOrEqualTo(Duration.ofSeconds(4))
+        assertFalse(third.scheduledTime.isBefore(requestedTime.plusSeconds(4)))
+        assertTrue(third.delay >= Duration.ofSeconds(4))
     }
 
     @Test
@@ -102,10 +101,10 @@ class SlotAssignmentServiceTest {
         val windowStarts = transaction {
             RateLimitEventSlotTable.selectAll().map { it[RateLimitEventSlotTable.windowStart] }.distinct().sorted()
         }
-        assertThat(windowStarts).hasSize(3)
-        assertThat(windowStarts[0]).isEqualTo(Instant.parse("2025-06-01T12:00:00Z"))
-        assertThat(windowStarts[1]).isEqualTo(Instant.parse("2025-06-01T12:00:04Z"))
-        assertThat(windowStarts[2]).isEqualTo(Instant.parse("2025-06-01T12:00:08Z"))
+        assertEquals(3, windowStarts.size)
+        assertEquals(Instant.parse("2025-06-01T12:00:00Z"), windowStarts[0])
+        assertEquals(Instant.parse("2025-06-01T12:00:04Z"), windowStarts[1])
+        assertEquals(Instant.parse("2025-06-01T12:00:08Z"), windowStarts[2])
     }
 
     @Test
@@ -120,9 +119,8 @@ class SlotAssignmentServiceTest {
 
         // All scheduled times must be within [requestedTime, requestedTime + 4s)
         for (slot in slots) {
-            assertThat(slot.scheduledTime)
-                .isAfterOrEqualTo(requestedTime)
-                .isBefore(windowEnd)
+            assertFalse(slot.scheduledTime.isBefore(requestedTime))
+            assertTrue(slot.scheduledTime.isBefore(windowEnd))
         }
     }
 
@@ -142,15 +140,15 @@ class SlotAssignmentServiceTest {
                 ?.get(WindowCounterTable.slotCount)
         }
 
-        assertThat(counterValue).isEqualTo(10)
+        assertEquals(10, counterValue)
     }
 
     @Test
     fun `throws ConfigLoadException for unknown config name`() {
-        assertThatThrownBy {
+        val ex = assertThrows(ConfigLoadException::class.java) {
             service.assignSlot("evt-bad-config", "non-existent", Instant.now())
-        }.isInstanceOf(ConfigLoadException::class.java)
-            .hasMessageContaining("non-existent")
+        }
+        assertTrue(ex.message!!.contains("non-existent"))
     }
 
     @Test
@@ -164,11 +162,11 @@ class SlotAssignmentServiceTest {
             service.assignSlot("evt-mw-$i", "test-many-windows", requestedTime)
         }
 
-        assertThat(slots).hasSize(50)
+        assertEquals(50, slots.size)
         // Last event should be pushed ~196s ahead (49 windows x 4s + jitter)
         val maxScheduledTime = slots.maxOf { it.scheduledTime }
-        assertThat(maxScheduledTime).isAfterOrEqualTo(requestedTime.plusSeconds(49 * 4L))
-        assertThat(maxScheduledTime).isBefore(requestedTime.plusSeconds(50 * 4L))
+        assertFalse(maxScheduledTime.isBefore(requestedTime.plusSeconds(49 * 4L)))
+        assertTrue(maxScheduledTime.isBefore(requestedTime.plusSeconds(50 * 4L)))
     }
 
     @Test
@@ -178,15 +176,15 @@ class SlotAssignmentServiceTest {
 
         // First event lands in the requested window — delay < windowSize
         val first = service.assignSlot("evt-delay-1", "test-delay", requestedTime)
-        assertThat(first.delay).isLessThan(Duration.ofSeconds(4))
+        assertTrue(first.delay < Duration.ofSeconds(4))
 
         // Second event is pushed to next window — delay >= 4s
         val second = service.assignSlot("evt-delay-2", "test-delay", requestedTime)
-        assertThat(second.delay).isGreaterThanOrEqualTo(Duration.ofSeconds(4))
+        assertTrue(second.delay >= Duration.ofSeconds(4))
 
         // Third event is pushed to third window — delay >= 8s
         val third = service.assignSlot("evt-delay-3", "test-delay", requestedTime)
-        assertThat(third.delay).isGreaterThanOrEqualTo(Duration.ofSeconds(8))
+        assertTrue(third.delay >= Duration.ofSeconds(8))
     }
 
     // ==================== New tests for proportional first-window ====================
@@ -200,11 +198,11 @@ class SlotAssignmentServiceTest {
         val slot = service.assignSlot("evt-prop-1", "test-proportional", requestedTime)
 
         // scheduledTime must be >= requestedTime (constrained jitter)
-        assertThat(slot.scheduledTime).isAfterOrEqualTo(requestedTime)
+        assertFalse(slot.scheduledTime.isBefore(requestedTime))
         // scheduledTime is in the first window [12:00:00, 12:00:04), jitter starts at elapsed=2s
-        assertThat(slot.scheduledTime).isBefore(Instant.parse("2025-06-01T12:00:04Z"))
-        assertThat(slot.delay).isGreaterThanOrEqualTo(Duration.ZERO)
-        assertThat(slot.delay).isLessThan(Duration.ofSeconds(2))
+        assertTrue(slot.scheduledTime.isBefore(Instant.parse("2025-06-01T12:00:04Z")))
+        assertTrue(slot.delay >= Duration.ZERO)
+        assertTrue(slot.delay < Duration.ofSeconds(2))
 
         // Fill the proportional max (50 total, already have 1)
         (2..50).forEach { i ->
@@ -213,7 +211,7 @@ class SlotAssignmentServiceTest {
 
         // 51st should overflow to the next window (12:00:04Z)
         val overflow = service.assignSlot("evt-prop-51", "test-proportional", requestedTime)
-        assertThat(overflow.scheduledTime).isAfterOrEqualTo(Instant.parse("2025-06-01T12:00:04Z"))
+        assertFalse(overflow.scheduledTime.isBefore(Instant.parse("2025-06-01T12:00:04Z")))
     }
 
     @Test
@@ -224,9 +222,9 @@ class SlotAssignmentServiceTest {
 
         val slot = service.assignSlot("evt-boundary-1", "test-on-boundary", requestedTime)
 
-        assertThat(slot.scheduledTime).isAfterOrEqualTo(requestedTime)
-        assertThat(slot.scheduledTime).isBefore(requestedTime.plusSeconds(4))
-        assertThat(slot.delay).isLessThan(Duration.ofSeconds(4))
+        assertFalse(slot.scheduledTime.isBefore(requestedTime))
+        assertTrue(slot.scheduledTime.isBefore(requestedTime.plusSeconds(4)))
+        assertTrue(slot.delay < Duration.ofSeconds(4))
     }
 
     @Test
@@ -239,13 +237,13 @@ class SlotAssignmentServiceTest {
         (1..25).forEach { i ->
             val slot = service.assignSlot("evt-quarter-$i", "test-quarter", requestedTime)
             // All should land in [12:00:03, 12:00:04) — 1s remaining
-            assertThat(slot.scheduledTime).isAfterOrEqualTo(requestedTime)
-            assertThat(slot.scheduledTime).isBefore(Instant.parse("2025-06-01T12:00:04Z"))
+            assertFalse(slot.scheduledTime.isBefore(requestedTime))
+            assertTrue(slot.scheduledTime.isBefore(Instant.parse("2025-06-01T12:00:04Z")))
         }
 
         // 26th should overflow to next window
         val overflow = service.assignSlot("evt-quarter-26", "test-quarter", requestedTime)
-        assertThat(overflow.scheduledTime).isAfterOrEqualTo(Instant.parse("2025-06-01T12:00:04Z"))
+        assertFalse(overflow.scheduledTime.isBefore(Instant.parse("2025-06-01T12:00:04Z")))
     }
 
     @Test
@@ -260,8 +258,8 @@ class SlotAssignmentServiceTest {
 
         // 101st event should find a slot without walking through all 50 full windows
         val slot = service.assignSlot("evt-sp-101", "test-skip-perf", requestedTime)
-        assertThat(slot.scheduledTime).isAfterOrEqualTo(requestedTime.plusSeconds(50 * 4L))
-        assertThat(slot.delay).isGreaterThanOrEqualTo(Duration.ofSeconds(50 * 4L))
+        assertFalse(slot.scheduledTime.isBefore(requestedTime.plusSeconds(50 * 4L)))
+        assertTrue(slot.delay >= Duration.ofSeconds(50 * 4L))
     }
 
     @Test
@@ -280,11 +278,11 @@ class SlotAssignmentServiceTest {
                 .firstOrNull()
                 ?.get(WindowCounterTable.slotCount)
         }
-        assertThat(slotCount).isEqualTo(2)
+        assertEquals(2, slotCount)
 
         // Third event should overflow to next window
         val third = service.assignSlot("evt-fc-3", "test-full-counter", requestedTime)
-        assertThat(third.scheduledTime).isAfterOrEqualTo(requestedTime.plusSeconds(4))
+        assertFalse(third.scheduledTime.isBefore(requestedTime.plusSeconds(4)))
     }
 
     @Test
@@ -294,16 +292,16 @@ class SlotAssignmentServiceTest {
         // Assign an event far in the future
         val farFuture = Instant.parse("2026-06-01T12:00:00Z")
         val farSlot = service.assignSlot("evt-far-1", "test-isolation", farFuture)
-        assertThat(farSlot.scheduledTime).isAfterOrEqualTo(farFuture)
+        assertFalse(farSlot.scheduledTime.isBefore(farFuture))
 
         // Assign an event in the near term
         val nearTerm = Instant.parse("2025-07-01T12:00:00Z")
         val nearSlot = service.assignSlot("evt-near-1", "test-isolation", nearTerm)
 
         // Near-term event should get a slot near its requested time, not near the far future
-        assertThat(nearSlot.scheduledTime).isAfterOrEqualTo(nearTerm)
-        assertThat(nearSlot.scheduledTime).isBefore(nearTerm.plusSeconds(4))
-        assertThat(nearSlot.delay).isLessThan(Duration.ofSeconds(4))
+        assertFalse(nearSlot.scheduledTime.isBefore(nearTerm))
+        assertTrue(nearSlot.scheduledTime.isBefore(nearTerm.plusSeconds(4)))
+        assertTrue(nearSlot.delay < Duration.ofSeconds(4))
     }
 
     // ==================== Sparse window and chunked search tests ====================
@@ -324,8 +322,8 @@ class SlotAssignmentServiceTest {
 
         // Now assign at requestedTime — should go to W1 (12:00:04), not W252 (after far window)
         val slot = service.assignSlot("evt-sparse-3", "test-sparse", requestedTime)
-        assertThat(slot.scheduledTime).isAfterOrEqualTo(requestedTime.plusSeconds(4))
-        assertThat(slot.scheduledTime).isBefore(requestedTime.plusSeconds(8))
+        assertFalse(slot.scheduledTime.isBefore(requestedTime.plusSeconds(4)))
+        assertTrue(slot.scheduledTime.isBefore(requestedTime.plusSeconds(8)))
     }
 
     @Test
@@ -340,11 +338,11 @@ class SlotAssignmentServiceTest {
         val events = (1..101).map { i ->
             service.assignSlot("evt-chunk-$i", "test-chunked", requestedTime)
         }
-        assertThat(events).hasSize(101)
+        assertEquals(101, events.size)
 
         // 102nd event should succeed via chunk 2 (re-skip finds window 101)
         val overflow = service.assignSlot("evt-chunk-102", "test-chunked", requestedTime)
-        assertThat(overflow.scheduledTime).isAfterOrEqualTo(requestedTime.plusSeconds(101 * 4L))
-        assertThat(overflow.delay).isGreaterThanOrEqualTo(Duration.ofSeconds(101 * 4L))
+        assertFalse(overflow.scheduledTime.isBefore(requestedTime.plusSeconds(101 * 4L)))
+        assertTrue(overflow.delay >= Duration.ofSeconds(101 * 4L))
     }
 }

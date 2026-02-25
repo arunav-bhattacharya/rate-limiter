@@ -35,8 +35,6 @@ dependencies {
     testImplementation("org.testcontainers:testcontainers:1.20.4")
     testImplementation("org.testcontainers:oracle-xe:1.20.4")
     testImplementation("org.testcontainers:junit-jupiter:1.20.4")
-    testImplementation("io.mockk:mockk:1.13.16")
-    testImplementation("org.assertj:assertj-core:3.27.3")
 }
 
 allOpen {

@@ -8,10 +8,10 @@ import com.ratelimiter.slot.SlotAssignmentService
 import io.quarkus.test.common.QuarkusTestResource
 import io.quarkus.test.junit.QuarkusTest
 import jakarta.inject.Inject
-import org.assertj.core.api.Assertions.assertThat
 import org.jetbrains.exposed.sql.deleteAll
 import org.jetbrains.exposed.sql.selectAll
 import org.jetbrains.exposed.sql.transactions.transaction
+import org.junit.jupiter.api.Assertions.*
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
 import java.time.Duration
@@ -73,9 +73,9 @@ class ConcurrencyTest {
         val completed = latch.await(60, TimeUnit.SECONDS)
         executor.shutdown()
 
-        assertThat(completed).isTrue()
-        assertThat(errors).isEmpty()
-        assertThat(results).hasSize(totalEvents)
+        assertTrue(completed)
+        assertTrue(errors.isEmpty())
+        assertEquals(totalEvents, results.size)
 
         // Verify no window exceeds max_per_window via DB (windowStart is an internal detail)
         val slotsByWindow = transaction {
@@ -83,13 +83,14 @@ class ConcurrencyTest {
                 .groupBy { it[RateLimitEventSlotTable.windowStart] }
         }
         for ((windowStart, slots) in slotsByWindow) {
-            assertThat(slots.size)
-                .describedAs("Window $windowStart should have at most $maxPerWindow slots")
-                .isLessThanOrEqualTo(maxPerWindow)
+            assertTrue(
+                slots.size <= maxPerWindow,
+                "Window $windowStart should have at most $maxPerWindow slots"
+            )
         }
 
         // Verify total slots match
-        assertThat(results.values.size).isEqualTo(totalEvents)
+        assertEquals(totalEvents, results.values.size)
 
         // Verify counter values match actual slot counts per window
         val dbCounters = transaction {
@@ -100,16 +101,18 @@ class ConcurrencyTest {
 
         for ((windowStart, slots) in slotsByWindow) {
             val dbCount = dbCounters[windowStart]
-            assertThat(dbCount)
-                .describedAs("DB counter for window $windowStart should match actual slot count")
-                .isEqualTo(slots.size)
+            assertEquals(
+                slots.size, dbCount,
+                "DB counter for window $windowStart should match actual slot count"
+            )
         }
 
         // Verify expected number of windows used
         val expectedWindows = (totalEvents + maxPerWindow - 1) / maxPerWindow // ceiling division
-        assertThat(slotsByWindow.keys.size)
-            .describedAs("Should use approximately $expectedWindows windows")
-            .isGreaterThanOrEqualTo(expectedWindows)
+        assertTrue(
+            slotsByWindow.keys.size >= expectedWindows,
+            "Should use approximately $expectedWindows windows"
+        )
     }
 
     @Test
@@ -140,19 +143,19 @@ class ConcurrencyTest {
         val completed = latch.await(30, TimeUnit.SECONDS)
         executor.shutdown()
 
-        assertThat(completed).isTrue()
-        assertThat(errors).isEmpty()
-        assertThat(results).hasSize(threadCount)
+        assertTrue(completed)
+        assertTrue(errors.isEmpty())
+        assertEquals(threadCount, results.size)
 
         // All results should be identical
         val uniqueEventIds = results.map { it.eventId }.distinct()
-        assertThat(uniqueEventIds).hasSize(1)
+        assertEquals(1, uniqueEventIds.size)
 
         val uniqueScheduledTimes = results.map { it.scheduledTime }.distinct()
-        assertThat(uniqueScheduledTimes).hasSize(1)
+        assertEquals(1, uniqueScheduledTimes.size)
 
         val uniqueDelays = results.map { it.delay }.distinct()
-        assertThat(uniqueDelays).hasSize(1)
+        assertEquals(1, uniqueDelays.size)
 
         // Only one row should exist in DB
         val dbCount = transaction {
@@ -160,7 +163,7 @@ class ConcurrencyTest {
                 .where { RateLimitEventSlotTable.eventId eq eventId }
                 .count()
         }
-        assertThat(dbCount).isEqualTo(1)
+        assertEquals(1L, dbCount)
     }
 
     @Test
@@ -193,9 +196,9 @@ class ConcurrencyTest {
         val completed = latch.await(60, TimeUnit.SECONDS)
         executor.shutdown()
 
-        assertThat(completed).isTrue()
-        assertThat(errors).isEmpty()
-        assertThat(results).hasSize(totalEvents)
+        assertTrue(completed)
+        assertTrue(errors.isEmpty())
+        assertEquals(totalEvents, results.size)
 
         // For each window, verify counter == actual number of rate_limit_event_slot rows
         val slotCountsByWindow = transaction {
@@ -212,14 +215,15 @@ class ConcurrencyTest {
 
         for ((windowStart, actualCount) in slotCountsByWindow) {
             val counterValue = counterValues[windowStart]
-            assertThat(counterValue)
-                .describedAs("Counter for window $windowStart should match actual slot count $actualCount")
-                .isEqualTo(actualCount)
+            assertEquals(
+                actualCount, counterValue,
+                "Counter for window $windowStart should match actual slot count $actualCount"
+            )
         }
 
         // Total slots in DB should match events submitted
         val totalSlots = slotCountsByWindow.values.sum()
-        assertThat(totalSlots).isEqualTo(totalEvents)
+        assertEquals(totalEvents, totalSlots)
     }
 
     @Test
@@ -251,11 +255,11 @@ class ConcurrencyTest {
         val completed = latch.await(120, TimeUnit.SECONDS)
         executor.shutdown()
 
-        assertThat(completed).isTrue()
+        assertTrue(completed)
 
         // All events should succeed (no SlotAssignmentException since headroom is 100 windows)
         // 500 events / 10 per window = 50 windows needed, well within 100 headroom
-        assertThat(errors).isEmpty()
-        assertThat(successCount.get()).isEqualTo(totalEvents)
+        assertTrue(errors.isEmpty())
+        assertEquals(totalEvents, successCount.get())
     }
 }

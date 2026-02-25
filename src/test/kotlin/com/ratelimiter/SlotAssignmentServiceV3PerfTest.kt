@@ -11,10 +11,10 @@ import com.ratelimiter.slot.SlotAssignmentServiceV3
 import io.quarkus.test.common.QuarkusTestResource
 import io.quarkus.test.junit.QuarkusTest
 import jakarta.inject.Inject
-import org.assertj.core.api.Assertions.assertThat
 import org.jetbrains.exposed.sql.deleteAll
 import org.jetbrains.exposed.sql.selectAll
 import org.jetbrains.exposed.sql.transactions.transaction
+import org.junit.jupiter.api.Assertions.*
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Tag
 import org.junit.jupiter.api.Test
@@ -94,22 +94,23 @@ class SlotAssignmentServiceV3PerfTest {
 
         val totalStart = System.nanoTime()
         startGate.countDown()
-        assertThat(latch.await(120, TimeUnit.SECONDS)).isTrue()
+        assertTrue(latch.await(120, TimeUnit.SECONDS))
         val totalNs = System.nanoTime() - totalStart
         executor.shutdown()
 
         // Correctness
-        assertThat(errors).isEmpty()
-        assertThat(results).hasSize(totalEvents)
+        assertTrue(errors.isEmpty())
+        assertEquals(totalEvents, results.size)
 
         val slotsByWindow = transaction {
             RateLimitEventSlotTable.selectAll().toList()
                 .groupBy { it[RateLimitEventSlotTable.windowStart] }
         }
         for ((ws, slots) in slotsByWindow) {
-            assertThat(slots.size)
-                .describedAs("Window $ws should have at most $maxPerWindow slots")
-                .isLessThanOrEqualTo(maxPerWindow)
+            assertTrue(
+                slots.size <= maxPerWindow,
+                "Window $ws should have at most $maxPerWindow slots"
+            )
         }
 
         // Report
@@ -167,11 +168,11 @@ class SlotAssignmentServiceV3PerfTest {
 
             val batchStart = System.nanoTime()
             batchStartGate.countDown()
-            assertThat(batchLatch.await(60, TimeUnit.SECONDS)).isTrue()
+            assertTrue(batchLatch.await(60, TimeUnit.SECONDS))
             val batchTotal = System.nanoTime() - batchStart
             batchExecutor.shutdown()
 
-            assertThat(batchErrors).isEmpty()
+            assertTrue(batchErrors.isEmpty())
             reportLatency("Fill ratio ~${fillPercent}% ($targetTotal pre-filled of $initialChunkCapacity)", batchLatencies, batchTotal, batchSize)
         }
     }
@@ -208,14 +209,14 @@ class SlotAssignmentServiceV3PerfTest {
         val totalSlots = transaction {
             RateLimitEventSlotTable.selectAll().count()
         }
-        assertThat(totalSlots).isEqualTo(201)
+        assertEquals(201L, totalSlots)
 
         val frontierRows = transaction {
             WindowEndTrackerTable.selectAll()
                 .where { WindowEndTrackerTable.requestedTime eq requestedTime }
                 .count()
         }
-        assertThat(frontierRows).isGreaterThanOrEqualTo(2)
+        assertTrue(frontierRows >= 2)
 
         // Report
         val p2Sorted = phase2Latencies.sorted()

@@ -11,11 +11,10 @@ import com.ratelimiter.slot.SlotAssignmentServiceV3Sql
 import io.quarkus.test.common.QuarkusTestResource
 import io.quarkus.test.junit.QuarkusTest
 import jakarta.inject.Inject
-import org.assertj.core.api.Assertions.assertThat
-import org.assertj.core.api.Assertions.assertThatThrownBy
 import org.jetbrains.exposed.sql.deleteAll
 import org.jetbrains.exposed.sql.selectAll
 import org.jetbrains.exposed.sql.transactions.transaction
+import org.junit.jupiter.api.Assertions.*
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
 import java.time.Duration
@@ -56,10 +55,10 @@ class SlotAssignmentServiceV3SqlTest {
 
         val slot = service.assignSlot("evt-1", "v3sql-basic", requestedTime)
 
-        assertThat(slot.eventId).isEqualTo("evt-1")
-        assertThat(slot.scheduledTime).isAfterOrEqualTo(requestedTime)
-        assertThat(slot.scheduledTime).isBefore(requestedTime.plusSeconds(4))
-        assertThat(slot.delay).isLessThan(Duration.ofSeconds(4))
+        assertEquals("evt-1", slot.eventId)
+        assertFalse(slot.scheduledTime.isBefore(requestedTime))
+        assertTrue(slot.scheduledTime.isBefore(requestedTime.plusSeconds(4)))
+        assertTrue(slot.delay < Duration.ofSeconds(4))
     }
 
     @Test
@@ -76,10 +75,10 @@ class SlotAssignmentServiceV3SqlTest {
                 .map { it[RateLimitEventSlotTable.windowStart] }
                 .distinct().sorted()
         }
-        assertThat(windowStarts).hasSize(3)
-        assertThat(windowStarts[0]).isEqualTo(Instant.parse("2025-06-01T12:00:00Z"))
-        assertThat(windowStarts[1]).isEqualTo(Instant.parse("2025-06-01T12:00:04Z"))
-        assertThat(windowStarts[2]).isEqualTo(Instant.parse("2025-06-01T12:00:08Z"))
+        assertEquals(3, windowStarts.size)
+        assertEquals(Instant.parse("2025-06-01T12:00:00Z"), windowStarts[0])
+        assertEquals(Instant.parse("2025-06-01T12:00:04Z"), windowStarts[1])
+        assertEquals(Instant.parse("2025-06-01T12:00:08Z"), windowStarts[2])
     }
 
     @Test
@@ -88,13 +87,13 @@ class SlotAssignmentServiceV3SqlTest {
         val requestedTime = Instant.parse("2025-06-01T12:00:00Z")
 
         val first = service.assignSlot("evt-d1", "v3sql-delay", requestedTime)
-        assertThat(first.delay).isLessThan(Duration.ofSeconds(4))
+        assertTrue(first.delay < Duration.ofSeconds(4))
 
         val second = service.assignSlot("evt-d2", "v3sql-delay", requestedTime)
-        assertThat(second.delay).isGreaterThanOrEqualTo(Duration.ofSeconds(4))
+        assertTrue(second.delay >= Duration.ofSeconds(4))
 
         val third = service.assignSlot("evt-d3", "v3sql-delay", requestedTime)
-        assertThat(third.delay).isGreaterThanOrEqualTo(Duration.ofSeconds(8))
+        assertTrue(third.delay >= Duration.ofSeconds(8))
     }
 
     // ==================== Idempotency ====================
@@ -107,16 +106,16 @@ class SlotAssignmentServiceV3SqlTest {
         val first = service.assignSlot("evt-dup", "v3sql-idem", requestedTime)
         val second = service.assignSlot("evt-dup", "v3sql-idem", requestedTime)
 
-        assertThat(second.eventId).isEqualTo(first.eventId)
-        assertThat(second.scheduledTime).isEqualTo(first.scheduledTime)
-        assertThat(second.delay).isEqualTo(first.delay)
+        assertEquals(first.eventId, second.eventId)
+        assertEquals(first.scheduledTime, second.scheduledTime)
+        assertEquals(first.delay, second.delay)
 
         val count = transaction {
             RateLimitEventSlotTable.selectAll()
                 .where { RateLimitEventSlotTable.eventId eq "evt-dup" }
                 .count()
         }
-        assertThat(count).isEqualTo(1)
+        assertEquals(1L, count)
     }
 
     @Test
@@ -142,18 +141,18 @@ class SlotAssignmentServiceV3SqlTest {
             }
         }
 
-        assertThat(latch.await(30, TimeUnit.SECONDS)).isTrue()
+        assertTrue(latch.await(30, TimeUnit.SECONDS))
         executor.shutdown()
-        assertThat(errors).isEmpty()
-        assertThat(results).hasSize(threadCount)
-        assertThat(results.map { it.scheduledTime }.distinct()).hasSize(1)
+        assertTrue(errors.isEmpty())
+        assertEquals(threadCount, results.size)
+        assertEquals(1, results.map { it.scheduledTime }.distinct().size)
 
         val dbCount = transaction {
             RateLimitEventSlotTable.selectAll()
                 .where { RateLimitEventSlotTable.eventId eq "evt-same" }
                 .count()
         }
-        assertThat(dbCount).isEqualTo(1)
+        assertEquals(1L, dbCount)
     }
 
     // ==================== Proportional first-window capacity ====================
@@ -165,9 +164,9 @@ class SlotAssignmentServiceV3SqlTest {
 
         val slot = service.assignSlot("evt-b1", "v3sql-boundary", requestedTime)
 
-        assertThat(slot.scheduledTime).isAfterOrEqualTo(requestedTime)
-        assertThat(slot.scheduledTime).isBefore(requestedTime.plusSeconds(4))
-        assertThat(slot.delay).isLessThan(Duration.ofSeconds(4))
+        assertFalse(slot.scheduledTime.isBefore(requestedTime))
+        assertTrue(slot.scheduledTime.isBefore(requestedTime.plusSeconds(4)))
+        assertTrue(slot.delay < Duration.ofSeconds(4))
     }
 
     @Test
@@ -178,10 +177,10 @@ class SlotAssignmentServiceV3SqlTest {
 
         val slot = service.assignSlot("evt-p1", "v3sql-prop", requestedTime)
 
-        assertThat(slot.scheduledTime).isAfterOrEqualTo(requestedTime)
-        assertThat(slot.scheduledTime).isBefore(Instant.parse("2025-06-01T12:00:04Z"))
-        assertThat(slot.delay).isGreaterThanOrEqualTo(Duration.ZERO)
-        assertThat(slot.delay).isLessThan(Duration.ofSeconds(2))
+        assertFalse(slot.scheduledTime.isBefore(requestedTime))
+        assertTrue(slot.scheduledTime.isBefore(Instant.parse("2025-06-01T12:00:04Z")))
+        assertTrue(slot.delay >= Duration.ZERO)
+        assertTrue(slot.delay < Duration.ofSeconds(2))
 
         // Fill proportional max (50 total, already have 1)
         (2..50).forEach { i ->
@@ -190,7 +189,7 @@ class SlotAssignmentServiceV3SqlTest {
 
         // 51st should overflow to next window
         val overflow = service.assignSlot("evt-p51", "v3sql-prop", requestedTime)
-        assertThat(overflow.scheduledTime).isAfterOrEqualTo(Instant.parse("2025-06-01T12:00:04Z"))
+        assertFalse(overflow.scheduledTime.isBefore(Instant.parse("2025-06-01T12:00:04Z")))
     }
 
     @Test
@@ -201,12 +200,12 @@ class SlotAssignmentServiceV3SqlTest {
 
         (1..25).forEach { i ->
             val slot = service.assignSlot("evt-q$i", "v3sql-quarter", requestedTime)
-            assertThat(slot.scheduledTime).isAfterOrEqualTo(requestedTime)
-            assertThat(slot.scheduledTime).isBefore(Instant.parse("2025-06-01T12:00:04Z"))
+            assertFalse(slot.scheduledTime.isBefore(requestedTime))
+            assertTrue(slot.scheduledTime.isBefore(Instant.parse("2025-06-01T12:00:04Z")))
         }
 
         val overflow = service.assignSlot("evt-q26", "v3sql-quarter", requestedTime)
-        assertThat(overflow.scheduledTime).isAfterOrEqualTo(Instant.parse("2025-06-01T12:00:04Z"))
+        assertFalse(overflow.scheduledTime.isBefore(Instant.parse("2025-06-01T12:00:04Z")))
     }
 
     @Test
@@ -217,12 +216,12 @@ class SlotAssignmentServiceV3SqlTest {
 
         (1..25).forEach { i ->
             val slot = service.assignSlot("evt-tiny-$i", "v3sql-tiny", requestedTime)
-            assertThat(slot.scheduledTime).isAfterOrEqualTo(requestedTime)
-            assertThat(slot.scheduledTime).isBefore(Instant.parse("2025-06-01T12:00:04Z"))
+            assertFalse(slot.scheduledTime.isBefore(requestedTime))
+            assertTrue(slot.scheduledTime.isBefore(Instant.parse("2025-06-01T12:00:04Z")))
         }
 
         val overflow = service.assignSlot("evt-tiny-26", "v3sql-tiny", requestedTime)
-        assertThat(overflow.scheduledTime).isAfterOrEqualTo(Instant.parse("2025-06-01T12:00:04Z"))
+        assertFalse(overflow.scheduledTime.isBefore(Instant.parse("2025-06-01T12:00:04Z")))
     }
 
     // ==================== Jitter bounds ====================
@@ -238,9 +237,8 @@ class SlotAssignmentServiceV3SqlTest {
         }
 
         for (slot in slots) {
-            assertThat(slot.scheduledTime)
-                .isAfterOrEqualTo(requestedTime)
-                .isBefore(windowEnd)
+            assertFalse(slot.scheduledTime.isBefore(requestedTime))
+            assertTrue(slot.scheduledTime.isBefore(windowEnd))
         }
     }
 
@@ -255,8 +253,8 @@ class SlotAssignmentServiceV3SqlTest {
         service.assignSlot("evt-sk2", "v3sql-skip", requestedTime)
 
         val third = service.assignSlot("evt-sk3", "v3sql-skip", requestedTime)
-        assertThat(third.scheduledTime).isAfterOrEqualTo(requestedTime.plusSeconds(4))
-        assertThat(third.delay).isGreaterThanOrEqualTo(Duration.ofSeconds(4))
+        assertFalse(third.scheduledTime.isBefore(requestedTime.plusSeconds(4)))
+        assertTrue(third.delay >= Duration.ofSeconds(4))
     }
 
     @Test
@@ -270,8 +268,8 @@ class SlotAssignmentServiceV3SqlTest {
         }
 
         val slot = service.assignSlot("evt-sp101", "v3sql-skip-perf", requestedTime)
-        assertThat(slot.scheduledTime).isAfterOrEqualTo(requestedTime.plusSeconds(50 * 4L))
-        assertThat(slot.delay).isGreaterThanOrEqualTo(Duration.ofSeconds(50 * 4L))
+        assertFalse(slot.scheduledTime.isBefore(requestedTime.plusSeconds(50 * 4L)))
+        assertTrue(slot.delay >= Duration.ofSeconds(50 * 4L))
     }
 
     @Test
@@ -283,10 +281,10 @@ class SlotAssignmentServiceV3SqlTest {
             service.assignSlot("evt-mw$i", "v3sql-many", requestedTime)
         }
 
-        assertThat(slots).hasSize(50)
+        assertEquals(50, slots.size)
         val maxScheduledTime = slots.maxOf { it.scheduledTime }
-        assertThat(maxScheduledTime).isAfterOrEqualTo(requestedTime.plusSeconds(49 * 4L))
-        assertThat(maxScheduledTime).isBefore(requestedTime.plusSeconds(50 * 4L))
+        assertFalse(maxScheduledTime.isBefore(requestedTime.plusSeconds(49 * 4L)))
+        assertTrue(maxScheduledTime.isBefore(requestedTime.plusSeconds(50 * 4L)))
     }
 
     // ==================== Frontier tracking / chunked provisioning ====================
@@ -321,7 +319,7 @@ class SlotAssignmentServiceV3SqlTest {
                 .where { WindowEndTrackerTable.requestedTime eq Instant.parse("2025-06-01T12:00:00Z") }
                 .toList()
         }
-        assertThat(frontierRows).isNotEmpty()
+        assertTrue(frontierRows.isNotEmpty())
     }
 
     @Test
@@ -337,7 +335,7 @@ class SlotAssignmentServiceV3SqlTest {
             WindowCounterTable.selectAll().count()
         }
         // Should have more than 2 windows — the batch provisioning creates maxWindowsInChunk rows
-        assertThat(counterCount).isGreaterThan(2)
+        assertTrue(counterCount > 2)
     }
 
     // ==================== Extension loop ====================
@@ -351,12 +349,12 @@ class SlotAssignmentServiceV3SqlTest {
         val events = (1..101).map { i ->
             service.assignSlot("evt-ext$i", "v3sql-extend", requestedTime)
         }
-        assertThat(events).hasSize(101)
+        assertEquals(101, events.size)
 
         // 102nd should succeed via extension chunk
         val overflow = service.assignSlot("evt-ext102", "v3sql-extend", requestedTime)
-        assertThat(overflow.scheduledTime).isAfterOrEqualTo(requestedTime.plusSeconds(101 * 4L))
-        assertThat(overflow.delay).isGreaterThanOrEqualTo(Duration.ofSeconds(101 * 4L))
+        assertFalse(overflow.scheduledTime.isBefore(requestedTime.plusSeconds(101 * 4L)))
+        assertTrue(overflow.delay >= Duration.ofSeconds(101 * 4L))
     }
 
     @Test
@@ -375,7 +373,7 @@ class SlotAssignmentServiceV3SqlTest {
                 .toList()
         }
         // Initial frontier + at least 1 extension
-        assertThat(frontierRows.size).isGreaterThanOrEqualTo(2)
+        assertTrue(frontierRows.size >= 2)
     }
 
     // ==================== Exhaustion ====================
@@ -397,9 +395,9 @@ class SlotAssignmentServiceV3SqlTest {
             noExtensionService.assignSlot("evt-ex$i", "v3sql-exhaust", requestedTime)
         }
 
-        assertThatThrownBy {
+        assertThrows(SlotAssignmentException::class.java) {
             noExtensionService.assignSlot("evt-ex102", "v3sql-exhaust", requestedTime)
-        }.isInstanceOf(SlotAssignmentException::class.java)
+        }
     }
 
     // ==================== Counter consistency ====================
@@ -419,7 +417,7 @@ class SlotAssignmentServiceV3SqlTest {
                 .firstOrNull()
                 ?.get(WindowCounterTable.slotCount)
         }
-        assertThat(counterValue).isEqualTo(10)
+        assertEquals(10, counterValue)
     }
 
     @Test
@@ -436,10 +434,10 @@ class SlotAssignmentServiceV3SqlTest {
                 .firstOrNull()
                 ?.get(WindowCounterTable.slotCount)
         }
-        assertThat(slotCount).isEqualTo(2)
+        assertEquals(2, slotCount)
 
         val third = service.assignSlot("evt-fc3", "v3sql-full-cnt", requestedTime)
-        assertThat(third.scheduledTime).isAfterOrEqualTo(requestedTime.plusSeconds(4))
+        assertFalse(third.scheduledTime.isBefore(requestedTime.plusSeconds(4)))
     }
 
     // ==================== Isolation ====================
@@ -450,14 +448,14 @@ class SlotAssignmentServiceV3SqlTest {
 
         val farFuture = Instant.parse("2026-06-01T12:00:00Z")
         val farSlot = service.assignSlot("evt-far", "v3sql-iso", farFuture)
-        assertThat(farSlot.scheduledTime).isAfterOrEqualTo(farFuture)
+        assertFalse(farSlot.scheduledTime.isBefore(farFuture))
 
         val nearTerm = Instant.parse("2025-07-01T12:00:00Z")
         val nearSlot = service.assignSlot("evt-near", "v3sql-iso", nearTerm)
 
-        assertThat(nearSlot.scheduledTime).isAfterOrEqualTo(nearTerm)
-        assertThat(nearSlot.scheduledTime).isBefore(nearTerm.plusSeconds(4))
-        assertThat(nearSlot.delay).isLessThan(Duration.ofSeconds(4))
+        assertFalse(nearSlot.scheduledTime.isBefore(nearTerm))
+        assertTrue(nearSlot.scheduledTime.isBefore(nearTerm.plusSeconds(4)))
+        assertTrue(nearSlot.delay < Duration.ofSeconds(4))
     }
 
     @Test
@@ -475,18 +473,18 @@ class SlotAssignmentServiceV3SqlTest {
 
         // Next event at requestedTime should go to W1 (12:00:04), not after far window
         val slot = service.assignSlot("evt-sp3", "v3sql-sparse", requestedTime)
-        assertThat(slot.scheduledTime).isAfterOrEqualTo(requestedTime.plusSeconds(4))
-        assertThat(slot.scheduledTime).isBefore(requestedTime.plusSeconds(8))
+        assertFalse(slot.scheduledTime.isBefore(requestedTime.plusSeconds(4)))
+        assertTrue(slot.scheduledTime.isBefore(requestedTime.plusSeconds(8)))
     }
 
     // ==================== Config error ====================
 
     @Test
     fun `throws ConfigLoadException for unknown config name`() {
-        assertThatThrownBy {
+        val ex = assertThrows(ConfigLoadException::class.java) {
             service.assignSlot("evt-bad", "non-existent", Instant.now())
-        }.isInstanceOf(ConfigLoadException::class.java)
-            .hasMessageContaining("non-existent")
+        }
+        assertTrue(ex.message!!.contains("non-existent"))
     }
 
     // ==================== Concurrency ====================
@@ -517,19 +515,20 @@ class SlotAssignmentServiceV3SqlTest {
             }
         }
 
-        assertThat(latch.await(60, TimeUnit.SECONDS)).isTrue()
+        assertTrue(latch.await(60, TimeUnit.SECONDS))
         executor.shutdown()
-        assertThat(errors).isEmpty()
-        assertThat(results).hasSize(totalEvents)
+        assertTrue(errors.isEmpty())
+        assertEquals(totalEvents, results.size)
 
         val slotsByWindow = transaction {
             RateLimitEventSlotTable.selectAll().toList()
                 .groupBy { it[RateLimitEventSlotTable.windowStart] }
         }
         for ((windowStart, slots) in slotsByWindow) {
-            assertThat(slots.size)
-                .describedAs("Window $windowStart should have at most $maxPerWindow slots")
-                .isLessThanOrEqualTo(maxPerWindow)
+            assertTrue(
+                slots.size <= maxPerWindow,
+                "Window $windowStart should have at most $maxPerWindow slots"
+            )
         }
 
         // Verify counters match actual slot counts
@@ -539,9 +538,10 @@ class SlotAssignmentServiceV3SqlTest {
             }
         }
         for ((windowStart, slots) in slotsByWindow) {
-            assertThat(dbCounters[windowStart])
-                .describedAs("Counter for $windowStart should match actual slot count")
-                .isEqualTo(slots.size)
+            assertEquals(
+                slots.size, dbCounters[windowStart],
+                "Counter for $windowStart should match actual slot count"
+            )
         }
     }
 
@@ -571,10 +571,10 @@ class SlotAssignmentServiceV3SqlTest {
             }
         }
 
-        assertThat(latch.await(120, TimeUnit.SECONDS)).isTrue()
+        assertTrue(latch.await(120, TimeUnit.SECONDS))
         executor.shutdown()
-        assertThat(errors).isEmpty()
-        assertThat(successCount.get()).isEqualTo(totalEvents)
+        assertTrue(errors.isEmpty())
+        assertEquals(totalEvents, successCount.get())
     }
 
     @Test
@@ -603,10 +603,10 @@ class SlotAssignmentServiceV3SqlTest {
             }
         }
 
-        assertThat(latch.await(60, TimeUnit.SECONDS)).isTrue()
+        assertTrue(latch.await(60, TimeUnit.SECONDS))
         executor.shutdown()
-        assertThat(errors).isEmpty()
-        assertThat(results).hasSize(totalEvents)
+        assertTrue(errors.isEmpty())
+        assertEquals(totalEvents, results.size)
 
         val slotCountsByWindow = transaction {
             RateLimitEventSlotTable.selectAll().toList()
@@ -621,12 +621,13 @@ class SlotAssignmentServiceV3SqlTest {
         }
 
         for ((windowStart, actualCount) in slotCountsByWindow) {
-            assertThat(counterValues[windowStart])
-                .describedAs("Counter for $windowStart should match actual slot count $actualCount")
-                .isEqualTo(actualCount)
+            assertEquals(
+                actualCount, counterValues[windowStart],
+                "Counter for $windowStart should match actual slot count $actualCount"
+            )
         }
 
-        assertThat(slotCountsByWindow.values.sum()).isEqualTo(totalEvents)
+        assertEquals(totalEvents, slotCountsByWindow.values.sum())
     }
 
     // ==================== PL/SQL-specific: single round trip ====================
@@ -637,7 +638,7 @@ class SlotAssignmentServiceV3SqlTest {
         val requestedTime = Instant.parse("2025-06-01T12:00:00Z")
 
         val slot = service.assignSlot("evt-txn1", "v3sql-txn", requestedTime)
-        assertThat(slot.eventId).isEqualTo("evt-txn1")
+        assertEquals("evt-txn1", slot.eventId)
 
         // Verify all DB state was created atomically
         val eventExists = transaction {
@@ -650,8 +651,8 @@ class SlotAssignmentServiceV3SqlTest {
                 .where { WindowCounterTable.windowStart eq requestedTime }
                 .count() == 1L
         }
-        assertThat(eventExists).isTrue()
-        assertThat(counterExists).isTrue()
+        assertTrue(eventExists)
+        assertTrue(counterExists)
     }
 
     @Test
@@ -662,7 +663,7 @@ class SlotAssignmentServiceV3SqlTest {
         val first = service.assignSlot("evt-dup-cl", "v3sql-dup-claim", requestedTime)
         val second = service.assignSlot("evt-dup-cl", "v3sql-dup-claim", requestedTime)
 
-        assertThat(first.scheduledTime).isEqualTo(second.scheduledTime)
+        assertEquals(first.scheduledTime, second.scheduledTime)
 
         // Counter should only be incremented once
         val counter = transaction {
@@ -671,6 +672,6 @@ class SlotAssignmentServiceV3SqlTest {
                 .firstOrNull()
                 ?.get(WindowCounterTable.slotCount)
         }
-        assertThat(counter).isEqualTo(1)
+        assertEquals(1, counter)
     }
 }
