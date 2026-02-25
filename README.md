@@ -158,6 +158,66 @@ Assigns a rate-limited time slot for the given event. Idempotent: calling with t
 
 ---
 
+## Database Schema
+
+Flyway creates four tables on startup (`V1__rate_limiter_schema.sql`). Each serves a distinct role in the rate-limiting algorithm.
+
+### `rate_limit_config`
+
+Versioned rate limit configuration. Supports dynamic updates — inserting a new config row automatically deactivates the previous one. Multiple config names can coexist (e.g., `"default"`, `"high-priority"`). Old rows are kept for audit; never deleted, only deactivated.
+
+| Column | Type | Description |
+|---|---|---|
+| `config_id` | `NUMBER(19)` PK | Auto-increment ID (sequence-backed) |
+| `config_name` | `VARCHAR2(128)` | Logical config group name |
+| `max_per_window` | `NUMBER(10)` | Maximum events allowed per time window |
+| `window_size` | `VARCHAR2(50)` | ISO-8601 duration string (e.g., `PT4S`) |
+| `effective_from` | `TIMESTAMP` | When this config version became effective |
+| `is_active` | `NUMBER(1)` | `1` = active, `0` = superseded |
+| `created_at` | `TIMESTAMP` | Row creation time (default `SYSTIMESTAMP`) |
+
+**Index**: `idx_config_name_active(config_name, is_active)` — hot-path lookup for active config by name.
+
+### `rate_limit_window_counter`
+
+Lightweight concurrency control table. One row per epoch-aligned time window, acting as a semaphore. The `slot_count` tracks how many events have been assigned to this window, regardless of which config version was active (config-agnostic). This is the lock target for `SELECT FOR UPDATE SKIP LOCKED` — keeping counters separate from event rows ensures O(1) lock acquisition per window.
+
+| Column | Type | Description |
+|---|---|---|
+| `window_start` | `TIMESTAMP` PK | Epoch-aligned window boundary |
+| `slot_count` | `NUMBER(10)` | Current number of events assigned to this window |
+
+**Index**: `idx_window_counter_slot_start(slot_count, window_start)` — supports the skip query that finds the first non-full window after a given timestamp.
+
+### `rate_limit_event_slot`
+
+Immutable audit record of every slot assignment. One row per event, never updated or deleted. Serves three purposes: **idempotency** (unique constraint on `event_id` ensures duplicate calls return the same slot), **audit trail** (records which window, scheduled time, and config each event received), and **reconciliation** (query recent unprocessed slots to detect leakage).
+
+| Column | Type | Description |
+|---|---|---|
+| `slot_id` | `NUMBER(19)` PK | Auto-increment ID (sequence-backed) |
+| `event_id` | `VARCHAR2(256)` UNIQUE | Caller-provided event identifier |
+| `requested_time` | `TIMESTAMP` | Original time requested by the caller |
+| `window_start` | `TIMESTAMP` | Epoch-aligned window the event was assigned to |
+| `scheduled_time` | `TIMESTAMP` | Actual execution time (window start + jitter) |
+| `config_id` | `NUMBER(19)` | Config version active at assignment time |
+| `created_at` | `TIMESTAMP` | Row creation time (default `SYSTIMESTAMP`) |
+
+**Indexes**: `idx_event_slot_window(window_start)`, `idx_event_slot_created(created_at)`.
+
+### `track_window_end`
+
+Append-only frontier tracker for provisioned window ranges. Eliminates tail-end scanning by recording how far windows have been provisioned for each `requested_time`. Read via `SELECT MAX(window_end)`; written via `INSERT` only — no `UPDATE` contention. Concurrent threads inserting the same frontier row deduplicate via the composite PK constraint.
+
+| Column | Type | Description |
+|---|---|---|
+| `requested_time` | `TIMESTAMP` | The epoch-aligned start that triggered provisioning |
+| `window_end` | `TIMESTAMP` | The furthest provisioned boundary for this start |
+
+**Primary key**: `(requested_time, window_end)` — composite, allows multiple frontier rows per `requested_time` (one per extension chunk).
+
+---
+
 ## How the Rate Limiter Works
 
 ### Window Model
