@@ -3,6 +3,7 @@ package com.ratelimiter
 import io.quarkus.test.common.QuarkusTestResourceLifecycleManager
 import org.testcontainers.containers.OracleContainer
 import org.testcontainers.utility.DockerImageName
+import java.sql.SQLException
 import java.time.Duration
 
 /**
@@ -17,17 +18,36 @@ import java.time.Duration
 class OracleTestResource : QuarkusTestResourceLifecycleManager {
 
     companion object {
-        private val oracle: OracleContainer = OracleContainer(
+        private var oracle: OracleContainer = newContainer()
+
+        private fun newContainer(): OracleContainer = OracleContainer(
             DockerImageName.parse("gvenzl/oracle-xe:21-slim-faststart")
         ).apply {
             withReuse(true)
             withStartupTimeout(Duration.ofMinutes(5))
             withConnectTimeoutSeconds(120)
         }
+
+        private fun isHealthy(container: OracleContainer): Boolean = try {
+            container.createConnection("").use { conn ->
+                conn.createStatement().executeQuery("SELECT 1 FROM DUAL").close()
+            }
+            true
+        } catch (_: SQLException) {
+            false
+        }
     }
 
     override fun start(): Map<String, String> {
         oracle.start()
+
+        // Reused containers can become stale (e.g. after system sleep) with
+        // the xepdb1 service no longer registered. Detect and replace.
+        if (!isHealthy(oracle)) {
+            oracle.stop()
+            oracle = newContainer()
+            oracle.start()
+        }
 
         // Grant DBMS_RANDOM to the test user — required by the PL/SQL slot assignment block.
         // Oracle XE's default test user may not have this grant.

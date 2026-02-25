@@ -9,6 +9,7 @@ import org.jetbrains.exposed.sql.DatabaseConfig
 import org.jetbrains.exposed.sql.SchemaUtils
 import org.jetbrains.exposed.sql.transactions.transaction
 import org.slf4j.LoggerFactory
+import java.sql.Connection
 import javax.sql.DataSource
 
 /**
@@ -34,6 +35,13 @@ class ExposedDatabaseInitializer @Inject constructor(
             defaultMaxAttempts = 1          // No retries (1 attempt only)
             defaultMinRetryDelay = 0
             defaultMaxRetryDelay = 0
+            // Exposed defaults to REPEATABLE_READ, which Oracle maps to SERIALIZABLE.
+            // SERIALIZABLE breaks the duplicate-key recovery path in claimSlot:
+            // the re-read after a constraint violation can't see the row committed
+            // by another transaction (snapshot is frozen at txn start).
+            // READ_COMMITTED is Oracle's native default and gives per-statement
+            // visibility of committed data, which is what FOR UPDATE SKIP LOCKED expects.
+            defaultIsolationLevel = Connection.TRANSACTION_READ_COMMITTED
         }
         Database.connect(dataSource, databaseConfig = dbConfig)
 
