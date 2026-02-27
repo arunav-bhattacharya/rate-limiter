@@ -236,6 +236,8 @@
         .db-mini-table tr.row-full td { color: var(--error); }
         .db-mini-table tr.row-locked td { color: var(--primary); }
         .db-mini-table tr.row-pulse { animation: rowPulse 1s infinite; }
+        .db-mini-table tr.row-bulk td { color: var(--text-muted); font-style: italic; text-align: center; }
+        .db-mini-table .bulk-note { font-size: 9px; color: var(--text-muted); font-style: italic; margin-top: 3px; text-align: center; }
         .db-mini-table .empty-label { color: var(--text-muted); font-style: italic; padding: 6px 0; text-align: center; font-size: 10px; }
         .db-mini-table .sql-hint {
             font-size: 9px; color: var(--warning); margin-top: 3px;
@@ -923,7 +925,7 @@
                 <div class="walk-window" id="ww-3"><div class="win-time">12:00:12</div><div class="win-lock" id="lock-3">&#128274;</div><div class="win-status" id="status-3"></div></div>
             </div>
             <div class="sql-caption" id="sql-caption-9">
-                SELECT window_start FROM window_counter WHERE slot_count &lt; maxPerWindow ORDER BY window_start <span style="color: var(--warning); font-weight: 600;">FOR UPDATE SKIP LOCKED</span> FETCH FIRST 1 ROW ONLY
+                <span style="color: #c792ea;">SELECT</span> window_start <span style="color: #c792ea;">FROM</span> window_counter <span style="color: #c792ea;">WHERE</span> window_start = (<span style="color: #c792ea;">SELECT</span> window_start <span style="color: #c792ea;">WHERE</span> slot_count &lt; ? <span style="color: #c792ea;">ORDER BY</span> window_start <span style="color: #c792ea;">FETCH FIRST 1 ROW ONLY</span>) <span style="color: var(--warning); font-weight: 600;">FOR UPDATE SKIP LOCKED</span>
             </div>
             <div class="nowait-label" id="nowait-label-9">SKIP LOCKED &mdash; skip contended rows atomically!</div>
         </div>
@@ -1100,7 +1102,8 @@
         label: '',
         sqlHint: '',
         esSqlHint: '',      // SQL hint displayed under event_slot table
-        tweSqlHint: ''      // SQL hint displayed under track_window_end table
+        tweSqlHint: '',     // SQL hint displayed under track_window_end table
+        wcBulkNote: ''      // Note displayed under window_counter table (e.g. "showing 4 of 100 rows")
     };
 
     function renderDbTables(sceneNum) {
@@ -1113,7 +1116,7 @@
         } else {
             wcRows = '<table><tr><th>window_start</th><th>slot_count</th><th>status</th></tr>';
             dbState.windowCounter.forEach(r => {
-                const statusColor = r.status === 'CLOSED' ? 'var(--error)' : 'var(--success)';
+                const statusColor = r.status === 'CLOSED' ? 'var(--error)' : r.status === 'BULK' ? 'var(--text-muted)' : 'var(--success)';
                 wcRows += `<tr class="${r.cssClass || ''}"><td>${r.windowStart}</td><td>${r.slotCount}</td><td style="color:${statusColor}">${r.status || 'OPEN'}</td></tr>`;
             });
             wcRows += '</table>';
@@ -1145,6 +1148,7 @@
         const sqlHintHtml = dbState.sqlHint ? `<div class="sql-hint">${dbState.sqlHint}</div>` : '';
         const esSqlHintHtml = dbState.esSqlHint ? `<div class="sql-hint">${dbState.esSqlHint}</div>` : '';
         const tweSqlHintHtml = dbState.tweSqlHint ? `<div class="sql-hint">${dbState.tweSqlHint}</div>` : '';
+        const wcBulkNoteHtml = dbState.wcBulkNote ? `<div class="bulk-note">${dbState.wcBulkNote}</div>` : '';
 
         panel.innerHTML = `
             ${labelHtml}
@@ -1152,6 +1156,7 @@
                 <div class="table-title">rate_limit_window_counter</div>
                 ${wcRows}
                 ${sqlHintHtml}
+                ${wcBulkNoteHtml}
             </div>
             <div class="db-mini-table">
                 <div class="table-title">track_window_end</div>
@@ -1174,6 +1179,7 @@
         dbState.sqlHint = '';
         dbState.esSqlHint = '';
         dbState.tweSqlHint = '';
+        dbState.wcBulkNote = '';
     }
 
     // ===== NAVIGATION =====
@@ -1640,7 +1646,7 @@
                 dbState.windowCounter = [
                     { windowStart: '12:00:00', slotCount: 100, status: 'CLOSED', cssClass: 'row-full' }
                 ];
-                dbState.label = 'fetchWindowEnd(): SELECT MAX(window_end) FROM track_window_end \u2192 NULL (first request)';
+                dbState.label = 'Phase 2 begins: fetchWindowEnd(alignedStart) \u2192 NULL (first request). Calls initWindowEnd().';
 
                 // Compute window center positions dynamically
                 const w0 = getWinX(0), w1 = getWinX(1), w2 = getWinX(2), w3 = getWinX(3);
@@ -1657,38 +1663,51 @@
                         { windowStart: '12:00:00', slotCount: 100, status: 'CLOSED', cssClass: 'row-full' },
                         { windowStart: '12:00:04', slotCount: 0, status: 'OPEN', cssClass: 'row-insert' },
                         { windowStart: '12:00:08', slotCount: 0, status: 'OPEN', cssClass: 'row-insert' },
-                        { windowStart: '12:00:12', slotCount: 0, status: 'OPEN', cssClass: 'row-insert' }
+                        { windowStart: '12:00:12', slotCount: 0, status: 'OPEN', cssClass: 'row-insert' },
+                        { windowStart: '12:00:16', slotCount: 0, status: 'OPEN', cssClass: 'row-insert' },
+                        { windowStart: '\u22EE', slotCount: '\u22EE', status: 'BULK', cssClass: 'row-bulk' },
+                        { windowStart: '12:06:40', slotCount: 0, status: 'OPEN', cssClass: 'row-insert' }
                     ];
                     dbState.trackWindowEnd = [
-                        { requestedTime: '12:00:00', windowEnd: '12:00:16', cssClass: 'row-insert' }
+                        { requestedTime: '12:00:00', windowEnd: '12:06:44', cssClass: 'row-insert' }
                     ];
-                    dbState.label = 'initWindowEnd(): batch INSERT 3 window_counter rows + INSERT track_window_end frontier';
-                    dbState.sqlHint = 'INSERT INTO window_counter VALUES (12:00:04,0),(12:00:08,0),(12:00:12,0)';
-                    dbState.tweSqlHint = 'INSERT INTO track_window_end (12:00:00, 12:00:16)';
+                    dbState.label = 'initWindowEnd() \u2192 ensureChunkProvisioned(): batchInsertWindows(100 rows) + INSERT track_window_end frontier';
+                    dbState.sqlHint = 'batchInsert INTO window_counter (window_start, slot_count) VALUES (12:00:04,0),(12:00:08,0),...,(12:06:40,0)';
+                    dbState.tweSqlHint = 'INSERT INTO track_window_end (aligned_start=12:00:00, window_end=12:06:44)';
+                    dbState.wcBulkNote = '100 rows batch-inserted (12:00:04 \u2192 12:06:40, every 4s)';
                 }
                 if (step >= 2) {
-                    // All threads scan provisioned range with findAndLockFirstAvailable
-                    dbState.trackWindowEnd = [{ requestedTime: '12:00:00', windowEnd: '12:00:16', cssClass: '' }];
+                    // All threads scan provisioned range with findAndLockFirstAvailableWindow
+                    // Note: code searches from alignedStart+windowSize (12:00:04), not from 12:00:00
+                    dbState.windowCounter = [
+                        { windowStart: '12:00:00', slotCount: 100, status: 'CLOSED', cssClass: 'row-full' },
+                        { windowStart: '12:00:04', slotCount: 0, status: 'OPEN', cssClass: '' },
+                        { windowStart: '12:00:08', slotCount: 0, status: 'OPEN', cssClass: '' },
+                        { windowStart: '12:00:12', slotCount: 0, status: 'OPEN', cssClass: '' }
+                    ];
+                    dbState.trackWindowEnd = [{ requestedTime: '12:00:00', windowEnd: '12:06:44', cssClass: '' }];
                     dbState.tweSqlHint = '';
+                    dbState.wcBulkNote = '(showing 4 of 100 provisioned rows)';
                     t1.style.transition = 'all 0.6s ease';
                     t2.style.transition = 'all 0.6s ease';
                     t3.style.transition = 'all 0.6s ease';
-                    t1.style.left = w0 + 'px'; t1.style.top = '15px';
-                    t2.style.left = (w0 - 18) + 'px'; t2.style.top = '42px';
-                    t3.style.left = (w0 + 18) + 'px'; t3.style.top = '42px';
+                    // Threads approach the scan range starting from 12:00:04
+                    t1.style.left = w1 + 'px'; t1.style.top = '15px';
+                    t2.style.left = (w1 - 18) + 'px'; t2.style.top = '42px';
+                    t3.style.left = (w1 + 18) + 'px'; t3.style.top = '42px';
                     t1.classList.remove('bounce'); t2.classList.remove('bounce'); t3.classList.remove('bounce');
+                    // Show 12:00:00 as full (handled by Phase 1)
                     document.getElementById('lock-0').classList.add('visible');
                     document.getElementById('lock-0').style.color = 'var(--error)';
-                    document.getElementById('status-0').textContent = 'FULL (skipped)';
+                    document.getElementById('status-0').textContent = 'FULL (Phase 1)';
                     document.getElementById('status-0').style.color = 'var(--error)';
                     document.getElementById('status-0').classList.add('visible');
                     document.getElementById('sql-caption-9').classList.add('visible');
-                    dbState.windowCounter[1].cssClass = ''; dbState.windowCounter[2].cssClass = ''; dbState.windowCounter[3].cssClass = '';
-                    dbState.label = 'findAndLockFirstAvailable: scans provisioned range. 12:00:00 is FULL (count=100) \u2014 SKIP LOCKED skips contended rows.';
-                    dbState.sqlHint = 'SELECT window_start FROM window_counter WHERE slot_count < 100 FOR UPDATE SKIP LOCKED FETCH FIRST 1 ROW ONLY';
+                    dbState.label = 'findAndLockFirstAvailableWindow(from=12:00:04, to=12:06:44): nested subquery finds+locks first available row.';
+                    dbState.sqlHint = 'Nested subquery: inner SELECT finds candidate (no lock), outer SELECT locks by PK (FOR UPDATE SKIP LOCKED)';
                 }
                 if (step >= 3) {
-                    // T1 locks first available, T2/T3 get next available atomically
+                    // T1 locks first available via nestedFindAndLock, T2/T3 get SKIP LOCKED
                     t1.style.transition = 'all 0.8s cubic-bezier(0.25, -0.3, 0.25, 1.3)';
                     t2.style.transition = 'all 0.8s cubic-bezier(0.25, -0.3, 0.25, 1.3)';
                     t3.style.transition = 'all 0.8s cubic-bezier(0.25, -0.3, 0.25, 1.3)';
@@ -1706,8 +1725,9 @@
                         { windowStart: '12:00:08', slotCount: 0, status: 'OPEN', cssClass: '' },
                         { windowStart: '12:00:12', slotCount: 0, status: 'OPEN', cssClass: '' }
                     ];
-                    dbState.label = 'T1 locks 12:00:04 (first available). T2/T3 see it as SKIP LOCKED \u2192 skipped atomically.';
-                    dbState.sqlHint = 'SKIP LOCKED: T1 gets 12:00:04; T2/T3 skip to next available row';
+                    dbState.wcBulkNote = '(showing 4 of 100 provisioned rows)';
+                    dbState.label = 'nestedFindAndLock: T1 locks 12:00:04. T2/T3 hit SKIP LOCKED \u2192 fallback findEarliestCandidateWindow \u2192 advance past it.';
+                    dbState.sqlHint = 'T1: outer SELECT locks 12:00:04 by PK; T2/T3: SKIP LOCKED \u2192 candidate=12:00:04 \u2192 searchFrom=12:00:08';
                 }
                 if (step >= 4) {
                     t1.style.left = w1 + 'px'; t1.style.top = '25px';
@@ -1726,8 +1746,9 @@
                         { windowStart: '12:00:08', slotCount: 0, status: 'OPEN', cssClass: 'row-locked' },
                         { windowStart: '12:00:12', slotCount: 0, status: 'OPEN', cssClass: '' }
                     ];
-                    dbState.label = 'T2 locks 12:00:08. If no available window in chunk \u2192 extension loop: provision new chunk + INSERT track_window_end.';
-                    dbState.sqlHint = 'Extension loop: ensureChunkProvisioned() then findAndLockFirstAvailable() in new range';
+                    dbState.wcBulkNote = '(showing 4 of 100 provisioned rows)';
+                    dbState.label = 'T2 locks 12:00:08. T3 hits SKIP LOCKED again \u2192 advance searchFrom to 12:00:12.';
+                    dbState.sqlHint = 'nestedFindAndLock retry loop: advance past locked candidates via findEarliestCandidateWindow()';
                 }
                 if (step >= 5) {
                     t1.style.left = w1 + 'px'; t1.style.top = '25px';
@@ -1746,8 +1767,9 @@
                         { windowStart: '12:00:08', slotCount: 0, status: 'OPEN', cssClass: 'row-pulse' },
                         { windowStart: '12:00:12', slotCount: 0, status: 'OPEN', cssClass: 'row-pulse' }
                     ];
+                    dbState.wcBulkNote = '(showing 4 of 100 provisioned rows)';
                     dbState.label = 'All threads locked their own windows! T1\u219212:00:04, T2\u219212:00:08, T3\u219212:00:12. Each proceeds to claimSlot().';
-                    dbState.sqlHint = 'FOR UPDATE SKIP LOCKED \u2014 skip contended rows atomically!';
+                    dbState.sqlHint = 'Nested subquery + FOR UPDATE SKIP LOCKED \u2014 zero-wait contention resolution!';
                 }
                 renderDbTables(9);
             }
@@ -1817,8 +1839,9 @@
                     { windowStart: '12:00:12', slotCount: 0, status: 'OPEN', cssClass: 'row-locked' }
                 ];
                 dbState.trackWindowEnd = [
-                    { requestedTime: '12:00:00', windowEnd: '12:00:16', cssClass: '' }
+                    { requestedTime: '12:00:00', windowEnd: '12:06:44', cssClass: '' }
                 ];
+                dbState.wcBulkNote = '(showing 4 of 100 provisioned rows)';
                 dbState.label = 'claimSlot() \u2014 All 3 threads compute jitter in parallel on the app server';
 
                 if (step >= 0) {
@@ -1858,9 +1881,9 @@
                         { eventId: 'pay-789', windowStart: '12:00:08', scheduledTime: '12:00:09.142', cssClass: 'row-insert' },
                         { eventId: 'pay-012', windowStart: '12:00:12', scheduledTime: '12:00:14.817', cssClass: 'row-insert' }
                     ];
-                    dbState.label = 'All 3 threads INSERT into rate_limit_event_slot simultaneously.';
+                    dbState.label = 'insertEventSlot(): All 3 threads INSERT into rate_limit_event_slot simultaneously (catch DUP for idempotency).';
                     dbState.sqlHint = '';
-                    dbState.esSqlHint = 'INSERT INTO rate_limit_event_slot (event_id, window_start, scheduled_time, config_id) VALUES ...';
+                    dbState.esSqlHint = 'INSERT INTO event_slot (event_id, requested_time, window_start, scheduled_time, config_id) VALUES ...';
                 }
                 if (step >= 3) {
                     // Show all 3 UPDATE counters flipping 0 -> 1
@@ -1880,13 +1903,14 @@
                         { windowStart: '12:00:08', slotCount: 1, status: 'OPEN', cssClass: 'row-update' },
                         { windowStart: '12:00:12', slotCount: 1, status: 'OPEN', cssClass: 'row-update' }
                     ];
+                    dbState.wcBulkNote = '(showing 4 of 100 provisioned rows)';
                     dbState.eventSlot = [
                         { eventId: 'pay-456', windowStart: '12:00:04', scheduledTime: '12:00:06.371', cssClass: '' },
                         { eventId: 'pay-789', windowStart: '12:00:08', scheduledTime: '12:00:09.142', cssClass: '' },
                         { eventId: 'pay-012', windowStart: '12:00:12', scheduledTime: '12:00:14.817', cssClass: '' }
                     ];
-                    dbState.label = 'All 3 threads claimed! T1\u219212:00:06.371, T2\u219212:00:09.142, T3\u219212:00:14.817. STATUS_NEW = 1 for each.';
-                    dbState.sqlHint = 'UPDATE slot_count + 1, status = CASE WHEN full THEN \'CLOSED\' ELSE \'OPEN\' END';
+                    dbState.label = 'incrementSlotCount(): All 3 threads update their window counters. Each returns AssignedSlot(scheduledTime, delay).';
+                    dbState.sqlHint = 'UPDATE window_counter SET slot_count = slot_count + 1 WHERE window_start = ?';
                     dbState.esSqlHint = '';
                 }
                 renderDbTables(10);
