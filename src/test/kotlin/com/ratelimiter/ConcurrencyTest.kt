@@ -3,6 +3,7 @@ package com.ratelimiter
 import com.ratelimiter.repo.RateLimitConfigRepository
 import com.ratelimiter.db.RateLimitEventSlotTable
 import com.ratelimiter.db.WindowCounterTable
+import com.ratelimiter.db.WindowEndTrackerTable
 import com.ratelimiter.slot.AssignedSlot
 import com.ratelimiter.slot.SlotAssignmentService
 import io.quarkus.test.common.QuarkusTestResource
@@ -39,6 +40,7 @@ class ConcurrencyTest {
         transaction {
             RateLimitEventSlotTable.deleteAll()
             WindowCounterTable.deleteAll()
+            WindowEndTrackerTable.deleteAll()
         }
         configRepository.evictCache()
     }

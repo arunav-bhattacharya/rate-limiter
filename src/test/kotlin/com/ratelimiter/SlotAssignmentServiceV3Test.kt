@@ -645,4 +645,75 @@ class SlotAssignmentServiceV3Test {
 
         assertEquals(totalEvents, slotCountsByWindow.values.sum())
     }
+
+    // ==================== Single-row locking validation ====================
+
+    @Test
+    fun `concurrent threads lock different windows instead of blocking each other`() {
+        val maxPerWindow = 5
+        val totalEvents = 200
+        val threadCount = 50
+
+        configRepository.createConfig("v3-single-lock", maxPerWindow, Duration.ofSeconds(4))
+        val requestedTime = Instant.parse("2025-06-01T12:00:00Z")
+
+        val results = ConcurrentHashMap<String, AssignedSlot>()
+        val errors = ConcurrentLinkedQueue<Throwable>()
+        val barrier = CountDownLatch(1)
+        val done = CountDownLatch(totalEvents)
+        val executor = Executors.newFixedThreadPool(threadCount)
+
+        repeat(totalEvents) { i ->
+            executor.submit {
+                try {
+                    barrier.await()
+                    results["evt-sl$i"] = service.assignSlot("evt-sl$i", "v3-single-lock", requestedTime)
+                } catch (e: Throwable) {
+                    errors.add(e)
+                } finally {
+                    done.countDown()
+                }
+            }
+        }
+
+        // Release all threads at once for maximum contention
+        barrier.countDown()
+        assertTrue(done.await(120, TimeUnit.SECONDS))
+        executor.shutdown()
+
+        assertTrue(errors.isEmpty(), "Expected 0 errors but got ${errors.size}: ${errors.firstOrNull()}")
+        assertEquals(totalEvents, results.size)
+
+        // Verify no window exceeds max_per_window
+        val slotsByWindow = transaction {
+            RateLimitEventSlotTable.selectAll().toList()
+                .groupBy { it[RateLimitEventSlotTable.windowStart] }
+        }
+        for ((windowStart, slots) in slotsByWindow) {
+            assertTrue(
+                slots.size <= maxPerWindow,
+                "Window $windowStart has ${slots.size} slots, exceeds max $maxPerWindow"
+            )
+        }
+
+        // Verify counters match actual slot counts
+        val dbCounters = transaction {
+            WindowCounterTable.selectAll().associate { row ->
+                row[WindowCounterTable.windowStart] to row[WindowCounterTable.slotCount]
+            }
+        }
+        for ((windowStart, slots) in slotsByWindow) {
+            assertEquals(
+                slots.size, dbCounters[windowStart],
+                "Counter for $windowStart should match actual slot count"
+            )
+        }
+
+        // Should use approximately 40 windows (200 events / 5 per window)
+        val expectedWindows = (totalEvents + maxPerWindow - 1) / maxPerWindow
+        assertTrue(
+            slotsByWindow.size >= expectedWindows,
+            "Should use at least $expectedWindows windows, got ${slotsByWindow.size}"
+        )
+    }
 }

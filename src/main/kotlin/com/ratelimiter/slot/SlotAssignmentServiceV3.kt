@@ -104,7 +104,7 @@ class SlotAssignmentServiceV3 @Inject constructor(
 
             t0 = System.nanoTime()
             val foundInRange = with(windowSlotCounterRepository) {
-                findAndLockFirstAvailableWindow(alignedStart.plus(windowSize), windowEnd, config.maxPerWindow)
+                findAndLockFirstAvailableWindow(alignedStart.plus(windowSize), windowEnd, config.maxPerWindow, windowSize)
             }
             logger.debug("eventId={} | findAndLock (initialRange) took {}ms", eventId, nanosToMs(System.nanoTime() - t0))
 
@@ -134,7 +134,7 @@ class SlotAssignmentServiceV3 @Inject constructor(
 
                 t0 = System.nanoTime()
                 val foundWindow = with(windowSlotCounterRepository) {
-                    findAndLockFirstAvailableWindow(searchFrom, chunkEnd, config.maxPerWindow)
+                    findAndLockFirstAvailableWindow(searchFrom, chunkEnd, config.maxPerWindow, windowSize)
                 }
                 logger.debug("eventId={} | findAndLock (chunk={}) took {}ms", eventId, chunk, nanosToMs(System.nanoTime() - t0))
 

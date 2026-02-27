@@ -12,6 +12,7 @@ import org.jetbrains.exposed.sql.javatime.JavaInstantColumnType
 import org.jetbrains.exposed.sql.selectAll
 import org.jetbrains.exposed.sql.statements.StatementType
 import org.jetbrains.exposed.sql.update
+import java.time.Duration
 import java.time.Instant
 
 @ApplicationScoped
@@ -52,11 +53,10 @@ class WindowSlotCounterRepository {
     }
 
     /**
-     * V3-style exclusive-range find+lock: WHERE window_start >= ? AND window_start < ?
-     * Atomically finds the earliest non-full, non-contended window in [from, to)
-     * and acquires a row lock on it.
+     * Find the earliest window in [from, to) with available capacity. No lock acquired.
+     * Uses FETCH FIRST 1 ROW ONLY to read a single row efficiently.
      */
-    fun Transaction.findAndLockFirstAvailableWindow(
+    fun Transaction.findEarliestCandidateWindow(
         from: Instant,
         to: Instant,
         maxSlots: Int
@@ -68,7 +68,7 @@ class WindowSlotCounterRepository {
             AND    WINDOW_START < ?
             AND    SLOT_COUNT < ?
             ORDER BY WINDOW_START ASC
-            FOR UPDATE SKIP LOCKED
+            FETCH FIRST 1 ROW ONLY
         """.trimIndent()
 
         return exec(
@@ -82,6 +82,36 @@ class WindowSlotCounterRepository {
         ) { rs ->
             if (rs.next()) rs.getTimestamp("WINDOW_START").toInstant() else null
         }
+    }
+
+    /**
+     * V3-style exclusive-range find+lock: finds the earliest non-full, non-contended
+     * window in [from, to) and acquires a row lock on it.
+     *
+     * Iterates one window at a time: finds a candidate (no lock), then attempts to
+     * lock it via [tryLockFirstWindow]. If the lock fails (SKIP LOCKED or race),
+     * advances by [windowSize] and tries the next candidate. This avoids locking
+     * the entire qualifying set, reducing contention at high TPS.
+     */
+    fun Transaction.findAndLockFirstAvailableWindow(
+        from: Instant,
+        to: Instant,
+        maxSlots: Int,
+        windowSize: Duration
+    ): Instant? {
+        var searchFrom = from
+        while (searchFrom < to) {
+            val candidate = findEarliestCandidateWindow(searchFrom, to, maxSlots)
+                ?: return null
+            val lockResult = tryLockFirstWindow(candidate, maxSlots)
+            when (lockResult) {
+                true -> return candidate
+                false -> {}   // locked but full (race) → next
+                null -> {}    // SKIP LOCKED → next
+            }
+            searchFrom = candidate.plus(windowSize)
+        }
+        return null
     }
 
     /**
