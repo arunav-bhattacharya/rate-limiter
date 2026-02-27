@@ -85,13 +85,56 @@ class WindowSlotCounterRepository {
     }
 
     /**
+     * Nested subquery find+lock: inner SELECT finds earliest candidate (no lock,
+     * FETCH FIRST 1 ROW ONLY), outer SELECT locks exactly that row by PK
+     * (FOR UPDATE SKIP LOCKED) and re-checks capacity under the lock.
+     *
+     * Returns the locked window's WINDOW_START, or null if no qualifying candidate
+     * exists, candidate was locked by another session (SKIP LOCKED), or capacity
+     * was lost between subquery and lock (race).
+     */
+    fun Transaction.nestedFindAndLock(
+        from: Instant,
+        to: Instant,
+        maxSlots: Int
+    ): Instant? {
+        val sql = """
+            SELECT WINDOW_START
+            FROM   rate_limit_window_counter
+            WHERE  WINDOW_START = (
+                SELECT WINDOW_START
+                FROM   rate_limit_window_counter
+                WHERE  WINDOW_START >= ?
+                AND    WINDOW_START < ?
+                AND    SLOT_COUNT < ?
+                ORDER BY WINDOW_START ASC
+                FETCH FIRST 1 ROW ONLY
+            )
+            AND    SLOT_COUNT < ?
+            FOR UPDATE SKIP LOCKED
+        """.trimIndent()
+
+        return exec(
+            sql,
+            listOf(
+                Pair(JavaInstantColumnType(), from),
+                Pair(JavaInstantColumnType(), to),
+                Pair(IntegerColumnType(), maxSlots),
+                Pair(IntegerColumnType(), maxSlots)
+            ),
+            StatementType.SELECT
+        ) { rs ->
+            if (rs.next()) rs.getTimestamp("WINDOW_START").toInstant() else null
+        }
+    }
+
+    /**
      * V3-style exclusive-range find+lock: finds the earliest non-full, non-contended
      * window in [from, to) and acquires a row lock on it.
      *
-     * Iterates one window at a time: finds a candidate (no lock), then attempts to
-     * lock it via [tryLockFirstWindow]. If the lock fails (SKIP LOCKED or race),
-     * advances by [windowSize] and tries the next candidate. This avoids locking
-     * the entire qualifying set, reducing contention at high TPS.
+     * Uses a nested subquery for single-SQL find+lock (1 round-trip on success).
+     * On null, a non-locking fallback distinguishes "no candidates" (O(1) exit)
+     * from "candidate was locked" (advance past it and retry).
      */
     fun Transaction.findAndLockFirstAvailableWindow(
         from: Instant,
@@ -101,15 +144,12 @@ class WindowSlotCounterRepository {
     ): Instant? {
         var searchFrom = from
         while (searchFrom < to) {
+            val result = nestedFindAndLock(searchFrom, to, maxSlots)
+            if (result != null) return result
+            // null: either no candidates OR candidate was locked (SKIP LOCKED)
             val candidate = findEarliestCandidateWindow(searchFrom, to, maxSlots)
-                ?: return null
-            val lockResult = tryLockFirstWindow(candidate, maxSlots)
-            when (lockResult) {
-                true -> return candidate
-                false -> {}   // locked but full (race) → next
-                null -> {}    // SKIP LOCKED → next
-            }
-            searchFrom = candidate.plus(windowSize)
+                ?: return null  // truly no candidates → O(1) exit
+            searchFrom = candidate.plus(windowSize)  // was locked → advance past it
         }
         return null
     }

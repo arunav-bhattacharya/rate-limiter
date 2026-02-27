@@ -9,6 +9,7 @@ import jakarta.inject.Inject
 import org.eclipse.microprofile.config.inject.ConfigProperty
 import org.jetbrains.exposed.exceptions.ExposedSQLException
 import org.jetbrains.exposed.sql.Transaction
+import java.sql.BatchUpdateException
 import org.jetbrains.exposed.sql.transactions.transaction
 import org.slf4j.LoggerFactory
 import java.time.Duration
@@ -127,8 +128,14 @@ class SlotAssignmentServiceV3 @Inject constructor(
                 logger.debug("eventId={} | ensureChunkProvisioned (chunk={}) took {}ms", eventId, chunk, nanosToMs(System.nanoTime() - t0))
 
                 t0 = System.nanoTime()
-                with(windowEndTrackerRepository) {
-                    insertWindowEnd(alignedStart, chunkEnd)
+                try {
+                    with(windowEndTrackerRepository) {
+                        insertWindowEnd(alignedStart, chunkEnd)
+                    }
+                } catch (_: ExposedSQLException) {
+                    // Concurrent thread already inserted this frontier — safe to ignore
+                } catch (_: BatchUpdateException) {
+                    // Concurrent thread already inserted this frontier — safe to ignore
                 }
                 logger.debug("eventId={} | insertWindowEnd (chunk={}) took {}ms", eventId, chunk, nanosToMs(System.nanoTime() - t0))
 
@@ -174,8 +181,14 @@ class SlotAssignmentServiceV3 @Inject constructor(
         val chunkStart = alignedStart.plus(windowSize)
         val windowEnd = chunkStart.plus(windowSize.multipliedBy(maxWindowsInChunk.toLong()))
         ensureChunkProvisioned(chunkStart, maxWindowsInChunk, windowSize)
-        with(windowEndTrackerRepository) {
-            insertWindowEnd(alignedStart, windowEnd)
+        try {
+            with(windowEndTrackerRepository) {
+                insertWindowEnd(alignedStart, windowEnd)
+            }
+        } catch (_: ExposedSQLException) {
+            // Concurrent thread already inserted this frontier — safe to ignore
+        } catch (_: BatchUpdateException) {
+            // Concurrent thread already inserted this frontier — safe to ignore
         }
         return windowEnd
     }
@@ -200,6 +213,8 @@ class SlotAssignmentServiceV3 @Inject constructor(
         try {
             with(windowSlotCounterRepository) { batchInsertWindows(windows) }
         } catch (_: ExposedSQLException) {
+            // Concurrent thread already provisioned some/all rows — safe to ignore
+        } catch (_: BatchUpdateException) {
             // Concurrent thread already provisioned some/all rows — safe to ignore
         }
     }
