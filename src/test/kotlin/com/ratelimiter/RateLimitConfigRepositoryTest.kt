@@ -30,7 +30,7 @@ class RateLimitConfigRepositoryTest {
             windowSize = Duration.ofSeconds(4)
         )
 
-        assertTrue(config.configId > 0)
+        assertTrue(config.configId.isNotBlank())
         assertEquals("test-create", config.configName)
         assertEquals(200, config.maxPerWindow)
         assertEquals(Duration.ofSeconds(4), config.windowSize)

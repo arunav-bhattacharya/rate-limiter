@@ -25,7 +25,7 @@ class WindowEndTrackerRepository {
 
     /**
      * Reads the provisioning frontier for a given alignedStart.
-     * Returns the MAX(window_end) across all frontier rows, or null if none exist.
+     * Returns the MAX(WNDW_END_TS) across all frontier rows, or null if none exist.
      * Append-only table — no UPDATE contention.
      */
     fun Transaction.fetchMaxWindowEnd(requestedTime: Instant): Instant? {
@@ -38,7 +38,7 @@ class WindowEndTrackerRepository {
 
     /**
      * Appends a new frontier row. Catches duplicate key silently —
-     * concurrent threads inserting the same (requestedTime, windowEnd)
+     * concurrent threads inserting the same (REQ_TS, WNDW_END_TS)
      * pair are harmless no-ops.
      */
     fun Transaction.insertWindowEnd(requestedTime: Instant, windowEnd: Instant) {
@@ -46,6 +46,7 @@ class WindowEndTrackerRepository {
             WindowEndTrackerTable.insert {
                 it[WindowEndTrackerTable.requestedTime] = requestedTime
                 it[WindowEndTrackerTable.windowEnd] = windowEnd
+                it[createdAt] = Instant.now()
             }
         } catch (_: ExposedSQLException) {
             // Duplicate key — another thread already inserted this exact frontier row

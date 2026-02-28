@@ -4,56 +4,58 @@ import org.jetbrains.exposed.sql.Table
 import org.jetbrains.exposed.sql.javatime.timestamp
 
 /** Rate limit configuration — dynamic, versioned. */
-object RateLimitConfigTable : Table("rate_limit_config") {
-    val configId = long("config_id").autoIncrement()
-    val configName = varchar("config_name", 128)
-    val maxPerWindow = integer("max_per_window")
-    val windowSize = varchar("window_size", 50)
-    val effectiveFrom = timestamp("effective_from")
-    val isActive = bool("is_active")
-    val createdAt = timestamp("created_at")
+object RateLimitConfigTable : Table("RL_EVENT_WNDW_CONFIG") {
+    val configId = varchar("RL_WNDW_CONFIG_ID", 50)
+    val configName = varchar("WNDW_CONFIG_NM", 128)
+    val maxPerWindow = integer("WNDW_MAX_EVENT_CT")
+    val windowSize = varchar("WNDW_SIZE_ISO_DUR_TX", 25)
+    val effectiveFrom = timestamp("CONFIG_EFF_STRT_DT")
+    val isActive = bool("ACT_IN")
+    val createdAt = timestamp("CREAT_TS")
 
     override val primaryKey = PrimaryKey(configId)
 
     init {
-        index("idx_config_name_active", false, configName, isActive)
+        index("RL_EVENT_WNDW_CONFIG_I01X", false, configName, isActive)
     }
 }
 
 /** Per-window slot counter — config-agnostic concurrency control. */
-object WindowCounterTable : Table("rate_limit_window_counter") {
-    val windowStart = timestamp("window_start")
-    val slotCount = integer("slot_count").default(0)
+object WindowCounterTable : Table("RL_WNDW_CT") {
+    val windowStart = timestamp("WNDW_STRT_TS")
+    val slotCount = integer("SLOT_CT").default(0)
+    val createdAt = timestamp("CREAT_TS")
 
     override val primaryKey = PrimaryKey(windowStart)
 
     init {
-        index("idx_window_counter_slot_start", false, slotCount, windowStart)
+        index("RL_WNDW_CT_I01X", false, windowStart, slotCount)
     }
 }
 
 /** Immutable slot assignment record. */
-object RateLimitEventSlotTable : Table("rate_limit_event_slot") {
-    val slotId = long("slot_id").autoIncrement()
-    val eventId = varchar("event_id", 256).uniqueIndex("uq_event_id")
-    val requestedTime = timestamp("requested_time")
-    val windowStart = timestamp("window_start")
-    val scheduledTime = timestamp("scheduled_time")
-    val configId = long("config_id")
-    val createdAt = timestamp("created_at")
+object RateLimitEventSlotTable : Table("RL_EVENT_SLOT_DTL") {
+    val slotId = varchar("WNDW_SLOT_ID", 50)
+    val eventId = varchar("EVENT_ID", 50).uniqueIndex("RL_EVENT_SLOT_DTL_IUX")
+    val requestedTime = timestamp("REQ_TS")
+    val configId = varchar("RL_WNDW_CONFIG_ID", 50)
+    val windowStart = timestamp("WNDW_STRT_TS")
+    val scheduledTime = timestamp("COMPUTED_SCHED_TS")
+    val createdAt = timestamp("CREAT_TS")
 
     override val primaryKey = PrimaryKey(slotId)
 
     init {
-        index("idx_event_slot_window", false, windowStart)
-        index("idx_event_slot_created", false, createdAt)
+        index("RL_EVENT_SLOT_DTL_I01X", false, windowStart)
+        index("RL_EVENT_SLOT_DTL_I02X", false, createdAt)
     }
 }
 
-/** Append-only provisioning frontier tracker. Composite PK = (requested_time, window_end). */
-object WindowEndTrackerTable : Table("track_window_end") {
-    val requestedTime = timestamp("requested_time")
-    val windowEnd = timestamp("window_end")
+/** Append-only provisioning frontier tracker. Composite PK = (REQ_TS, WNDW_END_TS). */
+object WindowEndTrackerTable : Table("RL_WNDW_FRONTIER_TRK") {
+    val requestedTime = timestamp("REQ_TS")
+    val windowEnd = timestamp("WNDW_END_TS")
+    val createdAt = timestamp("CREAT_TS")
 
     override val primaryKey = PrimaryKey(requestedTime, windowEnd)
 }

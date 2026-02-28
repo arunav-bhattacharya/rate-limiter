@@ -14,15 +14,15 @@ A bulk payments processing platform needs an Oracle-based rate limiter to enforc
 
 ## Key Design Decisions
 
-1. **No UNIQUE constraint on `(window_start, scheduled_time)`** — millisecond collisions expected at 100 events/4s window; TPS enforced by slot_count, not time uniqueness
-2. **UNIQUE constraint on `event_id`** — idempotency enforcement; handle ORA-00001 with retry-read
+1. **No UNIQUE constraint on `(WNDW_STRT_TS, COMPUTED_SCHED_TS)`** — millisecond collisions expected at 100 events/4s window; TPS enforced by slot_count, not time uniqueness
+2. **UNIQUE constraint on `EVENT_ID`** — idempotency enforcement; handle ORA-00001 with retry-read
 3. **`SELECT FOR UPDATE NOWAIT` + skip-to-next-window** — prevents thread convoys during bulk ingestion
 4. **Config-agnostic window counters** — counter tracks total across all config versions
 5. **5-second in-memory config cache** via `ConcurrentHashMap`
 6. **Random-only jitter** — uniform distribution within each window
 7. **INSERT + catch ORA-00001** for window counter row creation (not MERGE/insertIgnore) — INSERT is lighter than MERGE; conflict only on first event per window; Oracle detects duplicates at index level cheaply
 8. **Dynamic per-request search limit** — no global frontier or fixed MAX_LOOKAHEAD; PL/SQL skip query finds first OPEN window, search limit = `firstOpenWindow + headroom`
-9. **Window status column** (`OPEN`/`CLOSED`) on `rate_limit_window_counter` — enables O(log N) indexed skip queries via composite index `(status, window_start)`
+9. **Window status column** (`OPEN`/`CLOSED`) on `RL_WNDW_CT` — enables O(log N) indexed skip queries via composite index `(status, WNDW_STRT_TS)`
 10. **Proportional first-window capacity** — when `requestedTime` falls mid-window, first window's effective max = `floor(maxPerWindow * remainingTime / windowSize)` with constrained jitter `[elapsedMs, windowSizeMs)`
 
 ## Dynamic Per-Request Search Limit
@@ -43,7 +43,7 @@ Phase 2 (if Phase 1 fails):
 
 - **No global state**: No `AtomicReference`, no `@PostConstruct` initialization, no cross-request interference.
 - **`headroom`**: Fixed configurable value (default: 100 windows). How far past the skip target we search.
-- **Skip query**: Uses composite index `(status, window_start)` on `rate_limit_window_counter` to find the first `OPEN` window after the requested window in O(log N).
+- **Skip query**: Uses composite index `(status, WNDW_STRT_TS)` on `RL_WNDW_CT` to find the first `OPEN` window after the requested window in O(log N).
 
 **Behavior**:
 - First event: no windows exist → Phase 1 succeeds immediately.
@@ -84,7 +84,7 @@ Phase 2 (if Phase 1 fails):
 
 | # | File | Responsibility |
 |---|---|---|
-| 5 | `src/main/resources/db/migration/V1__rate_limiter_schema.sql` | Flyway DDL: 3 tables (window_counter with status column + composite index), indexes, constraints |
+| 5 | `src/main/resources/db/migration/V1__rate_limiter_schema.sql` | Flyway DDL: 3 tables (RL_WNDW_CT with status column + composite index), indexes, constraints |
 | 6 | `src/main/kotlin/com/ratelimiter/db/Tables.kt` | Exposed Table objects mirroring DDL exactly |
 | 7 | `src/main/kotlin/com/ratelimiter/db/ExposedDatabaseInitializer.kt` | CDI bean connecting Exposed to Quarkus Agroal DataSource |
 
@@ -172,7 +172,7 @@ assignSlot(eventId, configName, requestedTime):
      headroomSecs = headroomWindows * config.windowSizeSecs
   3. Execute single PL/SQL block via CallableStatement (10 IN, 5 OUT params):
      -- Server-side (inside PL/SQL anonymous block):
-     a. check_existing_slot: SELECT by event_id -> if found, ou_status = EXISTING
+     a. check_existing_slot: SELECT by EVENT_ID -> if found, ou_status = EXISTING
      b. Phase 1: Try first window with pre-computed proportional capacity
         - try_lock_window(windowStart) -> if count < in_max_first_window:
           claim_slot_in_window(windowStart, count, in_first_jitter_ms)
@@ -185,7 +185,7 @@ assignSlot(eventId, configName, requestedTime):
           -> if slot_count >= max_per_window -> skip
           -> claim_slot_in_window(window, count, in_full_jitter_ms)
             INSERT slot + UPDATE counter (atomic status OPEN/CLOSED transition)
-            -> DUP_VAL_ON_INDEX on event_id -> idempotency race -> ou_status = EXISTING
+            -> DUP_VAL_ON_INDEX on EVENT_ID -> idempotency race -> ou_status = EXISTING
      d. If no window had capacity -> ou_status = EXHAUSTED
      e. Marshal ou_ locals to OUT bind variables
   4. Interpret result (pure Kotlin):
@@ -198,13 +198,13 @@ assignSlot(eventId, configName, requestedTime):
 - Entire slot assignment (idempotency check + two-phase window search + lock + insert + counter update) in a **single PL/SQL anonymous block** — one JDBC round trip
 - **Two-phase approach**: Phase 1 tries first window with proportional capacity; Phase 2 skips to first OPEN window
 - **No global frontier**: Search limit computed per-request inside PL/SQL (`firstOpenWindow + headroom`)
-- **Status-based skip query**: `find_first_open_window()` uses composite index `(status, window_start)` for O(log N) lookups
+- **Status-based skip query**: `find_first_open_window()` uses composite index `(status, WNDW_STRT_TS)` for O(log N) lookups
 - **Proportional first-window**: `maxFirstWindow = floor(maxPerWindow * remainingMs / windowSizeMs)` pre-computed in Kotlin
 - **Pre-computed jitter**: Both jitter values computed in Kotlin via `ThreadLocalRandom` and passed as IN params — no `DBMS_RANDOM` in PL/SQL
 - **Constrained first-window jitter**: `firstJitterMs = ThreadLocalRandom.nextLong(elapsedMs, windowSizeMs)` ensures `scheduledTime >= requestedTime`
 - **Atomic status transition**: `claim_slot_in_window` sets `status = CLOSED` when `slot_count + 1 >= maxPerWindow`
 - Counter row creation uses plain `INSERT` (with `status = 'OPEN'`) + catch DUP_VAL_ON_INDEX
-- `window_size` stored as ISO-8601 Duration string (e.g., `"PT4S"`) instead of integer seconds
+- `WNDW_SIZE_ISO_DUR_TX` stored as ISO-8601 Duration string (e.g., `"PT4S"`) instead of integer seconds
 
 ## Testing Strategy
 
@@ -214,11 +214,11 @@ assignSlot(eventId, configName, requestedTime):
 - **Skip query tests**: Verify status-based skip avoids walking full windows, status transitions to CLOSED
 - **Isolation tests**: Verify far-future events don't corrupt near-term search (no global frontier)
 - **Concurrency test**: 100 threads, same target time, verify:
-  - No window exceeds `max_per_window`
+  - No window exceeds `WNDW_MAX_EVENT_CT`
   - Total slots == total events submitted
   - Counter values match actual slot counts per window
   - No deadlocks or unhandled exceptions
-  - Idempotency: same `event_id` 10x returns identical `AssignedSlot`
+  - Idempotency: same `EVENT_ID` 10x returns identical `AssignedSlot`
 
 ## Verification
 

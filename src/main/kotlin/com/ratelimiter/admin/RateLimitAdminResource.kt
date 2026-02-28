@@ -36,7 +36,7 @@ class RateLimitAdminResource @Inject constructor(
 
     /** Response body for config queries. */
     data class ConfigResponse(
-        val configId: Long,
+        val configId: String,
         val configName: String,
         val maxPerWindow: Int,
         /** ISO-8601 duration string. */

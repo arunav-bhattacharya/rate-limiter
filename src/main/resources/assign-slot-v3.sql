@@ -3,7 +3,7 @@ DECLARE
     in_event_id            VARCHAR2(256) := ?;  /* 1  */
     in_window_start        TIMESTAMP     := ?;  /* 2  */
     in_requested_time      TIMESTAMP     := ?;  /* 3  */
-    in_config_id           NUMBER        := ?;  /* 4  */
+    in_config_id           VARCHAR2(50)  := ?;  /* 4  */
     in_max_per_window      NUMBER        := ?;  /* 5  */
     in_window_size_secs    NUMBER        := ?;  /* 6  */
     in_max_first_window    NUMBER        := ?;  /* 7  */
@@ -14,7 +14,7 @@ DECLARE
 
     -- Output result locals (marshalled to OUT bind vars at end)
     ou_status           NUMBER := -1;  -- default: EXHAUSTED
-    ou_slot_id          NUMBER;
+    ou_slot_id          VARCHAR2(50);
     ou_scheduled_time   TIMESTAMP;
     ou_window_start     TIMESTAMP;
     ou_windows_searched NUMBER := 0;
@@ -41,10 +41,10 @@ DECLARE
 
     FUNCTION check_existing_slot RETURN BOOLEAN IS
     BEGIN
-        SELECT  slot_id, scheduled_time, window_start
+        SELECT  WNDW_SLOT_ID, COMPUTED_SCHED_TS, WNDW_STRT_TS
         INTO    ou_slot_id, ou_scheduled_time, ou_window_start
-        FROM    rate_limit_event_slot
-        WHERE   event_id = in_event_id;
+        FROM    RL_EVENT_SLOT_DTL
+        WHERE   EVENT_ID = in_event_id;
         ou_status           := STATUS_EXISTING;
         ou_windows_searched := 0;
         RETURN TRUE;
@@ -58,8 +58,8 @@ DECLARE
 
     PROCEDURE ensure_window_exists(window_ts IN TIMESTAMP) IS
     BEGIN
-        INSERT INTO rate_limit_window_counter(window_start, slot_count)
-        VALUES (window_ts, 0);
+        INSERT INTO RL_WNDW_CT(WNDW_STRT_TS, SLOT_CT, CREAT_TS)
+        VALUES (window_ts, 0, SYSTIMESTAMP);
     EXCEPTION
         WHEN DUP_VAL_ON_INDEX THEN NULL;
     END ensure_window_exists;
@@ -76,15 +76,15 @@ DECLARE
     BEGIN
         -- Quick check: if last window exists, chunk is already provisioned
         SELECT 1 INTO dummy
-        FROM   rate_limit_window_counter
-        WHERE  window_start = last_window;
+        FROM   RL_WNDW_CT
+        WHERE  WNDW_STRT_TS = last_window;
         RETURN;
     EXCEPTION
         WHEN NO_DATA_FOUND THEN
             FOR i IN 0..in_max_windows_in_chunk - 1 LOOP
                 BEGIN
-                    INSERT INTO rate_limit_window_counter(window_start, slot_count)
-                    VALUES (from_ts + i * window_size, 0);
+                    INSERT INTO RL_WNDW_CT(WNDW_STRT_TS, SLOT_CT, CREAT_TS)
+                    VALUES (from_ts + i * window_size, 0, SYSTIMESTAMP);
                 EXCEPTION
                     WHEN DUP_VAL_ON_INDEX THEN NULL;
                 END;
@@ -93,16 +93,16 @@ DECLARE
 
     ---------------------------------------------------------------
     -- try_lock_first_window: Lock the first window's counter row.
-    -- Returns slot_count on success, -1 if skipped (locked by
+    -- Returns SLOT_CT on success, -1 if skipped (locked by
     -- another session via SKIP LOCKED).
     ---------------------------------------------------------------
 
     FUNCTION try_lock_first_window(window_ts IN TIMESTAMP) RETURN NUMBER IS
         locked_count NUMBER;
     BEGIN
-        SELECT slot_count INTO locked_count
-        FROM   rate_limit_window_counter
-        WHERE  window_start = window_ts
+        SELECT SLOT_CT INTO locked_count
+        FROM   RL_WNDW_CT
+        WHERE  WNDW_STRT_TS = window_ts
         FOR UPDATE SKIP LOCKED;
         RETURN locked_count;
     EXCEPTION
@@ -116,12 +116,12 @@ DECLARE
 
     FUNCTION find_and_lock(from_ts IN TIMESTAMP, to_ts IN TIMESTAMP) RETURN TIMESTAMP IS
         CURSOR c IS
-            SELECT window_start
-            FROM   rate_limit_window_counter
-            WHERE  window_start >= from_ts
-            AND    window_start < to_ts
-            AND    slot_count < in_max_per_window
-            ORDER BY window_start
+            SELECT WNDW_STRT_TS
+            FROM   RL_WNDW_CT
+            WHERE  WNDW_STRT_TS >= from_ts
+            AND    WNDW_STRT_TS < to_ts
+            AND    SLOT_CT < in_max_per_window
+            ORDER BY WNDW_STRT_TS
             FOR UPDATE SKIP LOCKED;
         found TIMESTAMP;
     BEGIN
@@ -139,9 +139,9 @@ DECLARE
     FUNCTION fetch_window_end RETURN TIMESTAMP IS
         v_end TIMESTAMP;
     BEGIN
-        SELECT MAX(window_end) INTO v_end
-        FROM   track_window_end
-        WHERE  requested_time = in_window_start;
+        SELECT MAX(WNDW_END_TS) INTO v_end
+        FROM   RL_WNDW_FRONTIER_TRK
+        WHERE  REQ_TS = in_window_start;
         RETURN v_end;
     END fetch_window_end;
 
@@ -157,14 +157,14 @@ DECLARE
         ensure_chunk_provisioned(in_window_start + window_size);
 
         BEGIN
-            INSERT INTO track_window_end(requested_time, window_end)
-            VALUES (in_window_start, v_end);
+            INSERT INTO RL_WNDW_FRONTIER_TRK(REQ_TS, WNDW_END_TS, CREAT_TS)
+            VALUES (in_window_start, v_end, SYSTIMESTAMP);
         EXCEPTION
             WHEN DUP_VAL_ON_INDEX THEN
                 -- Another thread beat us — re-read the max
-                SELECT MAX(window_end) INTO v_end
-                FROM   track_window_end
-                WHERE  requested_time = in_window_start;
+                SELECT MAX(WNDW_END_TS) INTO v_end
+                FROM   RL_WNDW_FRONTIER_TRK
+                WHERE  REQ_TS = in_window_start;
         END;
 
         RETURN v_end;
@@ -172,7 +172,7 @@ DECLARE
 
     ---------------------------------------------------------------
     -- claim_slot: Insert event slot + increment counter.
-    -- Handles DUP_VAL_ON_INDEX on event_id for idempotency.
+    -- Handles DUP_VAL_ON_INDEX on EVENT_ID for idempotency.
     ---------------------------------------------------------------
 
     FUNCTION claim_slot(
@@ -181,21 +181,25 @@ DECLARE
     ) RETURN BOOLEAN IS
         jitter     INTERVAL DAY TO SECOND := NUMTODSINTERVAL(p_jitter_ms / 1000, 'SECOND');
         sched_time TIMESTAMP;
+        v_slot_id  VARCHAR2(50);
     BEGIN
         sched_time := window_ts + jitter;
+        v_slot_id  := SYS_GUID();
 
-        INSERT INTO rate_limit_event_slot(
-            event_id, requested_time, window_start,
-            scheduled_time, config_id, created_at
+        INSERT INTO RL_EVENT_SLOT_DTL(
+            WNDW_SLOT_ID, EVENT_ID, REQ_TS, WNDW_STRT_TS,
+            COMPUTED_SCHED_TS, RL_WNDW_CONFIG_ID, CREAT_TS
         ) VALUES (
-            in_event_id, in_requested_time, window_ts,
+            v_slot_id, in_event_id, in_requested_time, window_ts,
             sched_time, in_config_id, SYSTIMESTAMP
-        ) RETURNING slot_id, scheduled_time
-          INTO ou_slot_id, ou_scheduled_time;
+        );
 
-        UPDATE rate_limit_window_counter
-        SET slot_count = slot_count + 1
-        WHERE window_start = window_ts;
+        ou_slot_id          := v_slot_id;
+        ou_scheduled_time   := sched_time;
+
+        UPDATE RL_WNDW_CT
+        SET SLOT_CT = SLOT_CT + 1
+        WHERE WNDW_STRT_TS = window_ts;
 
         ou_window_start     := window_ts;
         ou_status           := STATUS_NEW;
@@ -204,10 +208,10 @@ DECLARE
 
     EXCEPTION
         WHEN DUP_VAL_ON_INDEX THEN
-            SELECT slot_id, scheduled_time, window_start
+            SELECT WNDW_SLOT_ID, COMPUTED_SCHED_TS, WNDW_STRT_TS
             INTO   ou_slot_id, ou_scheduled_time, ou_window_start
-            FROM   rate_limit_event_slot
-            WHERE  event_id = in_event_id;
+            FROM   RL_EVENT_SLOT_DTL
+            WHERE  EVENT_ID = in_event_id;
             ou_status           := STATUS_EXISTING;
             ou_windows_searched := windows_searched;
             RETURN TRUE;
@@ -256,8 +260,8 @@ BEGIN
 
                     -- Append new frontier row (catch DUP — no contention)
                     BEGIN
-                        INSERT INTO track_window_end(requested_time, window_end)
-                        VALUES (in_window_start, chunk_end);
+                        INSERT INTO RL_WNDW_FRONTIER_TRK(REQ_TS, WNDW_END_TS, CREAT_TS)
+                        VALUES (in_window_start, chunk_end, SYSTIMESTAMP);
                     EXCEPTION
                         WHEN DUP_VAL_ON_INDEX THEN NULL;
                     END;

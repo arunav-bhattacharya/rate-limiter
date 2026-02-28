@@ -115,7 +115,7 @@ class SlotAssignmentService @Inject constructor(
      */
     private data class SlotAssignmentResult(
         val status: Int,
-        val slotId: Long,
+        val slotId: String,
         val scheduledTime: Instant,
         val windowStart: Instant,
         val windowsSearched: Int
@@ -143,7 +143,7 @@ class SlotAssignmentService @Inject constructor(
                 cs.setString(1, eventId)                              // in_event_id
                 cs.setTimestamp(2, Timestamp.from(windowStart))       // in_window_start
                 cs.setTimestamp(3, Timestamp.from(requestedTime))     // in_requested_time
-                cs.setLong(4, config.configId)                        // in_config_id
+                cs.setString(4, config.configId)                      // in_config_id
                 cs.setInt(5, config.maxPerWindow)                     // in_max_per_window
                 cs.setLong(6, config.windowSizeSecs)                  // in_window_size_secs
                 cs.setInt(7, maxFirstWindow)                          // in_max_first_window
@@ -154,7 +154,7 @@ class SlotAssignmentService @Inject constructor(
 
                 // Register OUT parameters (positions 12-16)
                 cs.registerOutParameter(12, Types.INTEGER)            // ou_status
-                cs.registerOutParameter(13, Types.BIGINT)             // ou_slot_id
+                cs.registerOutParameter(13, Types.VARCHAR)            // ou_slot_id
                 cs.registerOutParameter(14, Types.TIMESTAMP)          // ou_scheduled_time
                 cs.registerOutParameter(15, Types.TIMESTAMP)          // ou_window_start
                 cs.registerOutParameter(16, Types.INTEGER)            // ou_windows_searched
@@ -163,7 +163,7 @@ class SlotAssignmentService @Inject constructor(
 
                 SlotAssignmentResult(
                     status = cs.getInt(12),
-                    slotId = cs.getLong(13),
+                    slotId = cs.getString(13) ?: "",
                     scheduledTime = cs.getTimestamp(14)?.toInstant() ?: Instant.EPOCH,
                     windowStart = cs.getTimestamp(15)?.toInstant() ?: Instant.EPOCH,
                     windowsSearched = cs.getInt(16)

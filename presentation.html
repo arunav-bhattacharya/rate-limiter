@@ -611,10 +611,10 @@
                 <div class="arch-box" id="arch-db" style="flex-direction: column; align-items: center;">
                     <span>Oracle Database</span>
                     <div class="db-tables">
-                        <div class="db-table-name">rate_limit_config</div>
-                        <div class="db-table-name">rate_limit_window_counter</div>
-                        <div class="db-table-name">rate_limit_event_slot</div>
-                        <div class="db-table-name">track_window_end</div>
+                        <div class="db-table-name">RL_EVENT_WNDW_CONFIG</div>
+                        <div class="db-table-name">RL_WNDW_CT</div>
+                        <div class="db-table-name">RL_EVENT_SLOT_DTL</div>
+                        <div class="db-table-name">RL_WNDW_FRONTIER_TRK</div>
                     </div>
                 </div>
             </div>
@@ -669,7 +669,7 @@
             <div class="narrative" id="s5-narrative" style="opacity: 0; transition: opacity 0.5s;">
                 The service calls <code style="color: var(--primary);">RateLimitConfigRepository.loadActiveConfig(configName)</code>.
                 An in-memory <strong style="color: var(--primary);">ConcurrentHashMap</strong> cache (5s TTL) is checked first.
-                On a miss, it queries the <strong style="color: var(--warning);">rate_limit_config</strong> table.
+                On a miss, it queries the <strong style="color: var(--warning);">RL_EVENT_WNDW_CONFIG</strong> table.
             </div>
             <div style="opacity: 0; transition: opacity 0.5s; width: 100%;" id="path-hit-container">
                 <div class="path-label fast">CACHE HIT (fast path) <span class="timing-badge" style="background: rgba(46,204,113,0.15); color: var(--success);">~0ms</span></div>
@@ -688,7 +688,7 @@
                     <div class="flow-arrow-h visible">&#8594;</div>
                     <div class="flow-box cache-miss visible">Cache<br><span style="color: var(--error);">MISS</span></div>
                     <div class="flow-arrow-h visible">&#8594;</div>
-                    <div class="flow-box visible" style="border-color: var(--warning);">Oracle DB<br><span style="font-size:9px;color:var(--text-muted);">SELECT * FROM<br>rate_limit_config<br>WHERE is_active = 1</span></div>
+                    <div class="flow-box visible" style="border-color: var(--warning);">Oracle DB<br><span style="font-size:9px;color:var(--text-muted);">SELECT * FROM<br>RL_EVENT_WNDW_CONFIG<br>WHERE ACT_IN = 1</span></div>
                     <div class="flow-arrow-h visible">&#8594;</div>
                     <div class="flow-box visible" style="border-color: var(--success);">Cache +<br>Return</div>
                 </div>
@@ -777,7 +777,7 @@
                 <div class="param-name" style="color: var(--warning);">maxChunksToSearch</div>
                 <div class="param-value" style="color: #c3e88d;">10</div>
                 <div class="param-desc">
-                    Maximum number of chunks the extension loop will scan before giving up (STATUS_EXHAUSTED).
+                    Maximum number of chunks the extension loop will scan before throwing SlotAssignmentException.
                     <div class="param-formula"><span class="kw">config</span>.maxChunksToSearch = 10 &rarr; up to 1000 windows total</div>
                 </div>
             </div>
@@ -797,15 +797,15 @@
         <div class="idem-container">
             <div class="jdbc-banner" id="jdbc-banner-7">Single Transaction &mdash; all phases in one atomic unit</div>
             <div class="plsql-bar" id="plsql-bar-7">
-                <div class="plsql-func active" id="func-check-7">checkExistingSlot</div>
+                <div class="plsql-func active" id="func-check-7">queryAssignedSlot</div>
                 <div class="plsql-func" id="func-first-7">tryLockFirstWindow</div>
-                <div class="plsql-func" id="func-find-7">findAndLockFirstAvailable</div>
+                <div class="plsql-func" id="func-find-7">findAndLockFirstAvailableWindow</div>
                 <div class="plsql-func" id="func-claim-7">claimSlot</div>
             </div>
             <div class="idem-paths">
                 <div class="idem-path" id="idem-first-call">
                     <h4><span style="color: var(--warning);">First Call</span> &mdash; event_id = "pay-456"</h4>
-                    <div class="idem-step" id="idem-s1">SELECT slot_id, scheduled_time, window_start<br>FROM rate_limit_event_slot<br>WHERE event_id = 'pay-456'</div>
+                    <div class="idem-step" id="idem-s1">SELECT WNDW_SLOT_ID, COMPUTED_SCHED_TS, WNDW_STRT_TS<br>FROM RL_EVENT_SLOT_DTL<br>WHERE EVENT_ID = 'pay-456'</div>
                     <div class="idem-step" id="idem-s2" style="border-left-color: var(--error);">
                         NO_DATA_FOUND
                         <span style="display: block; color: var(--error);">&#10007; Not in DB yet</span>
@@ -816,14 +816,14 @@
                 </div>
                 <div class="idem-path" id="idem-second-call">
                     <h4><span style="color: var(--success);">Second Call</span> &mdash; same event_id = "pay-456"</h4>
-                    <div class="idem-step" id="idem-s4">SELECT slot_id, scheduled_time, window_start<br>FROM rate_limit_event_slot<br>WHERE event_id = 'pay-456'</div>
+                    <div class="idem-step" id="idem-s4">SELECT WNDW_SLOT_ID, COMPUTED_SCHED_TS, WNDW_STRT_TS<br>FROM RL_EVENT_SLOT_DTL<br>WHERE EVENT_ID = 'pay-456'</div>
                     <div class="idem-step" id="idem-s5" style="border-left-color: var(--success);">
                         ROW FOUND!
                         <span style="display: block; color: var(--success);">&#10003; scheduledTime = 12:00:06.371</span>
                     </div>
                     <div class="idem-step" id="idem-s6" style="border-left-color: var(--success);">
                         Return immediately
-                        <span class="status-badge" style="background: rgba(46,204,113,0.15); color: var(--success);">STATUS_EXISTING = 0</span>
+                        <span class="status-badge" style="background: rgba(46,204,113,0.15); color: var(--success);">return existing AssignedSlot</span>
                     </div>
                 </div>
             </div>
@@ -843,21 +843,21 @@
         <div class="skip-container">
             <div class="jdbc-banner">Single Transaction &mdash; all phases in one atomic unit</div>
             <div class="plsql-bar" id="plsql-bar-8">
-                <div class="plsql-func done">checkExistingSlot</div>
+                <div class="plsql-func done">queryAssignedSlot</div>
                 <div class="plsql-func active" id="func-first-8">tryLockFirstWindow</div>
-                <div class="plsql-func" id="func-find-8">findAndLockFirstAvailable</div>
+                <div class="plsql-func" id="func-find-8">findAndLockFirstAvailableWindow</div>
                 <div class="plsql-func" id="func-claim-8">claimSlot</div>
             </div>
             <div class="skip-sql" id="skip-sql-8">
-                <span style="color: #c792ea;">INSERT INTO</span> window_counter(window_start, slot_count) <span style="color: #c792ea;">VALUES</span>(alignedStart, 0) <span style="color: var(--text-muted);">&mdash; catch DUP</span><br>
-                <span style="color: #c792ea;">SELECT</span> slot_count <span style="color: #c792ea;">FROM</span> window_counter
-                <span style="color: #c792ea;">WHERE</span> window_start = alignedStart
+                <span style="color: #c792ea;">INSERT INTO</span> RL_WNDW_CT(WNDW_STRT_TS, SLOT_CT) <span style="color: #c792ea;">VALUES</span>(alignedStart, 0) <span style="color: var(--text-muted);">&mdash; catch DUP</span><br>
+                <span style="color: #c792ea;">SELECT</span> SLOT_CT <span style="color: #c792ea;">FROM</span> RL_WNDW_CT
+                <span style="color: #c792ea;">WHERE</span> WNDW_STRT_TS = alignedStart
                 <span style="color: var(--warning); font-weight: 600;">FOR UPDATE SKIP LOCKED</span>
             </div>
             <div class="skip-paths" id="skip-paths-8">
                 <div class="skip-path" id="skip-case-1">
                     <h4 style="color: var(--success);">ensureWindowExists(alignedStart)</h4>
-                    <div class="skip-step" id="skip-s1a">INSERT window_counter (catch DUP_VAL_ON_INDEX)<br>Guarantees the first window row exists</div>
+                    <div class="skip-step" id="skip-s1a">INSERT RL_WNDW_CT (catch DUP_VAL_ON_INDEX)<br>Guarantees the first window row exists</div>
                     <div class="skip-step" id="skip-s1b" style="border-left-color: var(--success);">
                         &#10003; First thread inserts, others catch DUP<br>
                         <span style="color: var(--success);">No thundering herd on initial window</span>
@@ -865,7 +865,7 @@
                 </div>
                 <div class="skip-path" id="skip-case-2">
                     <h4 style="color: var(--warning);">tryLockFirstWindow()</h4>
-                    <div class="skip-step" id="skip-s2a">SELECT slot_count FOR UPDATE SKIP LOCKED<br>Lock the first window if not contended</div>
+                    <div class="skip-step" id="skip-s2a">SELECT SLOT_CT FOR UPDATE SKIP LOCKED<br>Lock the first window if not contended</div>
                     <div class="skip-step" id="skip-s2b" style="border-left-color: var(--warning);">
                         Check: count &lt; maxFirstWindow?<br>
                         <span style="color: var(--warning);">maxFirstWindow = floor(maxPerWindow &times; remainingMs / windowSizeMs)</span>
@@ -880,7 +880,7 @@
                     <div class="skip-step" id="skip-s3a">SKIP LOCKED &rarr; no row returned (contended)<br>OR count &ge; maxFirstWindow (full)</div>
                     <div class="skip-step" id="skip-s3b" style="border-left-color: var(--primary);">
                         Fall through to Phase 2<br>
-                        <span style="color: var(--primary);">findAndLockFirstAvailable()</span>
+                        <span style="color: var(--primary);">findAndLockFirstAvailableWindow()</span>
                     </div>
                 </div>
             </div>
@@ -903,9 +903,9 @@
         <div class="walk-container">
             <div class="jdbc-banner">Single Transaction &mdash; all phases in one atomic unit</div>
             <div class="plsql-bar" id="plsql-bar-9">
-                <div class="plsql-func done">checkExistingSlot</div>
+                <div class="plsql-func done">queryAssignedSlot</div>
                 <div class="plsql-func done">tryLockFirstWindow</div>
-                <div class="plsql-func active" id="func-find-9">findAndLockFirstAvailable</div>
+                <div class="plsql-func active" id="func-find-9">findAndLockFirstAvailableWindow</div>
                 <div class="plsql-func" id="func-claim-9">claimSlot</div>
             </div>
             <div class="thread-legend">
@@ -925,7 +925,7 @@
                 <div class="walk-window" id="ww-3"><div class="win-time">12:00:12</div><div class="win-lock" id="lock-3">&#128274;</div><div class="win-status" id="status-3"></div></div>
             </div>
             <div class="sql-caption" id="sql-caption-9">
-                <span style="color: #c792ea;">SELECT</span> window_start <span style="color: #c792ea;">FROM</span> window_counter <span style="color: #c792ea;">WHERE</span> window_start = (<span style="color: #c792ea;">SELECT</span> window_start <span style="color: #c792ea;">WHERE</span> slot_count &lt; ? <span style="color: #c792ea;">ORDER BY</span> window_start <span style="color: #c792ea;">FETCH FIRST 1 ROW ONLY</span>) <span style="color: var(--warning); font-weight: 600;">FOR UPDATE SKIP LOCKED</span>
+                <span style="color: #c792ea;">SELECT</span> WNDW_STRT_TS <span style="color: #c792ea;">FROM</span> RL_WNDW_CT <span style="color: #c792ea;">WHERE</span> WNDW_STRT_TS = (<span style="color: #c792ea;">SELECT</span> WNDW_STRT_TS <span style="color: #c792ea;">WHERE</span> SLOT_CT &lt; ? <span style="color: #c792ea;">ORDER BY</span> WNDW_STRT_TS <span style="color: #c792ea;">FETCH FIRST 1 ROW ONLY</span>) <span style="color: var(--warning); font-weight: 600;">FOR UPDATE SKIP LOCKED</span>
             </div>
             <div class="nowait-label" id="nowait-label-9">SKIP LOCKED &mdash; skip contended rows atomically!</div>
         </div>
@@ -940,13 +940,13 @@
     <!-- ===== SCENE 10: CLAIM SLOT ===== -->
     <section class="scene" id="scene-10">
         <div class="scene-title">Step 3: Single Transaction</div>
-        <div class="scene-subtitle">Phase 3 &mdash; Claim Slot &mdash; Insert with jitter, increment counter</div>
+        <div class="scene-subtitle">claimSlot() &mdash; insertEventSlot + incrementSlotCount</div>
         <div class="claim-container">
             <div class="jdbc-banner">Single Transaction &mdash; all phases in one atomic unit</div>
             <div class="plsql-bar" id="plsql-bar-10">
-                <div class="plsql-func done">checkExistingSlot</div>
+                <div class="plsql-func done">queryAssignedSlot</div>
                 <div class="plsql-func done">tryLockFirstWindow</div>
-                <div class="plsql-func done">findAndLockFirstAvailable</div>
+                <div class="plsql-func done">findAndLockFirstAvailableWindow</div>
                 <div class="plsql-func active" id="func-claim-10">claimSlot</div>
             </div>
             <!-- App Server note (outside jitter box) -->
@@ -986,7 +986,7 @@
             <!-- Three INSERT cards -->
             <div class="insert-card" style="grid-template-columns: 1fr 1fr 1fr; gap: 8px; margin-top: 4px;" id="insert-row-10">
                 <div class="insert-panel" id="insert-t1">
-                    <h4 style="color: #4a9eff;">INSERT T1 &rarr; event_slot</h4>
+                    <h4 style="color: #4a9eff;">INSERT T1 &rarr; RL_EVENT_SLOT_DTL</h4>
                     <div class="row-data">
                         <span class="field-name">event_id:</span> <span class="field-val">"pay-456"</span><br>
                         <span class="field-name">window:</span> <span class="field-val">12:00:04</span><br>
@@ -994,7 +994,7 @@
                     </div>
                 </div>
                 <div class="insert-panel" id="insert-t2">
-                    <h4 style="color: #f39c12;">INSERT T2 &rarr; event_slot</h4>
+                    <h4 style="color: #f39c12;">INSERT T2 &rarr; RL_EVENT_SLOT_DTL</h4>
                     <div class="row-data">
                         <span class="field-name">event_id:</span> <span class="field-val">"pay-789"</span><br>
                         <span class="field-name">window:</span> <span class="field-val">12:00:08</span><br>
@@ -1002,7 +1002,7 @@
                     </div>
                 </div>
                 <div class="insert-panel" id="insert-t3">
-                    <h4 style="color: #2ecc71;">INSERT T3 &rarr; event_slot</h4>
+                    <h4 style="color: #2ecc71;">INSERT T3 &rarr; RL_EVENT_SLOT_DTL</h4>
                     <div class="row-data">
                         <span class="field-name">event_id:</span> <span class="field-val">"pay-012"</span><br>
                         <span class="field-name">window:</span> <span class="field-val">12:00:12</span><br>
@@ -1041,17 +1041,17 @@
         <div class="results-container">
             <div class="result-paths">
                 <div class="result-card result-new-card" id="result-new">
-                    <h4 style="color: var(--success);">STATUS_NEW = 1</h4>
+                    <h4 style="color: var(--success);">New AssignedSlot</h4>
                     <div class="http-badge" style="background: rgba(46,204,113,0.15); color: var(--success);">200 OK</div>
                     <div class="result-desc">Slot freshly assigned.<br>Return AssignedSlot with<br>scheduledTime and delay.</div>
                 </div>
                 <div class="result-card result-existing-card" id="result-existing">
-                    <h4 style="color: var(--primary);">STATUS_EXISTING = 0</h4>
+                    <h4 style="color: var(--primary);">Idempotent Hit</h4>
                     <div class="http-badge" style="background: rgba(74,158,255,0.15); color: var(--primary);">200 OK</div>
                     <div class="result-desc">Idempotent hit.<br>Same event_id returns<br>same slot instantly.</div>
                 </div>
                 <div class="result-card result-exhausted-card" id="result-exhausted">
-                    <h4 style="color: var(--error);">STATUS_EXHAUSTED = -1</h4>
+                    <h4 style="color: var(--error);">SlotAssignmentException</h4>
                     <div class="http-badge" style="background: rgba(231,76,60,0.15); color: var(--error);">503</div>
                     <div class="result-desc">All windows exhausted<br>within search limit.<br>Throw exception.</div>
                 </div>
@@ -1096,7 +1096,7 @@
 
     // ===== DB STATE (shared across scenes 5, 7-10) =====
     const dbState = {
-        windowCounter: [],  // [{windowStart, slotCount, status, cssClass}]
+        windowCounter: [],  // [{windowStart, slotCount, cssClass}]
         eventSlot: [],      // [{eventId, windowStart, scheduledTime, cssClass}]
         trackWindowEnd: [], // [{requestedTime, windowEnd, cssClass}]
         label: '',
@@ -1114,10 +1114,9 @@
         if (dbState.windowCounter.length === 0) {
             wcRows = '<div class="empty-label">(no rows)</div>';
         } else {
-            wcRows = '<table><tr><th>window_start</th><th>slot_count</th><th>status</th></tr>';
+            wcRows = '<table><tr><th>WNDW_STRT_TS</th><th>SLOT_CT</th></tr>';
             dbState.windowCounter.forEach(r => {
-                const statusColor = r.status === 'CLOSED' ? 'var(--error)' : r.status === 'BULK' ? 'var(--text-muted)' : 'var(--success)';
-                wcRows += `<tr class="${r.cssClass || ''}"><td>${r.windowStart}</td><td>${r.slotCount}</td><td style="color:${statusColor}">${r.status || 'OPEN'}</td></tr>`;
+                wcRows += `<tr class="${r.cssClass || ''}"><td>${r.windowStart}</td><td>${r.slotCount}</td></tr>`;
             });
             wcRows += '</table>';
         }
@@ -1126,7 +1125,7 @@
         if (dbState.eventSlot.length === 0) {
             esRows = '<div class="empty-label">(no rows)</div>';
         } else {
-            esRows = '<table><tr><th>event_id</th><th>window_start</th><th>scheduled_time</th></tr>';
+            esRows = '<table><tr><th>EVENT_ID</th><th>WNDW_STRT_TS</th><th>COMPUTED_SCHED_TS</th></tr>';
             dbState.eventSlot.forEach(r => {
                 esRows += `<tr class="${r.cssClass || ''}"><td>${r.eventId}</td><td>${r.windowStart}</td><td>${r.scheduledTime}</td></tr>`;
             });
@@ -1137,7 +1136,7 @@
         if (dbState.trackWindowEnd.length === 0) {
             tweRows = '<div class="empty-label">(no rows)</div>';
         } else {
-            tweRows = '<table><tr><th>requested_time</th><th>window_end</th></tr>';
+            tweRows = '<table><tr><th>REQ_TS</th><th>WNDW_END_TS</th></tr>';
             dbState.trackWindowEnd.forEach(r => {
                 tweRows += `<tr class="${r.cssClass || ''}"><td>${r.requestedTime}</td><td>${r.windowEnd}</td></tr>`;
             });
@@ -1153,18 +1152,18 @@
         panel.innerHTML = `
             ${labelHtml}
             <div class="db-mini-table">
-                <div class="table-title">rate_limit_window_counter</div>
+                <div class="table-title">RL_WNDW_CT</div>
                 ${wcRows}
                 ${sqlHintHtml}
                 ${wcBulkNoteHtml}
             </div>
             <div class="db-mini-table">
-                <div class="table-title">track_window_end</div>
+                <div class="table-title">RL_WNDW_FRONTIER_TRK</div>
                 ${tweRows}
                 ${tweSqlHintHtml}
             </div>
             <div class="db-mini-table">
-                <div class="table-title">rate_limit_event_slot</div>
+                <div class="table-title">RL_EVENT_SLOT_DTL</div>
                 ${esRows}
                 ${esSqlHintHtml}
             </div>
@@ -1477,32 +1476,32 @@
                 resetDbState();
 
                 // Step 0: JDBC banner + functions bar
-                dbState.label = 'Transaction begins \u2014 checkExistingSlot()';
+                dbState.label = 'Transaction begins \u2014 queryAssignedSlot()';
 
                 if (step >= 1) {
                     // First call: SELECT, NO_DATA_FOUND
                     fc.classList.add('visible');
                     ['idem-s1','idem-s2','idem-s3'].forEach(id => document.getElementById(id).classList.add('visible'));
-                    dbState.label = 'SELECT from event_slot WHERE event_id = \'pay-456\'';
-                    dbState.esSqlHint = 'SELECT ... WHERE event_id = \'pay-456\' \u2192 NO_DATA_FOUND';
+                    dbState.label = 'SELECT from RL_EVENT_SLOT_DTL WHERE EVENT_ID = \'pay-456\'';
+                    dbState.esSqlHint = 'SELECT ... WHERE EVENT_ID = \'pay-456\' \u2192 NO_DATA_FOUND';
                 }
                 if (step >= 2) {
                     // Second call scenario: row found (pre-existing from earlier assignment)
                     sc.classList.add('visible');
                     ['idem-s4','idem-s5'].forEach(id => document.getElementById(id).classList.add('visible'));
                     dbState.windowCounter = [
-                        { windowStart: '12:00:04', slotCount: 1, status: 'OPEN', cssClass: '' }
+                        { windowStart: '12:00:04', slotCount: 1, cssClass: '' }
                     ];
                     dbState.eventSlot = [
                         { eventId: 'pay-456', windowStart: '12:00:04', scheduledTime: '12:00:06.371', cssClass: 'row-highlight' }
                     ];
-                    dbState.label = 'Second call: event_id found! Return existing slot.';
-                    dbState.esSqlHint = 'SELECT ... WHERE event_id = \'pay-456\' \u2192 ROW FOUND';
+                    dbState.label = 'Second call: EVENT_ID found! Return existing slot.';
+                    dbState.esSqlHint = 'SELECT ... WHERE EVENT_ID = \'pay-456\' \u2192 ROW FOUND';
                 }
                 if (step >= 3) {
                     document.getElementById('idem-s6').classList.add('visible');
                     dbState.eventSlot[0].cssClass = 'row-insert';
-                    dbState.label = 'STATUS_EXISTING = 0 \u2014 same slot returned to caller instantly';
+                    dbState.label = 'Idempotent hit \u2014 return existing AssignedSlot instantly (no DB writes)';
                     dbState.esSqlHint = '';
                 }
                 renderDbTables(7);
@@ -1537,7 +1536,7 @@
 
                 // Step 0: Show SQL + initial state
                 dbState.label = 'Phase 1: ensureWindowExists(alignedStart) + tryLockFirstWindow()';
-                dbState.sqlHint = 'INSERT window_counter ... ON DUP catch; SELECT slot_count FOR UPDATE SKIP LOCKED';
+                dbState.sqlHint = 'INSERT RL_WNDW_CT ... ON DUP catch; SELECT SLOT_CT FOR UPDATE SKIP LOCKED';
 
                 if (step >= 0) {
                     sql.classList.add('visible');
@@ -1548,10 +1547,10 @@
                     document.getElementById('skip-case-1').classList.add('visible');
                     ['skip-s1a','skip-s1b'].forEach(id => document.getElementById(id).classList.add('visible'));
                     dbState.windowCounter = [
-                        { windowStart: '12:00:00', slotCount: 0, status: 'OPEN', cssClass: 'row-insert' }
+                        { windowStart: '12:00:00', slotCount: 0, cssClass: 'row-insert' }
                     ];
-                    dbState.label = 'ensureWindowExists: INSERT window_counter for 12:00:00 (catch DUP if exists)';
-                    dbState.sqlHint = 'INSERT INTO window_counter(window_start, slot_count) VALUES(12:00:00, 0)';
+                    dbState.label = 'ensureWindowExists: INSERT RL_WNDW_CT for 12:00:00 (catch DUP if exists)';
+                    dbState.sqlHint = 'INSERT INTO RL_WNDW_CT(WNDW_STRT_TS, SLOT_CT) VALUES(12:00:00, 0)';
                 }
                 if (step >= 2) {
                     // tryLockFirstWindow
@@ -1559,10 +1558,10 @@
                     document.getElementById('skip-case-2').classList.add('visible');
                     ['skip-s2a','skip-s2b','skip-s2c'].forEach(id => document.getElementById(id).classList.add('visible'));
                     dbState.windowCounter = [
-                        { windowStart: '12:00:00', slotCount: 42, status: 'OPEN', cssClass: 'row-locked' }
+                        { windowStart: '12:00:00', slotCount: 42, cssClass: 'row-locked' }
                     ];
-                    dbState.label = 'tryLockFirstWindow: SELECT slot_count FOR UPDATE SKIP LOCKED. count(42) < maxFirstWindow(62) \u2192 has capacity!';
-                    dbState.sqlHint = 'SELECT slot_count FROM window_counter WHERE window_start = 12:00:00 FOR UPDATE SKIP LOCKED';
+                    dbState.label = 'tryLockFirstWindow: SELECT SLOT_CT FOR UPDATE SKIP LOCKED. count(42) < maxFirstWindow(62) \u2192 has capacity!';
+                    dbState.sqlHint = 'SELECT SLOT_CT FROM RL_WNDW_CT WHERE WNDW_STRT_TS = 12:00:00 FOR UPDATE SKIP LOCKED';
                 }
                 if (step >= 3) {
                     // First window full or locked fallthrough
@@ -1570,19 +1569,19 @@
                     document.getElementById('skip-case-3').classList.add('visible');
                     ['skip-s3a','skip-s3b'].forEach(id => document.getElementById(id).classList.add('visible'));
                     dbState.windowCounter = [
-                        { windowStart: '12:00:00', slotCount: 62, status: 'OPEN', cssClass: 'row-full' }
+                        { windowStart: '12:00:00', slotCount: 62, cssClass: 'row-full' }
                     ];
                     dbState.label = 'First window full (count \u2265 maxFirstWindow) or SKIP LOCKED returned no row \u2192 fall through to Phase 2.';
-                    dbState.sqlHint = 'count(62) \u2265 maxFirstWindow(62) \u2192 full; proceed to findAndLockFirstAvailable()';
+                    dbState.sqlHint = 'count(62) \u2265 maxFirstWindow(62) \u2192 full; proceed to findAndLockFirstAvailableWindow()';
                 }
                 if (step >= 4) {
                     // Summary result
                     result.classList.add('visible');
                     dbState.windowCounter = [
-                        { windowStart: '12:00:00', slotCount: 42, status: 'OPEN', cssClass: 'row-highlight' }
+                        { windowStart: '12:00:00', slotCount: 42, cssClass: 'row-highlight' }
                     ];
                     dbState.label = 'In our example: first window has capacity \u2192 claimSlot with constrained jitter [elapsedMs, windowSizeMs).';
-                    dbState.sqlHint = 'If capacity: claimSlot(); otherwise: findAndLockFirstAvailable()';
+                    dbState.sqlHint = 'If capacity: claimSlot(); otherwise: findAndLockFirstAvailableWindow()';
                 }
                 renderDbTables(8);
             }
@@ -1644,7 +1643,7 @@
 
                 resetDbState();
                 dbState.windowCounter = [
-                    { windowStart: '12:00:00', slotCount: 100, status: 'CLOSED', cssClass: 'row-full' }
+                    { windowStart: '12:00:00', slotCount: 100, cssClass: 'row-full' }
                 ];
                 dbState.label = 'Phase 2 begins: fetchWindowEnd(alignedStart) \u2192 NULL (first request). Calls initWindowEnd().';
 
@@ -1660,30 +1659,30 @@
                     // Batch provisioning: ensureChunkProvisioned() + INSERT track_window_end
                     resetThreads();
                     dbState.windowCounter = [
-                        { windowStart: '12:00:00', slotCount: 100, status: 'CLOSED', cssClass: 'row-full' },
-                        { windowStart: '12:00:04', slotCount: 0, status: 'OPEN', cssClass: 'row-insert' },
-                        { windowStart: '12:00:08', slotCount: 0, status: 'OPEN', cssClass: 'row-insert' },
-                        { windowStart: '12:00:12', slotCount: 0, status: 'OPEN', cssClass: 'row-insert' },
-                        { windowStart: '12:00:16', slotCount: 0, status: 'OPEN', cssClass: 'row-insert' },
-                        { windowStart: '\u22EE', slotCount: '\u22EE', status: 'BULK', cssClass: 'row-bulk' },
-                        { windowStart: '12:06:40', slotCount: 0, status: 'OPEN', cssClass: 'row-insert' }
+                        { windowStart: '12:00:00', slotCount: 100, cssClass: 'row-full' },
+                        { windowStart: '12:00:04', slotCount: 0, cssClass: 'row-insert' },
+                        { windowStart: '12:00:08', slotCount: 0, cssClass: 'row-insert' },
+                        { windowStart: '12:00:12', slotCount: 0, cssClass: 'row-insert' },
+                        { windowStart: '12:00:16', slotCount: 0, cssClass: 'row-insert' },
+                        { windowStart: '\u22EE', slotCount: '\u22EE', cssClass: 'row-bulk' },
+                        { windowStart: '12:06:40', slotCount: 0, cssClass: 'row-insert' }
                     ];
                     dbState.trackWindowEnd = [
                         { requestedTime: '12:00:00', windowEnd: '12:06:44', cssClass: 'row-insert' }
                     ];
-                    dbState.label = 'initWindowEnd() \u2192 ensureChunkProvisioned(): batchInsertWindows(100 rows) + INSERT track_window_end frontier';
-                    dbState.sqlHint = 'batchInsert INTO window_counter (window_start, slot_count) VALUES (12:00:04,0),(12:00:08,0),...,(12:06:40,0)';
-                    dbState.tweSqlHint = 'INSERT INTO track_window_end (aligned_start=12:00:00, window_end=12:06:44)';
+                    dbState.label = 'initWindowEnd() \u2192 ensureChunkProvisioned(): batchInsertWindows(100 rows) + INSERT RL_WNDW_FRONTIER_TRK frontier';
+                    dbState.sqlHint = 'batchInsert INTO RL_WNDW_CT (WNDW_STRT_TS, SLOT_CT) VALUES (12:00:04,0),(12:00:08,0),...,(12:06:40,0)';
+                    dbState.tweSqlHint = 'INSERT INTO RL_WNDW_FRONTIER_TRK (aligned_start=12:00:00, WNDW_END_TS=12:06:44)';
                     dbState.wcBulkNote = '100 rows batch-inserted (12:00:04 \u2192 12:06:40, every 4s)';
                 }
                 if (step >= 2) {
                     // All threads scan provisioned range with findAndLockFirstAvailableWindow
                     // Note: code searches from alignedStart+windowSize (12:00:04), not from 12:00:00
                     dbState.windowCounter = [
-                        { windowStart: '12:00:00', slotCount: 100, status: 'CLOSED', cssClass: 'row-full' },
-                        { windowStart: '12:00:04', slotCount: 0, status: 'OPEN', cssClass: '' },
-                        { windowStart: '12:00:08', slotCount: 0, status: 'OPEN', cssClass: '' },
-                        { windowStart: '12:00:12', slotCount: 0, status: 'OPEN', cssClass: '' }
+                        { windowStart: '12:00:00', slotCount: 100, cssClass: 'row-full' },
+                        { windowStart: '12:00:04', slotCount: 0, cssClass: '' },
+                        { windowStart: '12:00:08', slotCount: 0, cssClass: '' },
+                        { windowStart: '12:00:12', slotCount: 0, cssClass: '' }
                     ];
                     dbState.trackWindowEnd = [{ requestedTime: '12:00:00', windowEnd: '12:06:44', cssClass: '' }];
                     dbState.tweSqlHint = '';
@@ -1720,10 +1719,10 @@
                     document.getElementById('status-1').style.color = '#4a9eff';
                     document.getElementById('status-1').classList.add('visible');
                     dbState.windowCounter = [
-                        { windowStart: '12:00:00', slotCount: 100, status: 'CLOSED', cssClass: 'row-full' },
-                        { windowStart: '12:00:04', slotCount: 0, status: 'OPEN', cssClass: 'row-locked' },
-                        { windowStart: '12:00:08', slotCount: 0, status: 'OPEN', cssClass: '' },
-                        { windowStart: '12:00:12', slotCount: 0, status: 'OPEN', cssClass: '' }
+                        { windowStart: '12:00:00', slotCount: 100, cssClass: 'row-full' },
+                        { windowStart: '12:00:04', slotCount: 0, cssClass: 'row-locked' },
+                        { windowStart: '12:00:08', slotCount: 0, cssClass: '' },
+                        { windowStart: '12:00:12', slotCount: 0, cssClass: '' }
                     ];
                     dbState.wcBulkNote = '(showing 4 of 100 provisioned rows)';
                     dbState.label = 'nestedFindAndLock: T1 locks 12:00:04. T2/T3 hit SKIP LOCKED \u2192 fallback findEarliestCandidateWindow \u2192 advance past it.';
@@ -1741,10 +1740,10 @@
                     document.getElementById('status-2').style.color = '#f39c12';
                     document.getElementById('status-2').classList.add('visible');
                     dbState.windowCounter = [
-                        { windowStart: '12:00:00', slotCount: 100, status: 'CLOSED', cssClass: 'row-full' },
-                        { windowStart: '12:00:04', slotCount: 0, status: 'OPEN', cssClass: 'row-locked' },
-                        { windowStart: '12:00:08', slotCount: 0, status: 'OPEN', cssClass: 'row-locked' },
-                        { windowStart: '12:00:12', slotCount: 0, status: 'OPEN', cssClass: '' }
+                        { windowStart: '12:00:00', slotCount: 100, cssClass: 'row-full' },
+                        { windowStart: '12:00:04', slotCount: 0, cssClass: 'row-locked' },
+                        { windowStart: '12:00:08', slotCount: 0, cssClass: 'row-locked' },
+                        { windowStart: '12:00:12', slotCount: 0, cssClass: '' }
                     ];
                     dbState.wcBulkNote = '(showing 4 of 100 provisioned rows)';
                     dbState.label = 'T2 locks 12:00:08. T3 hits SKIP LOCKED again \u2192 advance searchFrom to 12:00:12.';
@@ -1762,10 +1761,10 @@
                     document.getElementById('status-3').classList.add('visible');
                     document.getElementById('nowait-label-9').classList.add('visible');
                     dbState.windowCounter = [
-                        { windowStart: '12:00:00', slotCount: 100, status: 'CLOSED', cssClass: 'row-full' },
-                        { windowStart: '12:00:04', slotCount: 0, status: 'OPEN', cssClass: 'row-pulse' },
-                        { windowStart: '12:00:08', slotCount: 0, status: 'OPEN', cssClass: 'row-pulse' },
-                        { windowStart: '12:00:12', slotCount: 0, status: 'OPEN', cssClass: 'row-pulse' }
+                        { windowStart: '12:00:00', slotCount: 100, cssClass: 'row-full' },
+                        { windowStart: '12:00:04', slotCount: 0, cssClass: 'row-pulse' },
+                        { windowStart: '12:00:08', slotCount: 0, cssClass: 'row-pulse' },
+                        { windowStart: '12:00:12', slotCount: 0, cssClass: 'row-pulse' }
                     ];
                     dbState.wcBulkNote = '(showing 4 of 100 provisioned rows)';
                     dbState.label = 'All threads locked their own windows! T1\u219212:00:04, T2\u219212:00:08, T3\u219212:00:12. Each proceeds to claimSlot().';
@@ -1833,10 +1832,10 @@
                 // Carry over from scenes 8/9
                 resetDbState();
                 dbState.windowCounter = [
-                    { windowStart: '12:00:00', slotCount: 100, status: 'CLOSED', cssClass: 'row-full' },
-                    { windowStart: '12:00:04', slotCount: 0, status: 'OPEN', cssClass: 'row-locked' },
-                    { windowStart: '12:00:08', slotCount: 0, status: 'OPEN', cssClass: 'row-locked' },
-                    { windowStart: '12:00:12', slotCount: 0, status: 'OPEN', cssClass: 'row-locked' }
+                    { windowStart: '12:00:00', slotCount: 100, cssClass: 'row-full' },
+                    { windowStart: '12:00:04', slotCount: 0, cssClass: 'row-locked' },
+                    { windowStart: '12:00:08', slotCount: 0, cssClass: 'row-locked' },
+                    { windowStart: '12:00:12', slotCount: 0, cssClass: 'row-locked' }
                 ];
                 dbState.trackWindowEnd = [
                     { requestedTime: '12:00:00', windowEnd: '12:06:44', cssClass: '' }
@@ -1870,7 +1869,7 @@
                     document.getElementById('sched-row-10').style.opacity = '1';
                     schedIds.forEach(id => document.getElementById(id).classList.add('visible'));
                     dbState.label = 'All 3 jitters computed: T1=2371ms, T2=1142ms, T3=2817ms. scheduledTime = windowStart + jitter.';
-                    dbState.sqlHint = 'scheduled_time := window_start + jitter/1000';
+                    dbState.sqlHint = 'COMPUTED_SCHED_TS := WNDW_STRT_TS + jitter/1000';
                 }
                 if (step >= 2) {
                     // Show all 3 INSERT cards
@@ -1881,9 +1880,9 @@
                         { eventId: 'pay-789', windowStart: '12:00:08', scheduledTime: '12:00:09.142', cssClass: 'row-insert' },
                         { eventId: 'pay-012', windowStart: '12:00:12', scheduledTime: '12:00:14.817', cssClass: 'row-insert' }
                     ];
-                    dbState.label = 'insertEventSlot(): All 3 threads INSERT into rate_limit_event_slot simultaneously (catch DUP for idempotency).';
+                    dbState.label = 'insertEventSlot(): All 3 threads INSERT into RL_EVENT_SLOT_DTL simultaneously (catch DUP for idempotency).';
                     dbState.sqlHint = '';
-                    dbState.esSqlHint = 'INSERT INTO event_slot (event_id, requested_time, window_start, scheduled_time, config_id) VALUES ...';
+                    dbState.esSqlHint = 'INSERT INTO RL_EVENT_SLOT_DTL (EVENT_ID, REQ_TS, WNDW_STRT_TS, COMPUTED_SCHED_TS, RL_WNDW_CONFIG_ID) VALUES ...';
                 }
                 if (step >= 3) {
                     // Show all 3 UPDATE counters flipping 0 -> 1
@@ -1898,10 +1897,10 @@
                         }, 200);
                     });
                     dbState.windowCounter = [
-                        { windowStart: '12:00:00', slotCount: 100, status: 'CLOSED', cssClass: 'row-full' },
-                        { windowStart: '12:00:04', slotCount: 1, status: 'OPEN', cssClass: 'row-update' },
-                        { windowStart: '12:00:08', slotCount: 1, status: 'OPEN', cssClass: 'row-update' },
-                        { windowStart: '12:00:12', slotCount: 1, status: 'OPEN', cssClass: 'row-update' }
+                        { windowStart: '12:00:00', slotCount: 100, cssClass: 'row-full' },
+                        { windowStart: '12:00:04', slotCount: 1, cssClass: 'row-update' },
+                        { windowStart: '12:00:08', slotCount: 1, cssClass: 'row-update' },
+                        { windowStart: '12:00:12', slotCount: 1, cssClass: 'row-update' }
                     ];
                     dbState.wcBulkNote = '(showing 4 of 100 provisioned rows)';
                     dbState.eventSlot = [
@@ -1910,7 +1909,7 @@
                         { eventId: 'pay-012', windowStart: '12:00:12', scheduledTime: '12:00:14.817', cssClass: '' }
                     ];
                     dbState.label = 'incrementSlotCount(): All 3 threads update their window counters. Each returns AssignedSlot(scheduledTime, delay).';
-                    dbState.sqlHint = 'UPDATE window_counter SET slot_count = slot_count + 1 WHERE window_start = ?';
+                    dbState.sqlHint = 'UPDATE RL_WNDW_CT SET SLOT_CT = SLOT_CT + 1 WHERE WNDW_STRT_TS = ?';
                     dbState.esSqlHint = '';
                 }
                 renderDbTables(10);
@@ -1941,7 +1940,7 @@
                     header: 'Response (200 OK)',
                     headerColor: 'var(--success)',
                     body: `{<br>&nbsp;&nbsp;<span class="field-name">"eventId":</span> <span class="field-val">"pay-456"</span>,<br>&nbsp;&nbsp;<span class="field-name">"scheduledTime":</span> <span class="field-val">"12:00:06.371Z"</span>,<br>&nbsp;&nbsp;<span class="field-name">"delayMs":</span> <span class="field-val">2371</span><br>}`,
-                    note: 'Slot assigned. Window counter updated, status set to CLOSED if full.',
+                    note: 'Slot assigned. insertEventSlot() + incrementSlotCount() executed.',
                     noteColor: 'var(--success)'
                 },
                 'existing': {

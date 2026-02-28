@@ -87,7 +87,7 @@ class SlotAssignmentServiceV3Sql @Inject constructor(
 
     private data class SlotAssignmentResult(
         val status: Int,
-        val slotId: Long,
+        val slotId: String,
         val scheduledTime: Instant,
         val windowStart: Instant,
         val windowsSearched: Int
@@ -109,7 +109,7 @@ class SlotAssignmentServiceV3Sql @Inject constructor(
                 cs.setString(1, eventId)
                 cs.setTimestamp(2, Timestamp.from(windowStart))
                 cs.setTimestamp(3, Timestamp.from(requestedTime))
-                cs.setLong(4, config.configId)
+                cs.setString(4, config.configId)
                 cs.setInt(5, config.maxPerWindow)
                 cs.setLong(6, config.windowSizeSecs)
                 cs.setInt(7, maxFirstWindow)
@@ -120,7 +120,7 @@ class SlotAssignmentServiceV3Sql @Inject constructor(
 
                 // Register OUT parameters (positions 12-16)
                 cs.registerOutParameter(12, Types.INTEGER)
-                cs.registerOutParameter(13, Types.BIGINT)
+                cs.registerOutParameter(13, Types.VARCHAR)
                 cs.registerOutParameter(14, Types.TIMESTAMP)
                 cs.registerOutParameter(15, Types.TIMESTAMP)
                 cs.registerOutParameter(16, Types.INTEGER)
@@ -129,7 +129,7 @@ class SlotAssignmentServiceV3Sql @Inject constructor(
 
                 SlotAssignmentResult(
                     status = cs.getInt(12),
-                    slotId = cs.getLong(13),
+                    slotId = cs.getString(13) ?: "",
                     scheduledTime = cs.getTimestamp(14)?.toInstant() ?: Instant.EPOCH,
                     windowStart = cs.getTimestamp(15)?.toInstant() ?: Instant.EPOCH,
                     windowsSearched = cs.getInt(16)

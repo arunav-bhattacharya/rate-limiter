@@ -3,7 +3,7 @@ DECLARE
     in_event_id           VARCHAR2(256) := ?;  /* 1  */
     in_window_start       TIMESTAMP     := ?;  /* 2  */
     in_requested_time     TIMESTAMP     := ?;  /* 3  */
-    in_config_id          NUMBER        := ?;  /* 4  */
+    in_config_id          VARCHAR2(50)  := ?;  /* 4  */
     in_max_per_window     NUMBER        := ?;  /* 5  */
     in_window_size_secs   NUMBER        := ?;  /* 6  */
     in_max_first_window   NUMBER        := ?;  /* 7  */
@@ -14,7 +14,7 @@ DECLARE
 
     -- Output result locals (marshalled to OUT bind vars at end)
     ou_status           NUMBER := -1;  -- default: EXHAUSTED
-    ou_slot_id          NUMBER;
+    ou_slot_id          VARCHAR2(50);
     ou_scheduled_time   TIMESTAMP;
     ou_window_start     TIMESTAMP;
     ou_windows_searched NUMBER := 0;
@@ -41,10 +41,10 @@ DECLARE
 
     FUNCTION check_existing_slot RETURN BOOLEAN IS
     BEGIN
-        SELECT  slot_id, scheduled_time, window_start
+        SELECT  WNDW_SLOT_ID, COMPUTED_SCHED_TS, WNDW_STRT_TS
         INTO    ou_slot_id, ou_scheduled_time, ou_window_start
-        FROM    rate_limit_event_slot
-        WHERE   event_id = in_event_id;
+        FROM    RL_EVENT_SLOT_DTL
+        WHERE   EVENT_ID = in_event_id;
         ou_status           := STATUS_EXISTING;
         ou_windows_searched := 0;
         RETURN TRUE;
@@ -56,21 +56,21 @@ DECLARE
     -- try_lock_window: Ensure counter row exists, then lock + read.
     -- Uses SKIP LOCKED: if the row is locked by another session,
     -- the SELECT silently returns no rows instead of raising an
-    -- exception. Returns slot_count on success, -1 if skipped.
+    -- exception. Returns SLOT_CT on success, -1 if skipped.
     ---------------------------------------------------------------
 
     FUNCTION try_lock_window(window_ts IN TIMESTAMP) RETURN NUMBER IS
         locked_count NUMBER;
     BEGIN
         BEGIN
-            INSERT INTO rate_limit_window_counter(window_start, slot_count)
-            VALUES (window_ts, 0);
+            INSERT INTO RL_WNDW_CT(WNDW_STRT_TS, SLOT_CT, CREAT_TS)
+            VALUES (window_ts, 0, SYSTIMESTAMP);
         EXCEPTION WHEN DUP_VAL_ON_INDEX THEN NULL;
         END;
 
-        SELECT slot_count INTO locked_count
-        FROM   rate_limit_window_counter
-        WHERE  window_start = window_ts
+        SELECT SLOT_CT INTO locked_count
+        FROM   RL_WNDW_CT
+        WHERE  WNDW_STRT_TS = window_ts
         FOR UPDATE SKIP LOCKED;
 
         RETURN locked_count;
@@ -92,21 +92,25 @@ DECLARE
     ) RETURN BOOLEAN IS
         jitter     INTERVAL DAY TO SECOND := NUMTODSINTERVAL(p_jitter_ms / 1000, 'SECOND');
         sched_time TIMESTAMP;
+        v_slot_id  VARCHAR2(50);
     BEGIN
         sched_time := window_ts + jitter;
+        v_slot_id  := SYS_GUID();
 
-        INSERT INTO rate_limit_event_slot(
-            event_id, requested_time, window_start,
-            scheduled_time, config_id, created_at
+        INSERT INTO RL_EVENT_SLOT_DTL(
+            WNDW_SLOT_ID, EVENT_ID, REQ_TS, WNDW_STRT_TS,
+            COMPUTED_SCHED_TS, RL_WNDW_CONFIG_ID, CREAT_TS
         ) VALUES (
-            in_event_id, in_requested_time, window_ts,
+            v_slot_id, in_event_id, in_requested_time, window_ts,
             sched_time, in_config_id, SYSTIMESTAMP
-        ) RETURNING slot_id, scheduled_time
-          INTO ou_slot_id, ou_scheduled_time;
+        );
 
-        UPDATE rate_limit_window_counter
-        SET slot_count = slot_count + 1
-        WHERE window_start = window_ts;
+        ou_slot_id          := v_slot_id;
+        ou_scheduled_time   := sched_time;
+
+        UPDATE RL_WNDW_CT
+        SET SLOT_CT = SLOT_CT + 1
+        WHERE WNDW_STRT_TS = window_ts;
 
         ou_window_start     := window_ts;
         ou_status           := STATUS_NEW;
@@ -115,10 +119,10 @@ DECLARE
 
     EXCEPTION
         WHEN DUP_VAL_ON_INDEX THEN
-            SELECT slot_id, scheduled_time, window_start
+            SELECT WNDW_SLOT_ID, COMPUTED_SCHED_TS, WNDW_STRT_TS
             INTO   ou_slot_id, ou_scheduled_time, ou_window_start
-            FROM   rate_limit_event_slot
-            WHERE  event_id = in_event_id;
+            FROM   RL_EVENT_SLOT_DTL
+            WHERE  EVENT_ID = in_event_id;
             ou_status           := STATUS_EXISTING;
             ou_windows_searched := windows_searched;
             RETURN TRUE;
@@ -139,9 +143,9 @@ DECLARE
     BEGIN
         -- 1. Check the immediately next window (most common case)
         BEGIN
-            SELECT slot_count INTO cnt
-            FROM   rate_limit_window_counter
-            WHERE  window_start = next_ts;
+            SELECT SLOT_CT INTO cnt
+            FROM   RL_WNDW_CT
+            WHERE  WNDW_STRT_TS = next_ts;
 
             -- Row exists: available if not full
             IF cnt < in_max_per_window THEN
@@ -154,19 +158,19 @@ DECLARE
         END;
 
         -- 2. Next window is full. Use index to find first non-full window
-        SELECT MIN(window_start) INTO open_ts
-        FROM   rate_limit_window_counter
-        WHERE  slot_count < in_max_per_window
-          AND  window_start > start_ts;
+        SELECT MIN(WNDW_STRT_TS) INTO open_ts
+        FROM   RL_WNDW_CT
+        WHERE  SLOT_CT < in_max_per_window
+          AND  WNDW_STRT_TS > start_ts;
 
         IF open_ts IS NOT NULL THEN
             RETURN open_ts;
         END IF;
 
         -- 3. All existing windows are full. Jump past the last counter row.
-        SELECT MAX(window_start) INTO max_ts
-        FROM   rate_limit_window_counter
-        WHERE  window_start > start_ts;
+        SELECT MAX(WNDW_STRT_TS) INTO max_ts
+        FROM   RL_WNDW_CT
+        WHERE  WNDW_STRT_TS > start_ts;
 
         IF max_ts IS NOT NULL THEN
             RETURN max_ts + window_size;
@@ -192,8 +196,6 @@ BEGIN
         END IF;
 
         -- Phase 2: Chunked adaptive search
-        -- Each chunk: skip to first available, walk within headroom range
-        -- Re-skip between chunks to avoid linear walk through full windows
         WHILE NOT slot_claimed AND chunk_num < in_max_search_chunks LOOP
             chunk_num := chunk_num + 1;
 
@@ -206,11 +208,6 @@ BEGIN
             search_limit := first_available + headroom;
             current_window := first_available;
 
-            -- Inner loop: Walk sequentially through windows within the headroom range.
-            -- For each window, attempt to lock and check if it has available capacity.
-            -- If a window has capacity, claim a slot with full jitter; otherwise,
-            -- advance to the next window. Continue until we find an available window,
-            -- exhaust the headroom range, or hit max_search_chunks limit.
             WHILE current_window <= search_limit AND NOT slot_claimed LOOP
                 windows_searched := windows_searched + 1;
 
@@ -238,4 +235,3 @@ BEGIN
     ? := ou_window_start;      /* 15 */
     ? := ou_windows_searched;  /* 16 */
 END;
-

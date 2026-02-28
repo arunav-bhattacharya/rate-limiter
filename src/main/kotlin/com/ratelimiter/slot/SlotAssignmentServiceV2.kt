@@ -105,7 +105,7 @@ class SlotAssignmentServiceV2 @Inject constructor(
     companion object {
         private val WINDOW_SIZE = Duration.ofSeconds(4)
         private const val MAX_SLOTS_PER_WINDOW = 10
-        private const val DEFAULT_CONFIG_ID = 0L
+        private const val DEFAULT_CONFIG_ID = "0"
         private val CONFIG_MAX_WINDOWS_IN_CHUNK = 1000L
         private val MAX_WINDOWS_IN_CHUNK =
             minOf(CONFIG_MAX_WINDOWS_IN_CHUNK, 100L) // enforce an upper bound to limit Oracle batch inserts

@@ -52,14 +52,6 @@ class ExposedDatabaseInitializer @Inject constructor(
                 RateLimitEventSlotTable,
                 WindowEndTrackerTable
             )
-
-            // Exposed creates sequences for autoIncrement columns but does NOT set
-            // DEFAULT on the column itself. Exposed DSL INSERTs reference the sequence
-            // explicitly, but raw SQL / PL/SQL INSERTs that omit the column get NULL
-            // instead of the next sequence value → ORA-01400.
-            // Adding DEFAULT makes the sequence kick in for any INSERT that omits the column.
-            exec("ALTER TABLE rate_limit_event_slot MODIFY slot_id DEFAULT rate_limit_event_slot_slot_id_seq.NEXTVAL")
-            exec("ALTER TABLE rate_limit_config MODIFY config_id DEFAULT rate_limit_config_config_id_seq.NEXTVAL")
         }
         logger.info("Exposed database schema initialized")
     }

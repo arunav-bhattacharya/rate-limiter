@@ -19,7 +19,7 @@ import java.time.Instant
 class WindowSlotCounterRepository {
 
     /**
-     * V2-style inclusive-range find+lock: WHERE window_start >= ? AND window_start <= ?
+     * V2-style inclusive-range find+lock: WHERE WNDW_STRT_TS >= ? AND WNDW_STRT_TS <= ?
      */
     fun Transaction.fetchFirstWindowHavingAvailableSlot(
         windowStart: Instant,
@@ -27,13 +27,13 @@ class WindowSlotCounterRepository {
         maxSlots: Int
     ): Instant? {
         val sql = """
-                    SELECT WINDOW_START
-                    FROM   rate_limit_window_counter
+                    SELECT WNDW_STRT_TS
+                    FROM   RL_WNDW_CT
                     WHERE
-                           WINDOW_START >= ?
-                    AND    WINDOW_START <= ?
-                    AND    SLOT_COUNT < ?
-                    ORDER BY WINDOW_START ASC
+                           WNDW_STRT_TS >= ?
+                    AND    WNDW_STRT_TS <= ?
+                    AND    SLOT_CT < ?
+                    ORDER BY WNDW_STRT_TS ASC
                     FOR UPDATE SKIP LOCKED
                 """.trimIndent()
 
@@ -47,7 +47,7 @@ class WindowSlotCounterRepository {
             StatementType.SELECT
         ) { rs ->
             if (rs.next()) {
-                rs.getTimestamp("WINDOW_START").toInstant()
+                rs.getTimestamp("WNDW_STRT_TS").toInstant()
             } else null
         }
     }
@@ -62,12 +62,12 @@ class WindowSlotCounterRepository {
         maxSlots: Int
     ): Instant? {
         val sql = """
-            SELECT WINDOW_START
-            FROM   rate_limit_window_counter
-            WHERE  WINDOW_START >= ?
-            AND    WINDOW_START < ?
-            AND    SLOT_COUNT < ?
-            ORDER BY WINDOW_START ASC
+            SELECT WNDW_STRT_TS
+            FROM   RL_WNDW_CT
+            WHERE  WNDW_STRT_TS >= ?
+            AND    WNDW_STRT_TS < ?
+            AND    SLOT_CT < ?
+            ORDER BY WNDW_STRT_TS ASC
             FETCH FIRST 1 ROW ONLY
         """.trimIndent()
 
@@ -80,7 +80,7 @@ class WindowSlotCounterRepository {
             ),
             StatementType.SELECT
         ) { rs ->
-            if (rs.next()) rs.getTimestamp("WINDOW_START").toInstant() else null
+            if (rs.next()) rs.getTimestamp("WNDW_STRT_TS").toInstant() else null
         }
     }
 
@@ -88,10 +88,6 @@ class WindowSlotCounterRepository {
      * Nested subquery find+lock: inner SELECT finds earliest candidate (no lock,
      * FETCH FIRST 1 ROW ONLY), outer SELECT locks exactly that row by PK
      * (FOR UPDATE SKIP LOCKED) and re-checks capacity under the lock.
-     *
-     * Returns the locked window's WINDOW_START, or null if no qualifying candidate
-     * exists, candidate was locked by another session (SKIP LOCKED), or capacity
-     * was lost between subquery and lock (race).
      */
     fun Transaction.nestedFindAndLock(
         from: Instant,
@@ -99,18 +95,18 @@ class WindowSlotCounterRepository {
         maxSlots: Int
     ): Instant? {
         val sql = """
-            SELECT WINDOW_START
-            FROM   rate_limit_window_counter
-            WHERE  WINDOW_START = (
-                SELECT WINDOW_START
-                FROM   rate_limit_window_counter
-                WHERE  WINDOW_START >= ?
-                AND    WINDOW_START < ?
-                AND    SLOT_COUNT < ?
-                ORDER BY WINDOW_START ASC
+            SELECT WNDW_STRT_TS
+            FROM   RL_WNDW_CT
+            WHERE  WNDW_STRT_TS = (
+                SELECT WNDW_STRT_TS
+                FROM   RL_WNDW_CT
+                WHERE  WNDW_STRT_TS >= ?
+                AND    WNDW_STRT_TS < ?
+                AND    SLOT_CT < ?
+                ORDER BY WNDW_STRT_TS ASC
                 FETCH FIRST 1 ROW ONLY
             )
-            AND    SLOT_COUNT < ?
+            AND    SLOT_CT < ?
             FOR UPDATE SKIP LOCKED
         """.trimIndent()
 
@@ -124,17 +120,13 @@ class WindowSlotCounterRepository {
             ),
             StatementType.SELECT
         ) { rs ->
-            if (rs.next()) rs.getTimestamp("WINDOW_START").toInstant() else null
+            if (rs.next()) rs.getTimestamp("WNDW_STRT_TS").toInstant() else null
         }
     }
 
     /**
      * V3-style exclusive-range find+lock: finds the earliest non-full, non-contended
      * window in [from, to) and acquires a row lock on it.
-     *
-     * Uses a nested subquery for single-SQL find+lock (1 round-trip on success).
-     * On null, a non-locking fallback distinguishes "no candidates" (O(1) exit)
-     * from "candidate was locked" (advance past it and retry).
      */
     fun Transaction.findAndLockFirstAvailableWindow(
         from: Instant,
@@ -146,23 +138,22 @@ class WindowSlotCounterRepository {
         while (searchFrom < to) {
             val result = nestedFindAndLock(searchFrom, to, maxSlots)
             if (result != null) return result
-            // null: either no candidates OR candidate was locked (SKIP LOCKED)
             val candidate = findEarliestCandidateWindow(searchFrom, to, maxSlots)
-                ?: return null  // truly no candidates → O(1) exit
-            searchFrom = candidate.plus(windowSize)  // was locked → advance past it
+                ?: return null
+            searchFrom = candidate.plus(windowSize)
         }
         return null
     }
 
     /**
-     * INSERT a window counter row with slot_count=0. Catches duplicate key silently —
-     * concurrent threads creating the same window are harmless no-ops.
+     * INSERT a window counter row with SLOT_CT=0. Catches duplicate key silently.
      */
     fun Transaction.ensureWindowExists(window: Instant) {
         try {
             WindowCounterTable.insert {
                 it[windowStart] = window
                 it[slotCount] = 0
+                it[createdAt] = Instant.now()
             }
         } catch (_: ExposedSQLException) {
             // Duplicate key — window already exists
@@ -171,16 +162,12 @@ class WindowSlotCounterRepository {
 
     /**
      * Attempt to lock the first window's counter row and check capacity.
-     * Returns:
-     *   true  — lock acquired, has capacity (slot_count < maxSlots)
-     *   false — lock acquired, full (slot_count >= maxSlots)
-     *   null  — row skipped by another session's lock (SKIP LOCKED)
      */
     fun Transaction.tryLockFirstWindow(window: Instant, maxSlots: Int): Boolean? {
         val sql = """
-            SELECT SLOT_COUNT
-            FROM   rate_limit_window_counter
-            WHERE  WINDOW_START = ?
+            SELECT SLOT_CT
+            FROM   RL_WNDW_CT
+            WHERE  WNDW_STRT_TS = ?
             FOR UPDATE SKIP LOCKED
         """.trimIndent()
 
@@ -189,13 +176,10 @@ class WindowSlotCounterRepository {
             listOf(Pair(JavaInstantColumnType(), window)),
             StatementType.SELECT
         ) { rs ->
-            if (rs.next()) rs.getInt("SLOT_COUNT") < maxSlots else null
+            if (rs.next()) rs.getInt("SLOT_CT") < maxSlots else null
         }
     }
 
-    /**
-     * Check if a window counter row exists for the given timestamp.
-     */
     fun Transaction.windowExists(window: Instant): Boolean {
         return WindowCounterTable
             .selectAll()
@@ -204,9 +188,11 @@ class WindowSlotCounterRepository {
     }
 
     fun Transaction.batchInsertWindows(windows: List<Instant>) {
+        val now = Instant.now()
         WindowCounterTable.batchInsert(windows, shouldReturnGeneratedValues = false) { window ->
             this[WindowCounterTable.windowStart] = window
             this[WindowCounterTable.slotCount] = 0
+            this[WindowCounterTable.createdAt] = now
         }
     }
 

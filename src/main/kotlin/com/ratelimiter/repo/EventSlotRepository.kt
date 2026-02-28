@@ -11,6 +11,7 @@ import org.jetbrains.exposed.sql.transactions.transaction
 import java.time.Duration
 import java.time.Instant
 import java.time.temporal.ChronoUnit
+import java.util.UUID
 
 @ApplicationScoped
 class EventSlotRepository {
@@ -53,12 +54,13 @@ class EventSlotRepository {
         requestedTime: Instant,
         windowStart: Instant,
         scheduledTime: Instant,
-        configId: Long
+        configId: String
     ): Boolean {
         return transaction {
             val now = Instant.now().truncatedTo(ChronoUnit.MILLIS)
             try {
                 RateLimitEventSlotTable.insert {
+                    it[slotId] = UUID.randomUUID().toString()
                     it[RateLimitEventSlotTable.eventId] = eventId
                     it[RateLimitEventSlotTable.requestedTime] = requestedTime
                     it[RateLimitEventSlotTable.windowStart] = windowStart
@@ -82,11 +84,12 @@ class EventSlotRepository {
         requestedTime: Instant,
         windowStart: Instant,
         scheduledTime: Instant,
-        configId: Long
+        configId: String
     ): Boolean {
         val now = Instant.now().truncatedTo(ChronoUnit.MILLIS)
         return try {
             RateLimitEventSlotTable.insert {
+                it[slotId] = UUID.randomUUID().toString()
                 it[RateLimitEventSlotTable.eventId] = eventId
                 it[RateLimitEventSlotTable.requestedTime] = requestedTime
                 it[RateLimitEventSlotTable.windowStart] = windowStart

@@ -228,7 +228,7 @@ class SlotAssignmentServiceV3 @Inject constructor(
         window: Instant,
         jitterMs: Long,
         requestedTime: Instant,
-        configId: Long
+        configId: String
     ): AssignedSlot {
         val scheduledTime = window.plusMillis(jitterMs)
 

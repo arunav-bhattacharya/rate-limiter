@@ -23,7 +23,7 @@ class EventSlotResource @Inject constructor(
         val requestedTime: String,
         val windowStart: String,
         val scheduledTime: String,
-        val configId: Long
+        val configId: String
     )
 
     @POST

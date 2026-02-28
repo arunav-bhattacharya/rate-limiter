@@ -12,6 +12,7 @@ import org.jetbrains.exposed.sql.transactions.transaction
 import org.jetbrains.exposed.sql.update
 import java.time.Duration
 import java.time.Instant
+import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 
 /**
@@ -81,7 +82,8 @@ class RateLimitConfigRepository {
         require(!windowSize.isZero && !windowSize.isNegative) { "windowSize must be positive" }
 
         val now = Instant.now()
-        val insertedId = transaction {
+        val newConfigId = UUID.randomUUID().toString()
+        transaction {
             // Deactivate existing active configs for this name
             RateLimitConfigTable.update(
                 where = {
@@ -94,19 +96,20 @@ class RateLimitConfigRepository {
 
             // Insert new config
             RateLimitConfigTable.insert {
+                it[configId] = newConfigId
                 it[RateLimitConfigTable.configName] = configName
                 it[RateLimitConfigTable.maxPerWindow] = maxPerWindow
                 it[RateLimitConfigTable.windowSize] = windowSize.toString()
                 it[RateLimitConfigTable.effectiveFrom] = effectiveFrom
                 it[isActive] = true
                 it[createdAt] = now
-            } get RateLimitConfigTable.configId
+            }
         }
 
         cache.remove(configName)
 
         return RateLimitConfig(
-            configId = insertedId,
+            configId = newConfigId,
             configName = configName,
             maxPerWindow = maxPerWindow,
             windowSize = windowSize,
