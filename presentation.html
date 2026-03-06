@@ -651,7 +651,7 @@
             <div class="step-connector" id="conn-2"></div>
             <div class="step-card" id="step-3">
                 <div class="step-number">3</div>
-                <div class="step-content"><h3>Single Transaction</h3><p>Idempotency check, find+lock, extension loop &mdash; all in one transaction</p></div>
+                <div class="step-content"><h3>Split Transactions</h3><p>Idempotency, provisioning, find+lock+claim &mdash; each in short-lived transactions</p></div>
             </div>
             <div class="step-connector" id="conn-3"></div>
             <div class="step-card" id="step-4">
@@ -715,7 +715,7 @@
     <!-- ===== SCENE 6: COMPUTE SEARCH PARAMS ===== -->
     <section class="scene" id="scene-6">
         <div class="scene-title">Step 2: Compute Search Parameters</div>
-        <div class="scene-subtitle">Kotlin pre-computes these values before the single transaction</div>
+        <div class="scene-subtitle">Kotlin pre-computes these values before the assignment phases</div>
         <div class="params-container">
             <div class="param-row" id="param-1">
                 <div class="param-name" style="color: var(--warning);">requestedTime</div>
@@ -792,10 +792,10 @@
 
     <!-- ===== SCENE 7: IDEMPOTENCY ===== -->
     <section class="scene" id="scene-7">
-        <div class="scene-title">Step 3: Single Transaction</div>
-        <div class="scene-subtitle">Phase 0 &mdash; Idempotency &mdash; Same event_id always returns the same slot</div>
+        <div class="scene-title">Step 3: Split Transactions</div>
+        <div class="scene-subtitle">Phase 0 &mdash; Idempotency (own short-lived txn) &mdash; Same event_id always returns the same slot</div>
         <div class="idem-container">
-            <div class="jdbc-banner" id="jdbc-banner-7">Single Transaction &mdash; all phases in one atomic unit</div>
+            <div class="jdbc-banner" id="jdbc-banner-7">TXN&#8320; &mdash; Idempotency check (~1ms, releases connection immediately)</div>
             <div class="plsql-bar" id="plsql-bar-7">
                 <div class="plsql-func active" id="func-check-7">queryAssignedSlot</div>
                 <div class="plsql-func" id="func-first-7">tryLockFirstWindow</div>
@@ -838,10 +838,10 @@
 
     <!-- ===== SCENE 8: PHASE 1 — FIRST WINDOW ===== -->
     <section class="scene" id="scene-8">
-        <div class="scene-title">Step 3: Single Transaction</div>
+        <div class="scene-title">Step 3: Split Transactions</div>
         <div class="scene-subtitle">Phase 1 &mdash; First Window (Proportional Capacity)</div>
         <div class="skip-container">
-            <div class="jdbc-banner">Single Transaction &mdash; all phases in one atomic unit</div>
+            <div class="jdbc-banner">TXN&#8321; &mdash; First window lock + claim (own transaction)</div>
             <div class="plsql-bar" id="plsql-bar-8">
                 <div class="plsql-func done">queryAssignedSlot</div>
                 <div class="plsql-func active" id="func-first-8">tryLockFirstWindow</div>
@@ -898,10 +898,10 @@
 
     <!-- ===== SCENE 9: PHASE 2 — FRONTIER-TRACKED FIND+LOCK ===== -->
     <section class="scene" id="scene-9">
-        <div class="scene-title">Step 3: Single Transaction</div>
+        <div class="scene-title">Step 3: Split Transactions</div>
         <div class="scene-subtitle">Phase 2 &mdash; Frontier-Tracked Find+Lock</div>
         <div class="walk-container">
-            <div class="jdbc-banner">Single Transaction &mdash; all phases in one atomic unit</div>
+            <div class="jdbc-banner">TXN&#8322; &mdash; Find+lock+claim (provisioning in separate txn)</div>
             <div class="plsql-bar" id="plsql-bar-9">
                 <div class="plsql-func done">queryAssignedSlot</div>
                 <div class="plsql-func done">tryLockFirstWindow</div>
@@ -939,10 +939,10 @@
 
     <!-- ===== SCENE 10: CLAIM SLOT ===== -->
     <section class="scene" id="scene-10">
-        <div class="scene-title">Step 3: Single Transaction</div>
+        <div class="scene-title">Step 3: Split Transactions</div>
         <div class="scene-subtitle">claimSlot() &mdash; insertEventSlot + incrementSlotCount</div>
         <div class="claim-container">
-            <div class="jdbc-banner">Single Transaction &mdash; all phases in one atomic unit</div>
+            <div class="jdbc-banner">Within the find+lock+claim transaction &mdash; atomic with the row lock</div>
             <div class="plsql-bar" id="plsql-bar-10">
                 <div class="plsql-func done">queryAssignedSlot</div>
                 <div class="plsql-func done">tryLockFirstWindow</div>

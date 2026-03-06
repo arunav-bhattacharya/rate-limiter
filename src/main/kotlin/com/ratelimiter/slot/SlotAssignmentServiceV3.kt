@@ -30,9 +30,14 @@ import java.util.concurrent.ThreadLocalRandom
  * extension loop (`max-chunks-to-search`, default 2) provisions new chunks from
  * the frontier. Client retries naturally extend further.
  *
- * All DB work runs in a single transaction. Uses raw SQL for lock queries
- * (Exposed DSL doesn't support FOR UPDATE SKIP LOCKED) and Exposed DSL for
- * inserts and updates.
+ * DB work is split across multiple short-lived transactions to minimize
+ * connection hold time and reduce pool contention under high TPS:
+ * - Phase 0 (idempotency check) runs in its own transaction
+ * - Chunk provisioning runs in a separate transaction (idempotent batch inserts)
+ * - Find+lock+claim runs in a focused transaction (holds row lock briefly)
+ *
+ * Uses raw SQL for lock queries (Exposed DSL doesn't support FOR UPDATE
+ * SKIP LOCKED) and Exposed DSL for inserts and updates.
  */
 @ApplicationScoped
 class SlotAssignmentServiceV3 @Inject constructor(
@@ -63,18 +68,20 @@ class SlotAssignmentServiceV3 @Inject constructor(
         val maxFirstWindow = computeEffectiveMax(config.maxPerWindow, elapsedMs, config.windowSizeMs)
         val firstJitterMs = computeFirstWindowJitterMs(elapsedMs, config.windowSizeMs)
 
-        return transaction {
-            // Phase 0: Idempotency check
-            t0 = System.nanoTime()
-            val existing = with(eventSlotRepository) { queryAssignedSlot(eventId) }
-            logger.debug("eventId={} | idempotencyCheck took {}ms", eventId, nanosToMs(System.nanoTime() - t0))
-            if (existing != null) {
-                logger.info("eventId={} | totalTime={}ms (idempotent hit)", eventId, nanosToMs(System.nanoTime() - totalStart))
-                return@transaction existing
-            }
+        // Phase 0: Pre-transaction idempotency check (own short-lived transaction).
+        // Releases connection in ~1ms, avoids holding a connection through Phases 1-3
+        // for duplicate/retry requests.
+        t0 = System.nanoTime()
+        val existing = eventSlotRepository.fetchAssignedSlot(eventId)
+        logger.debug("eventId={} | idempotencyCheck took {}ms", eventId, nanosToMs(System.nanoTime() - t0))
+        if (existing != null) {
+            logger.info("eventId={} | totalTime={}ms (idempotent hit)", eventId, nanosToMs(System.nanoTime() - totalStart))
+            return existing
+        }
 
-            // Phase 1: First window (proportional capacity)
-            if (!firstWindowFull.containsKey(alignedStart)) {
+        // Phase 1: First window (proportional capacity)
+        if (!firstWindowFull.containsKey(alignedStart)) {
+            val firstWindowSlot = transaction {
                 t0 = System.nanoTime()
                 with(windowSlotCounterRepository) { ensureWindowExists(alignedStart) }
                 logger.debug("eventId={} | ensureFirstWindowExists took {}ms", eventId, nanosToMs(System.nanoTime() - t0))
@@ -89,108 +96,140 @@ class SlotAssignmentServiceV3 @Inject constructor(
                         val slot = claimSlot(eventId, alignedStart, firstJitterMs, requestedTime, config.configId)
                         logger.debug("eventId={} | claimSlot (firstWindow) took {}ms", eventId, nanosToMs(System.nanoTime() - t0))
                         logger.info("eventId={} | totalTime={}ms (firstWindow)", eventId, nanosToMs(System.nanoTime() - totalStart))
-                        return@transaction slot
+                        slot
                     }
-                    false -> firstWindowFull[alignedStart] = true
-                    null -> {} // SKIP LOCKED — contended, try again next request
+                    false -> { firstWindowFull[alignedStart] = true; null }
+                    null -> null // SKIP LOCKED — contended, try again next request
                 }
             }
-
-            // Phase 2: Frontier-tracked find+lock
-            val windowSize = config.windowSize
-
-            t0 = System.nanoTime()
-            val windowEnd = fetchWindowEnd(alignedStart) ?: initWindowEnd(alignedStart, windowSize)
-            logger.debug("eventId={} | fetchOrInitWindowEnd took {}ms", eventId, nanosToMs(System.nanoTime() - t0))
-
-            t0 = System.nanoTime()
-            val foundInRange = with(windowSlotCounterRepository) {
-                findAndLockFirstAvailableWindow(alignedStart.plus(windowSize), windowEnd, config.maxPerWindow, windowSize)
-            }
-            logger.debug("eventId={} | findAndLock (initialRange) took {}ms", eventId, nanosToMs(System.nanoTime() - t0))
-
-            if (foundInRange != null) {
-                val jitterMs = computeFullWindowJitterMs(config.windowSizeMs)
-                t0 = System.nanoTime()
-                val slot = claimSlot(eventId, foundInRange, jitterMs, requestedTime, config.configId)
-                logger.debug("eventId={} | claimSlot (initialRange) took {}ms", eventId, nanosToMs(System.nanoTime() - t0))
-                logger.info("eventId={} | totalTime={}ms (initialRange, window={})", eventId, nanosToMs(System.nanoTime() - totalStart), foundInRange)
-                return@transaction slot
-            }
-
-            // Extension loop — extend from frontier
-            var searchFrom = windowEnd
-            for (chunk in 0 until maxChunksToSearch) {
-                val chunkEnd = searchFrom.plus(windowSize.multipliedBy(maxWindowsInChunk.toLong()))
-
-                t0 = System.nanoTime()
-                ensureChunkProvisioned(searchFrom, maxWindowsInChunk, windowSize)
-                logger.debug("eventId={} | ensureChunkProvisioned (chunk={}) took {}ms", eventId, chunk, nanosToMs(System.nanoTime() - t0))
-
-                t0 = System.nanoTime()
-                try {
-                    with(windowEndTrackerRepository) {
-                        insertWindowEnd(alignedStart, chunkEnd)
-                    }
-                } catch (_: ExposedSQLException) {
-                    // Concurrent thread already inserted this frontier — safe to ignore
-                } catch (_: BatchUpdateException) {
-                    // Concurrent thread already inserted this frontier — safe to ignore
-                }
-                logger.debug("eventId={} | insertWindowEnd (chunk={}) took {}ms", eventId, chunk, nanosToMs(System.nanoTime() - t0))
-
-                t0 = System.nanoTime()
-                val foundWindow = with(windowSlotCounterRepository) {
-                    findAndLockFirstAvailableWindow(searchFrom, chunkEnd, config.maxPerWindow, windowSize)
-                }
-                logger.debug("eventId={} | findAndLock (chunk={}) took {}ms", eventId, chunk, nanosToMs(System.nanoTime() - t0))
-
-                if (foundWindow != null) {
-                    val jitterMs = computeFullWindowJitterMs(config.windowSizeMs)
-                    t0 = System.nanoTime()
-                    val slot = claimSlot(eventId, foundWindow, jitterMs, requestedTime, config.configId)
-                    logger.debug("eventId={} | claimSlot (chunk={}) took {}ms", eventId, chunk, nanosToMs(System.nanoTime() - t0))
-                    logger.info("eventId={} | totalTime={}ms (extensionChunk={}, window={})", eventId, nanosToMs(System.nanoTime() - totalStart), chunk, foundWindow)
-                    return@transaction slot
-                }
-
-                searchFrom = chunkEnd
-            }
-
-            logger.warn("eventId={} | totalTime={}ms (exhausted)", eventId, nanosToMs(System.nanoTime() - totalStart))
-            throw SlotAssignmentException(
-                eventId = eventId,
-                windowsSearched = maxWindowsInChunk + (maxChunksToSearch * maxWindowsInChunk),
-                message = "Could not assign slot for event $eventId after searching " +
-                        "initial range + $maxChunksToSearch extension chunks"
-            )
+            if (firstWindowSlot != null) return firstWindowSlot
         }
+
+        // Phase 2: Frontier-tracked find+lock (provisioning and locking in separate transactions)
+        val windowSize = config.windowSize
+
+        t0 = System.nanoTime()
+        val windowEnd = windowEndTrackerRepository.fetchWindowEnd(alignedStart)
+            ?: provisionInitialRange(alignedStart, windowSize)
+        logger.debug("eventId={} | fetchOrInitWindowEnd took {}ms", eventId, nanosToMs(System.nanoTime() - t0))
+
+        t0 = System.nanoTime()
+        val foundInRange = findLockAndClaim(
+            eventId, alignedStart.plus(windowSize), windowEnd,
+            config.maxPerWindow, windowSize, requestedTime, config.configId
+        )
+        logger.debug("eventId={} | findAndLock+claim (initialRange) took {}ms", eventId, nanosToMs(System.nanoTime() - t0))
+        if (foundInRange != null) {
+            logger.info("eventId={} | totalTime={}ms (initialRange)", eventId, nanosToMs(System.nanoTime() - totalStart))
+            return foundInRange
+        }
+
+        // Phase 3: Extension loop — provision chunks and find+lock+claim in separate transactions
+        var searchFrom = windowEnd
+        for (chunk in 0 until maxChunksToSearch) {
+            val chunkEnd = searchFrom.plus(windowSize.multipliedBy(maxWindowsInChunk.toLong()))
+
+            t0 = System.nanoTime()
+            provisionChunk(searchFrom, maxWindowsInChunk, windowSize, alignedStart, chunkEnd)
+            logger.debug("eventId={} | provisionChunk (chunk={}) took {}ms", eventId, chunk, nanosToMs(System.nanoTime() - t0))
+
+            t0 = System.nanoTime()
+            val foundWindow = findLockAndClaim(
+                eventId, searchFrom, chunkEnd,
+                config.maxPerWindow, windowSize, requestedTime, config.configId
+            )
+            logger.debug("eventId={} | findAndLock+claim (chunk={}) took {}ms", eventId, chunk, nanosToMs(System.nanoTime() - t0))
+
+            if (foundWindow != null) {
+                logger.info("eventId={} | totalTime={}ms (extensionChunk={}))", eventId, nanosToMs(System.nanoTime() - totalStart), chunk)
+                return foundWindow
+            }
+
+            searchFrom = chunkEnd
+        }
+
+        logger.warn("eventId={} | totalTime={}ms (exhausted)", eventId, nanosToMs(System.nanoTime() - totalStart))
+        throw SlotAssignmentException(
+            eventId = eventId,
+            windowsSearched = maxWindowsInChunk + (maxChunksToSearch * maxWindowsInChunk),
+            message = "Could not assign slot for event $eventId after searching " +
+                    "initial range + $maxChunksToSearch extension chunks"
+        )
     }
 
     private fun nanosToMs(nanos: Long): String = "%.3f".format(nanos / 1_000_000.0)
 
-    // ---- Transaction helpers ----
+    // ---- Split-transaction helpers ----
+    // Each helper runs its own short-lived transaction to minimize connection hold time.
 
-    private fun Transaction.fetchWindowEnd(alignedStart: Instant): Instant? {
-        return with(windowEndTrackerRepository) {
-            fetchMaxWindowEnd(alignedStart)
+    /**
+     * Provision the initial range of windows and record the frontier.
+     * Runs in its own transaction (idempotent batch inserts + frontier insert).
+     */
+    private fun provisionInitialRange(alignedStart: Instant, windowSize: Duration): Instant {
+        val chunkStart = alignedStart.plus(windowSize)
+        val windowEnd = chunkStart.plus(windowSize.multipliedBy(maxWindowsInChunk.toLong()))
+        transaction {
+            ensureChunkProvisioned(chunkStart, maxWindowsInChunk, windowSize)
+            try {
+                with(windowEndTrackerRepository) {
+                    insertWindowEnd(alignedStart, windowEnd)
+                }
+            } catch (_: ExposedSQLException) {
+                // Concurrent thread already inserted this frontier — safe to ignore
+            } catch (_: BatchUpdateException) {
+                // Concurrent thread already inserted this frontier — safe to ignore
+            }
+        }
+        return windowEnd
+    }
+
+    /**
+     * Provision a chunk of windows and record the frontier.
+     * Runs in its own transaction (idempotent batch inserts + frontier insert).
+     */
+    private fun provisionChunk(
+        from: Instant,
+        windowCount: Int,
+        windowSize: Duration,
+        alignedStart: Instant,
+        chunkEnd: Instant
+    ) {
+        transaction {
+            ensureChunkProvisioned(from, windowCount, windowSize)
+            try {
+                with(windowEndTrackerRepository) {
+                    insertWindowEnd(alignedStart, chunkEnd)
+                }
+            } catch (_: ExposedSQLException) {
+                // Concurrent thread already inserted this frontier — safe to ignore
+            } catch (_: BatchUpdateException) {
+                // Concurrent thread already inserted this frontier — safe to ignore
+            }
         }
     }
 
-    private fun Transaction.initWindowEnd(alignedStart: Instant, windowSize: Duration): Instant {
-        val chunkStart = alignedStart.plus(windowSize)
-        val windowEnd = chunkStart.plus(windowSize.multipliedBy(maxWindowsInChunk.toLong()))
-        ensureChunkProvisioned(chunkStart, maxWindowsInChunk, windowSize)
-        try {
-            with(windowEndTrackerRepository) {
-                insertWindowEnd(alignedStart, windowEnd)
-            }
-        } catch (_: ExposedSQLException) {
-            // Concurrent thread already inserted this frontier — safe to ignore
-        } catch (_: BatchUpdateException) {
-            // Concurrent thread already inserted this frontier — safe to ignore
+    /**
+     * Find an available window, lock it, and claim the slot — all in one short transaction.
+     * Returns null if no available window found in [from, to).
+     */
+    private fun findLockAndClaim(
+        eventId: String,
+        from: Instant,
+        to: Instant,
+        maxSlots: Int,
+        windowSize: Duration,
+        requestedTime: Instant,
+        configId: String
+    ): AssignedSlot? {
+        return transaction {
+            val found = with(windowSlotCounterRepository) {
+                findAndLockFirstAvailableWindow(from, to, maxSlots, windowSize)
+            } ?: return@transaction null
+
+            val jitterMs = computeFullWindowJitterMs(windowSize.toMillis())
+            claimSlot(eventId, found, jitterMs, requestedTime, configId)
         }
-        return windowEnd
     }
 
     /**

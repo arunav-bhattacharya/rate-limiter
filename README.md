@@ -4,7 +4,7 @@ Oracle-based rate limiter for high-throughput event scheduling. Exposes a REST A
 rate-limited time slots to events, enforcing a configurable maximum events per time window.
 
 Two equivalent implementations with identical logic:
-- **Kotlin/Exposed** (`SlotAssignmentServiceV3`) — single `transaction {}` block
+- **Kotlin/Exposed** (`SlotAssignmentServiceV3`) — split short-lived transactions for reduced connection hold time
 - **PL/SQL** (`SlotAssignmentServiceV3Sql`) — single JDBC round trip
 
 ## Quick Start
@@ -83,7 +83,7 @@ Response:
            +-----------+               +-----------+
            | Kotlin/   |               | PL/SQL    |
            | Exposed   |               | Single    |
-           | 1 txn     |               | round trip|
+           | split txns|               | round trip|
            +-----------+               +-----------+
                   |                           |
                   +-------------+-------------+
@@ -239,19 +239,19 @@ capacity (default: 100 events). When an event requests execution at time T:
 
 ### Algorithm
 
-Three-phase approach within a single transaction:
+Multi-phase approach with split short-lived transactions to minimize connection hold time:
 
-**Phase 0 — Idempotency**: Check if event already has a slot. If yes, return it.
+**Phase 0 — Idempotency** *(own transaction)*: Check if event already has a slot via `fetchAssignedSlot()`. If yes, return it immediately. This runs in a separate short-lived transaction (~1ms) so duplicate/retry requests release their connection without competing with the heavier assignment phases.
 
-**Phase 1 — First Window**: Try the epoch-aligned window at `alignedStart` with proportional capacity and constrained jitter. Uses `SELECT FOR UPDATE SKIP LOCKED` to acquire a lock.
+**Phase 1 — First Window** *(own transaction)*: Try the epoch-aligned window at `alignedStart` with proportional capacity and constrained jitter. Uses `SELECT FOR UPDATE SKIP LOCKED` to acquire a lock. If locked and has capacity, `claimSlot()` runs in the same transaction.
 
-**Phase 2 — Frontier-Tracked Find+Lock**:
-1. **Get frontier**: Read `SELECT MAX(WNDW_END_TS) FROM RL_WNDW_FRONTIER_TRK WHERE REQ_TS = alignedStart`. If null, call `initWindowEnd()` which batch-provisions the initial chunk (`maxWindowsInChunk` rows, default 100) and inserts the frontier row.
-2. **Nested find+lock with retry**: `findAndLockFirstAvailableWindow(alignedStart + windowSize, windowEnd)` uses a three-method pattern:
+**Phase 2 — Frontier-Tracked Find+Lock** *(provisioning and locking in separate transactions)*:
+1. **Get frontier** *(own transaction)*: Read `SELECT MAX(WNDW_END_TS) FROM RL_WNDW_FRONTIER_TRK WHERE REQ_TS = alignedStart`. If null, call `provisionInitialRange()` which batch-provisions the initial chunk (`maxWindowsInChunk` rows, default 100) and inserts the frontier row in a separate provisioning transaction.
+2. **Find+lock+claim** *(own transaction)*: `findAndLockFirstAvailableWindow()` + `claimSlot()` run together in a focused transaction that holds the row lock only for the duration of the find+lock and the INSERT+UPDATE:
    - **`nestedFindAndLock()`** — a single SQL with nested subquery: inner `SELECT ... FETCH FIRST 1 ROW ONLY` finds the earliest candidate (no lock), outer `SELECT ... FOR UPDATE SKIP LOCKED` locks it by primary key and re-checks `SLOT_CT` under the lock. One round-trip on success.
    - **On null**: run **`findEarliestCandidateWindow()`** — a non-locking scout query that distinguishes "no candidates exist" (O(1) exit) from "candidate was locked by another session" (advance `searchFrom` past it and retry).
    - The retry loop continues until a window is locked or the range is exhausted.
-3. **Extension loop**: If the range is full, extend from the frontier up to `max-chunks-to-search` (default 2) chunks. Each iteration: batch-provision a chunk (guard: skip if last window already exists), append a new frontier row (catch DUP), and run the same nested find+lock over the new range. Client retries naturally extend further.
+3. **Extension loop**: If the range is full, extend from the frontier up to `max-chunks-to-search` (default 2) chunks. Each iteration runs two separate transactions: (a) `provisionChunk()` — batch-provision a chunk (guard: skip if last window already exists) + append a new frontier row (catch DUP), then (b) `findLockAndClaim()` — find+lock+claim in a focused transaction. Client retries naturally extend further.
 
 ### Frontier Tracking (`RL_WNDW_FRONTIER_TRK`)
 
@@ -331,28 +331,31 @@ sequenceDiagram
     Note over SAS: Step 2 — Compute params
     SAS->>SAS: alignedStart = align(requestedTime)<br/>maxFirstWindow = proportional<br/>firstJitterMs
 
-    Note over SAS: Step 3 — Single transaction
-    SAS->>DB: BEGIN TRANSACTION
-
-    Note over DB: Phase 0: Idempotency
+    Note over SAS: Phase 0: Idempotency (own transaction)
+    SAS->>DB: BEGIN TXN₀
     SAS->>DB: SELECT FROM RL_EVENT_SLOT_DTL WHERE EVENT_ID = ?
     DB-->>SAS: null (not found)
+    SAS->>DB: COMMIT TXN₀ (connection released ~1ms)
 
-    Note over DB: Phase 1: First window
+    Note over SAS: Phase 1: First window (own transaction)
+    SAS->>DB: BEGIN TXN₁
     SAS->>DB: INSERT RL_WNDW_CT (catch DUP)
     SAS->>DB: SELECT SLOT_CT FOR UPDATE SKIP LOCKED
-    DB-->>SAS: count (if < maxFirstWindow, claim)
+    DB-->>SAS: count (if < maxFirstWindow, claim + commit)
+    SAS->>DB: COMMIT TXN₁
 
-    Note over DB: Phase 2: Frontier-tracked find+lock
+    Note over SAS: Phase 2: Frontier read (own transaction)
     SAS->>DB: SELECT MAX(WNDW_END_TS) FROM RL_WNDW_FRONTIER_TRK
-    DB-->>SAS: windowEnd (or null → initWindowEnd:<br/>batchInsert 100 rows + insert frontier)
+    DB-->>SAS: windowEnd (or null → provisionInitialRange<br/>in separate txn: batchInsert 100 rows + insert frontier)
 
-    Note over SAS,DB: Nested find+lock retry loop
+    Note over SAS,DB: Find+lock+claim (own transaction)
+    SAS->>DB: BEGIN TXN₂
     loop until window found or range exhausted
         SAS->>DB: nestedFindAndLock: SELECT WNDW_STRT_TS<br/>WHERE WNDW_STRT_TS = (SELECT ... FETCH FIRST 1 ROW ONLY)<br/>AND SLOT_CT < max FOR UPDATE SKIP LOCKED
         alt locked a window
             SAS->>DB: INSERT RL_EVENT_SLOT_DTL (catch DUP)
             SAS->>DB: UPDATE RL_WNDW_CT SET SLOT_CT = SLOT_CT + 1
+            SAS->>DB: COMMIT TXN₂
             SAS-->>Caller: AssignedSlot
         else null — scout to distinguish
             SAS->>DB: findEarliestCandidateWindow (no lock)
@@ -366,11 +369,18 @@ sequenceDiagram
 
     alt range exhausted — extension loop
         loop up to max-chunks-to-search
+            Note over SAS: Provisioning transaction
+            SAS->>DB: BEGIN TXN_prov
             SAS->>DB: ensureChunkProvisioned (batchInsert, guard on last window)
             SAS->>DB: INSERT RL_WNDW_FRONTIER_TRK (catch DUP)
+            SAS->>DB: COMMIT TXN_prov
+
+            Note over SAS: Find+lock+claim transaction
+            SAS->>DB: BEGIN TXN_claim
             SAS->>DB: nestedFindAndLock + scout retry in new chunk
             alt window found
                 SAS->>DB: INSERT RL_EVENT_SLOT_DTL + UPDATE RL_WNDW_CT
+                SAS->>DB: COMMIT TXN_claim
                 SAS-->>Caller: AssignedSlot
             end
         end
@@ -389,29 +399,35 @@ flowchart TD
     E -- No --> F([Throw ConfigLoadException])
     E -- Yes --> G[Compute params<br/>alignedStart, maxFirstWindow,<br/>firstJitterMs]
 
-    G --> TXN[BEGIN TRANSACTION]
-
-    subgraph TX ["Single Transaction"]
-        IDEM{Phase 0<br/>queryAssignedSlot?}
+    subgraph TX0 ["TXN₀ — Idempotency (short-lived)"]
+        IDEM{Phase 0<br/>fetchAssignedSlot?}
         IDEM -- "Found" --> C2[/Return existing/]
+    end
 
-        IDEM -- "Not found" --> CACHE_CHK{firstWindowFull<br/>cache hit?}
+    G --> IDEM
 
-        CACHE_CHK -- "Yes (skip Phase 1)" --> FRONTIER
+    IDEM -- "Not found" --> CACHE_CHK{firstWindowFull<br/>cache hit?}
 
+    CACHE_CHK -- "Yes (skip Phase 1)" --> FRONTIER
+
+    subgraph TX1 ["TXN₁ — First Window"]
         CACHE_CHK -- "No" --> EW[ensureWindowExists<br/>INSERT catch DUP]
         EW --> TLF[tryLockFirstWindow<br/>SELECT SLOT_CT<br/>FOR UPDATE SKIP LOCKED]
         TLF --> TLF_C{Result?}
         TLF_C -- "true<br/>(has capacity)" --> CLAIM1[claimSlot<br/>firstJitterMs]
         CLAIM1 --> NEW1[/NEW/]
         TLF_C -- "false<br/>(full)" --> CACHE_SET["firstWindowFull[alignedStart] = true"]
-        CACHE_SET --> FRONTIER
-        TLF_C -- "null<br/>(SKIP LOCKED)" --> FRONTIER
+        TLF_C -- "null<br/>(SKIP LOCKED)" --> SKIP1[Fall through]
+    end
 
-        FRONTIER["fetchOrInitWindowEnd<br/>SELECT MAX(WNDW_END_TS)<br/>from RL_WNDW_FRONTIER_TRK<br/>null → initWindowEnd:<br/>batchInsert 100 rows + insert frontier"]
+    CACHE_SET --> FRONTIER
+    SKIP1 --> FRONTIER
 
-        FRONTIER --> FIND_LOCK
+    FRONTIER["fetchWindowEnd (own txn)<br/>SELECT MAX(WNDW_END_TS)<br/>from RL_WNDW_FRONTIER_TRK<br/>null → provisionInitialRange (own txn):<br/>batchInsert 100 rows + insert frontier"]
 
+    FRONTIER --> FIND_LOCK
+
+    subgraph TX2 ["TXN₂ — Find+Lock+Claim"]
         subgraph FIND_LOCK ["findAndLockFirstAvailableWindow (retry loop)"]
             direction TB
             NFL["nestedFindAndLock<br/>Inner: SELECT ... FETCH FIRST 1 ROW ONLY (no lock)<br/>Outer: SELECT ... FOR UPDATE SKIP LOCKED"]
@@ -426,24 +442,22 @@ flowchart TD
 
         LOCKED_WIN --> CLAIM2[claimSlot<br/>fullJitterMs]
         CLAIM2 --> NEW2[/NEW/]
-
-        NO_WIN --> EXT_LOOP
-
-        subgraph EXT_LOOP ["Extension Loop (max-chunks-to-search)"]
-            direction TB
-            EXT_START[chunk 0..maxChunksToSearch-1]
-            EXT_START --> EXT_PROV["ensureChunkProvisioned<br/>(guard: skip if last window exists)<br/>+ INSERT RL_WNDW_FRONTIER_TRK (catch DUP)"]
-            EXT_PROV --> EXT_FIND["findAndLockFirstAvailableWindow<br/>(same retry loop)<br/>in extension chunk"]
-            EXT_FIND --> EXT_C{Window found?}
-            EXT_C -- Yes --> CLAIM3[claimSlot<br/>fullJitterMs]
-            CLAIM3 --> NEW3[/NEW/]
-            EXT_C -- No --> EXT_NEXT{More chunks?}
-            EXT_NEXT -- Yes --> EXT_START
-            EXT_NEXT -- No --> EXH[/EXHAUSTED/]
-        end
     end
 
-    TXN --> IDEM
+    NO_WIN --> EXT_LOOP
+
+    subgraph EXT_LOOP ["Extension Loop (max-chunks-to-search)"]
+        direction TB
+        EXT_START[chunk 0..maxChunksToSearch-1]
+        EXT_START --> EXT_PROV["provisionChunk (own txn)<br/>(guard: skip if last window exists)<br/>+ INSERT RL_WNDW_FRONTIER_TRK (catch DUP)"]
+        EXT_PROV --> EXT_FIND["findLockAndClaim (own txn)<br/>findAndLockFirstAvailableWindow<br/>+ claimSlot in focused txn"]
+        EXT_FIND --> EXT_C{Window found?}
+        EXT_C -- Yes --> NEW3[/NEW/]
+        EXT_C -- No --> EXT_NEXT{More chunks?}
+        EXT_NEXT -- Yes --> EXT_START
+        EXT_NEXT -- No --> EXH[/EXHAUSTED/]
+    end
+
     C2 --> RET_E([Return existing AssignedSlot])
     NEW1 --> RET_N([Return new AssignedSlot])
     NEW2 --> RET_N
@@ -455,7 +469,6 @@ flowchart TD
     style RET_N fill:#2ecc71,color:#fff
     style F fill:#e74c3c,color:#fff
     style RET_X fill:#e74c3c,color:#fff
-    style TXN fill:#3498db,color:#fff
     style NFL fill:#9b59b6,color:#fff
     style EXT_FIND fill:#9b59b6,color:#fff
     style SCOUT fill:#e67e22,color:#fff
@@ -476,7 +489,7 @@ flowchart TD
 | **Frontier-tracked search** | Append-only `RL_WNDW_FRONTIER_TRK` table tracks the provisioned boundary per `alignedStart`. New requests jump directly to the frontier instead of scanning from chunk 0 |
 | **Nested find+lock query** | Nested subquery: inner `SELECT ... FETCH FIRST 1 ROW ONLY` (no lock) finds earliest candidate; outer `SELECT ... FOR UPDATE SKIP LOCKED` locks it by PK. Retry loop with non-locking scout query advances past locked rows. One SQL round-trip on success |
 | **Configurable chunk extensions** | `max-chunks-to-search` (default 2) controls how many additional chunks are provisioned and searched when the initial range is full |
-| **Idempotency** | Phase 0 pre-check + `UNIQUE(EVENT_ID)` constraint with `DUP_VAL_ON_INDEX` recovery — duplicate calls return the same slot without incrementing counters |
+| **Idempotency** | Phase 0 pre-transaction check (own short-lived txn, ~1ms) + `UNIQUE(EVENT_ID)` constraint with `DUP_VAL_ON_INDEX` recovery — duplicate calls return the same slot without incrementing counters and without entering the heavier assignment phases |
 | **SKIP LOCKED concurrency** | Row-level locking skips contended rows instead of blocking — concurrent threads don't wait for each other |
 | **JVM-local first-window cache** | `ConcurrentHashMap<Instant, Boolean>` caches exhausted first windows to skip re-locking |
 | **Config-agnostic counters** | `SLOT_CT` tracks total usage regardless of which config version assigned each slot — capacity changes take effect immediately on existing windows |
@@ -494,11 +507,11 @@ flowchart TD
 
 #### 3. Sequential Extension Loop
 
-Each extension chunk must be provisioned and scanned before the next. There is no parallelism between chunks — the loop is strictly sequential within one transaction.
+Each extension chunk must be provisioned and scanned before the next. There is no parallelism between chunks — the loop is strictly sequential. However, provisioning and find+lock+claim now run in separate short-lived transactions, so connection hold time per iteration is reduced.
 
-#### 4. Long-Held Transaction Locks
+#### 4. Multiple Short-Lived Transactions
 
-A single transaction spans all phases: idempotency check, first-window lock, frontier read, chunk provisioning, find+lock scan, and extension loop. The locked window row is held for the entire duration, which includes provisioning new chunks (100 INSERTs each).
+Each phase runs in its own short-lived transaction to minimize connection hold time. Chunk provisioning (100 INSERTs) runs in a separate transaction from the find+lock+claim, so row locks are only held for the focused claim operation. The trade-off is more connection checkouts, but each is held briefly — under high TPS this dramatically reduces pool contention compared to a single long-held transaction.
 
 #### 5. Frontier Read Overhead
 
@@ -530,7 +543,7 @@ See [Known Limitations](#known-limitations) for: shared windows across `requeste
 
 5. **JVM-local first-window cache**: `ConcurrentHashMap<Instant, Boolean>` caches exhausted first windows. Once a first window is known to be full, subsequent requests skip the Phase 1 lock attempt entirely, avoiding a DB round-trip. This is a simple but effective optimization for steady-state load where the first window fills quickly.
 
-6. **Idempotency without distributed state**: The unique constraint on `EVENT_ID` in `RL_EVENT_SLOT_DTL` plus the Phase 0 pre-check provides strong idempotency guarantees without needing Redis or any external coordination. The `claimSlot()` function also handles the rare case where a concurrent thread inserts the same `EVENT_ID` between the Phase 0 check and the INSERT — it catches the duplicate key and re-reads the existing slot without incrementing the counter.
+6. **Idempotency without distributed state**: The unique constraint on `EVENT_ID` in `RL_EVENT_SLOT_DTL` plus the Phase 0 pre-transaction check provides strong idempotency guarantees without needing Redis or any external coordination. Phase 0 runs in its own short-lived transaction (~1ms), so duplicate/retry requests release their connection immediately without entering the heavier assignment phases. The `claimSlot()` function also handles the rare case where a concurrent thread inserts the same `EVENT_ID` between the Phase 0 check and the INSERT — it catches the duplicate key and re-reads the existing slot without incrementing the counter.
 
 7. **Config-agnostic counters**: By tracking `SLOT_CT` independently of config versions, the system handles dynamic config changes gracefully. Increasing capacity takes effect immediately on partially-filled windows. Decreasing capacity treats over-filled windows as full without modifying existing assignments.
 
@@ -538,7 +551,7 @@ See [Known Limitations](#known-limitations) for: shared windows across `requeste
 
 | Decision | Benefit | Cost |
 |---|---|---|
-| **Single transaction for all phases** | Atomicity — no partial state if the transaction fails. The locked window row cannot be claimed by another thread between find and claim. | Long-held locks during chunk provisioning (100 INSERTs). Other threads hitting the same window are SKIP LOCKED'd but waste a round-trip. |
+| **Split short-lived transactions** | Short connection hold times — each transaction releases its connection quickly, reducing pool contention under high TPS. Provisioning (batch INSERTs) doesn't block the lock-holding transaction. | More connection checkouts per request. A crash between provisioning and claiming leaves provisioned-but-unclaimed rows (harmless — provisioning is idempotent). Find+lock+claim still runs atomically in one transaction. |
 | **Append-only `RL_WNDW_FRONTIER_TRK`** | No UPDATE contention on frontier rows. Concurrent threads safely deduplicate. | Row count grows linearly with extension iterations. `SELECT MAX(WNDW_END_TS)` scans more rows over time. Could be mitigated with a covering index or periodic cleanup. |
 | **Batch provisioning (100 rows per chunk)** | Amortizes the cost of provisioning — one thread pays upfront, all others benefit. Larger chunks mean less frequent provisioning. | First thread to hit an unprovisioned chunk pays O(W) INSERTs while holding the transaction open. With W=100 and 4s windows, this provisions 400 seconds into the future. |
 | **JVM-local `firstWindowFull` cache** | Avoids a DB round-trip for a known-full first window. Simple `ConcurrentHashMap`, no external dependencies. | Not shared across nodes — each node independently discovers full first-windows. No TTL eviction — entries accumulate for past windows (memory leak in long-running instances). |
@@ -548,37 +561,27 @@ See [Known Limitations](#known-limitations) for: shared windows across `requeste
 
 ### What Could Be Improved (and Why We Didn't)
 
-#### 1. Split provisioning into a separate transaction
+#### 1. Pre-provision windows asynchronously (background job)
 
-**Idea**: Move `ensureChunkProvisioned()` to a separate, short-lived transaction that commits immediately, then run the find+lock in the main transaction. This would shorten lock hold times — the locked window row wouldn't be held during the 100-row batch INSERT.
-
-**Why we didn't**: The current single-transaction design guarantees atomicity — if the transaction fails after provisioning but before claiming, no counter is incremented. With split transactions, a crash between provisioning and claiming would leave provisioned-but-unclaimed rows (harmless, but adds complexity to reason about). The provisioning cost is also amortized — it's a one-time cost per chunk, not per request. The existence-check guard ensures subsequent threads skip provisioning entirely.
-
-#### 2. Pre-provision windows asynchronously (background job)
-
-**Idea**: A background scheduler could pre-provision window counter rows well ahead of time (e.g., 24 hours of windows). This would eliminate the provisioning cost from the hot path entirely.
-
-**Why we didn't**: This would require coordinating between the background job and the main transaction (how far ahead to provision? how to handle config changes that affect window size?). The current lazy provisioning is self-tuning — it provisions exactly as far ahead as demand requires, with no configuration overhead. The existence-check guard makes repeated provisioning idempotent, so even without pre-provisioning, only the first thread per chunk pays the cost.
-
-#### 3. Use `SELECT ... FOR UPDATE SKIP LOCKED` with `FETCH FIRST N ROWS ONLY` to lock multiple rows at once
+#### 2. Use `SELECT ... FOR UPDATE SKIP LOCKED` with `FETCH FIRST N ROWS ONLY` to lock multiple rows at once
 
 **Idea**: Instead of locking one row per nested subquery call, lock a batch of N rows and iterate locally, returning the first non-full one.
 
 **Why we didn't**: Locking N rows acquires locks on rows that may not be needed, increasing contention with other threads. The nested subquery pattern locks exactly one row — the minimum possible. Under typical load, the first `nestedFindAndLock()` call succeeds (one round-trip), and the retry loop only fires under genuine contention. Locking N rows would hurt the common case to optimize the rare contention case.
 
-#### 4. Use advisory locks instead of `SELECT FOR UPDATE`
+#### 3. Use advisory locks instead of `SELECT FOR UPDATE`
 
 **Idea**: Oracle's `DBMS_LOCK` or PostgreSQL's advisory locks could provide lighter-weight coordination without locking actual rows.
 
 **Why we didn't**: Advisory locks require manual lock management (acquire/release) and are database-specific. `SELECT FOR UPDATE SKIP LOCKED` is SQL-standard, works with Oracle's existing row-level locking, and automatically releases on transaction commit/rollback. The current approach also doubles as a read-consistency mechanism — the locked row's `SLOT_CT` is re-checked under the lock, preventing lost updates.
 
-#### 5. Use a Redis-backed distributed counter instead of Oracle row locks
+#### 4. Use a Redis-backed distributed counter instead of Oracle row locks
 
 **Idea**: Replace `RL_WNDW_CT` with Redis atomic counters (`INCR`). O(1) per operation, no lock contention, sub-millisecond latency.
 
 **Why we didn't**: This introduces a distributed systems consistency problem — Redis and Oracle can disagree on the count. If Redis says "capacity available" but the Oracle INSERT fails (or vice versa), the counter is permanently out of sync. The current design keeps all state in one database, within one transaction, with ACID guarantees. For the target throughput (1M events/day ≈ ~12 events/second average), Oracle row-level locking is more than sufficient.
 
-#### 6. Use `MERGE` (upsert) instead of INSERT-catch-DUP for `ensureWindowExists()`
+#### 5. Use `MERGE` (upsert) instead of INSERT-catch-DUP for `ensureWindowExists()`
 
 **Idea**: Replace the INSERT-catch-exception pattern with `MERGE INTO RL_WNDW_CT USING DUAL ON (WNDW_STRT_TS = ?) WHEN NOT MATCHED THEN INSERT ...`.
 
@@ -599,8 +602,8 @@ Let **W** = `max-windows-in-chunk` (default 100), **C** = `max-chunks-to-search`
 With defaults (W=100, C=2): worst case scans up to **300 windows** and provisions up to **200 additional rows**.
 
 **Throughput ceiling**: At steady state with concurrent load, throughput is bounded by:
-- **Lock contention**: Each `claimSlot()` holds a row lock for INSERT + UPDATE. With M slots per window and W windows provisioned, up to W concurrent threads can claim simultaneously (one per window).
-- **Provisioning bottleneck**: The first thread to exhaust a range pays O(W) INSERTs while holding the transaction open. Other threads hitting the same range are either SKIP LOCKED'd or wait for provisioning.
+- **Lock contention**: Each `claimSlot()` holds a row lock for INSERT + UPDATE in a focused transaction. With M slots per window and W windows provisioned, up to W concurrent threads can claim simultaneously (one per window).
+- **Provisioning bottleneck**: The first thread to exhaust a range pays O(W) INSERTs in a separate provisioning transaction. This no longer blocks the lock-holding transaction — other threads can find+lock+claim concurrently while provisioning completes.
 
 ---
 
