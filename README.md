@@ -3,9 +3,8 @@
 Oracle-based rate limiter for high-throughput event scheduling. Exposes a REST API that assigns
 rate-limited time slots to events, enforcing a configurable maximum events per time window.
 
-Two equivalent implementations with identical logic:
+Implementation:
 - **Kotlin/Exposed** (`SlotAssignmentServiceV3`) — split short-lived transactions for reduced connection hold time
-- **PL/SQL** (`SlotAssignmentServiceV3Sql`) — single JDBC round trip
 
 ## Quick Start
 
@@ -78,15 +77,6 @@ Response:
                 |    SlotAssignmentResource      |
                 +-------------------------------+
                                 |
-                  +-------------+-------------+
-                  |                           |
-           +-----------+               +-----------+
-           | Kotlin/   |               | PL/SQL    |
-           | Exposed   |               | Single    |
-           | split txns|               | round trip|
-           +-----------+               +-----------+
-                  |                           |
-                  +-------------+-------------+
                                 |
            +--------------------+--------------------+
            |                    |                    |
@@ -507,7 +497,7 @@ flowchart TD
 
 #### 1. Chunk Provisioning Cost
 
-`ensureChunkProvisioned()` inserts `maxWindowsInChunk` (default 100) rows per chunk. The PL/SQL implementation uses a loop with individual INSERTs (each catching `DUP_VAL_ON_INDEX`). The Kotlin implementation uses `batchInsert` but still issues 100 rows per chunk. The first thread to hit an unprovisioned chunk pays the full provisioning cost; subsequent threads skip via the existence-check guard on the last window.
+`ensureChunkProvisioned()` inserts `maxWindowsInChunk` (default 100) rows per chunk via `batchInsert`. The first thread to hit an unprovisioned chunk pays the full provisioning cost; subsequent threads skip via the existence-check guard on the last window.
 
 #### 2. Nested Subquery Retry Cost
 

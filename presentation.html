@@ -169,21 +169,21 @@
             min-width: 100px; text-align: center;
         }
 
-        /* ===== SHARED PL/SQL BAR (scenes 7-10) ===== */
-        .plsql-bar {
+        /* ===== SHARED FUNCTION BAR (scenes 7-10) ===== */
+        .func-bar {
             display: flex; gap: 12px; margin-bottom: 12px; justify-content: center;
         }
-        .plsql-bar .plsql-func {
+        .func-bar .func-item {
             padding: 8px 14px; border-radius: 8px;
             background: var(--surface); border: 1px solid var(--border);
             font-family: var(--mono); font-size: 11px;
             transition: all 0.3s ease; opacity: 0.5;
         }
-        .plsql-bar .plsql-func.active {
+        .func-bar .func-item.active {
             opacity: 1; border-color: var(--primary); background: rgba(74,158,255,0.1);
             box-shadow: 0 0 10px rgba(74,158,255,0.2);
         }
-        .plsql-bar .plsql-func.done {
+        .func-bar .func-item.done {
             opacity: 0.7; border-color: var(--success); color: var(--success);
         }
         .jdbc-banner {
@@ -489,7 +489,7 @@
 
         /* ===== SCENE 10: CLAIM SLOT ===== */
         #scene-10 .claim-container { width: 100%; max-width: 820px; }
-        #scene-10 .plsql-bar { margin-bottom: 6px; }
+        #scene-10 .func-bar { margin-bottom: 6px; }
         #scene-10 .jdbc-banner { margin-bottom: 6px; font-size: 11px; padding: 4px 12px; }
         #scene-10 .row-data { font-size: 11px; line-height: 1.5; }
         #scene-10 .jitter-box {
@@ -573,13 +573,13 @@
             Supports up to <span style="color: var(--primary); font-weight: 700;">1,000,000</span> events / day
         </div>
         <div style="margin-top: 8px; font-size: 13px; color: var(--text-muted);" class="anim-item">
-            <span style="color: var(--warning); font-weight: 600;">Kotlin/Exposed</span> &bull; <span style="color: var(--error); font-weight: 600;">PL/SQL</span>
+            <span style="color: var(--warning); font-weight: 600;">Kotlin/Exposed</span> &bull; <span style="color: var(--error); font-weight: 600;">Oracle 19c</span>
         </div>
         <div class="badge-row">
             <div class="tech-badge badge-blue">Quarkus 3.x</div>
             <div class="tech-badge badge-green">Kotlin</div>
             <div class="tech-badge badge-orange">Oracle 19c</div>
-            <div class="tech-badge badge-red">PL/SQL</div>
+            <div class="tech-badge badge-red">Exposed ORM</div>
         </div>
     </section>
 
@@ -601,9 +601,9 @@
                     RateLimitConfigRepository
                     <br><span class="ttl-badge" style="margin-top: 6px;">TTL: 5s cache</span>
                 </div>
-                <div class="arch-box" id="arch-sql">
-                    SlotAssignmentSql
-                    <br><span style="font-size: 11px; color: var(--text-muted);">PL/SQL execution</span>
+                <div class="arch-box" id="arch-repos">
+                    Repositories
+                    <br><span style="font-size: 11px; color: var(--text-muted);">EventSlot / WindowSlotCounter / WindowEndTracker</span>
                 </div>
             </div>
             <div class="arch-arrow"><div class="arch-arrow-line" id="arrow-5"></div></div>
@@ -796,11 +796,11 @@
         <div class="scene-subtitle">Phase 0 &mdash; Idempotency via fetchAssignedSlot() (own short-lived txn) &mdash; Same event_id always returns the same slot</div>
         <div class="idem-container">
             <div class="jdbc-banner" id="jdbc-banner-7">TXN&#8320; &mdash; fetchAssignedSlot() (~1ms, releases connection immediately)</div>
-            <div class="plsql-bar" id="plsql-bar-7">
-                <div class="plsql-func active" id="func-check-7">fetchAssignedSlot</div>
-                <div class="plsql-func" id="func-first-7">tryLockFirstWindow</div>
-                <div class="plsql-func" id="func-find-7">findAndLockFirstAvailableWindow</div>
-                <div class="plsql-func" id="func-claim-7">claimSlot</div>
+            <div class="func-bar" id="func-bar-7">
+                <div class="func-item active" id="func-check-7">fetchAssignedSlot</div>
+                <div class="func-item" id="func-first-7">tryLockFirstWindow</div>
+                <div class="func-item" id="func-find-7">findAndLockFirstAvailableWindow</div>
+                <div class="func-item" id="func-claim-7">claimSlot</div>
             </div>
             <div class="idem-paths">
                 <div class="idem-path" id="idem-first-call">
@@ -842,11 +842,11 @@
         <div class="scene-subtitle">Phase 1 &mdash; First Window (Proportional Capacity)</div>
         <div class="skip-container">
             <div class="jdbc-banner">TXN&#8321; &mdash; First window lock + claim (own transaction)</div>
-            <div class="plsql-bar" id="plsql-bar-8">
-                <div class="plsql-func done">fetchAssignedSlot</div>
-                <div class="plsql-func active" id="func-first-8">tryLockFirstWindow</div>
-                <div class="plsql-func" id="func-find-8">findAndLockFirstAvailableWindow</div>
-                <div class="plsql-func" id="func-claim-8">claimSlot</div>
+            <div class="func-bar" id="func-bar-8">
+                <div class="func-item done">fetchAssignedSlot</div>
+                <div class="func-item active" id="func-first-8">tryLockFirstWindow</div>
+                <div class="func-item" id="func-find-8">findAndLockFirstAvailableWindow</div>
+                <div class="func-item" id="func-claim-8">claimSlot</div>
             </div>
             <div class="skip-sql" id="skip-sql-8">
                 <span style="color: #c792ea;">INSERT INTO</span> RL_WNDW_CT(WNDW_STRT_TS, SLOT_CT) <span style="color: #c792ea;">VALUES</span>(alignedStart, 0) <span style="color: var(--text-muted);">&mdash; catch DUP</span><br>
@@ -902,11 +902,11 @@
         <div class="scene-subtitle">Phase 2 &mdash; Frontier-Tracked Find+Lock</div>
         <div class="walk-container">
             <div class="jdbc-banner">fetchOrProvisionInitialRange (single txn) &rarr; findLockAndClaim (own txn)</div>
-            <div class="plsql-bar" id="plsql-bar-9">
-                <div class="plsql-func done">fetchAssignedSlot</div>
-                <div class="plsql-func done">tryLockFirstWindow</div>
-                <div class="plsql-func active" id="func-find-9">findAndLockFirstAvailableWindow</div>
-                <div class="plsql-func" id="func-claim-9">claimSlot</div>
+            <div class="func-bar" id="func-bar-9">
+                <div class="func-item done">fetchAssignedSlot</div>
+                <div class="func-item done">tryLockFirstWindow</div>
+                <div class="func-item active" id="func-find-9">findAndLockFirstAvailableWindow</div>
+                <div class="func-item" id="func-claim-9">claimSlot</div>
             </div>
             <div class="thread-legend">
                 <div class="thread-tag"><div class="thread-dot" style="background: #4a9eff;"></div> Thread 1</div>
@@ -943,11 +943,11 @@
         <div class="scene-subtitle">claimSlot() &mdash; insertEventSlot + incrementSlotCount</div>
         <div class="claim-container">
             <div class="jdbc-banner">Within the find+lock+claim transaction &mdash; atomic with the row lock</div>
-            <div class="plsql-bar" id="plsql-bar-10">
-                <div class="plsql-func done">fetchAssignedSlot</div>
-                <div class="plsql-func done">tryLockFirstWindow</div>
-                <div class="plsql-func done">findAndLockFirstAvailableWindow</div>
-                <div class="plsql-func active" id="func-claim-10">claimSlot</div>
+            <div class="func-bar" id="func-bar-10">
+                <div class="func-item done">fetchAssignedSlot</div>
+                <div class="func-item done">tryLockFirstWindow</div>
+                <div class="func-item done">findAndLockFirstAvailableWindow</div>
+                <div class="func-item active" id="func-claim-10">claimSlot</div>
             </div>
             <!-- App Server note (outside jitter box) -->
             <div id="app-server-note-10" style="text-align: center; margin-bottom: 5px; padding: 5px 12px; border-radius: 8px; background: rgba(46,204,113,0.08); border: 1px dashed var(--success); font-size: 11px; color: var(--success); opacity: 0; transition: opacity 0.5s;">
