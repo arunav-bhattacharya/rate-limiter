@@ -245,13 +245,13 @@ Multi-phase approach with split short-lived transactions to minimize connection 
 
 **Phase 1 — First Window** *(own transaction)*: Try the epoch-aligned window at `alignedStart` with proportional capacity and constrained jitter. Uses `SELECT FOR UPDATE SKIP LOCKED` to acquire a lock. If locked and has capacity, `claimSlot()` runs in the same transaction.
 
-**Phase 2 — Frontier-Tracked Find+Lock** *(provisioning and locking in separate transactions)*:
-1. **Get frontier** *(own transaction)*: Read `SELECT MAX(WNDW_END_TS) FROM RL_WNDW_FRONTIER_TRK WHERE REQ_TS = alignedStart`. If null, call `provisionInitialRange()` which batch-provisions the initial chunk (`maxWindowsInChunk` rows, default 100) and inserts the frontier row in a separate provisioning transaction.
-2. **Find+lock+claim** *(own transaction)*: `findAndLockFirstAvailableWindow()` + `claimSlot()` run together in a focused transaction that holds the row lock only for the duration of the find+lock and the INSERT+UPDATE:
+**Phase 2 — Frontier-Tracked Find+Lock** *(fetch/provision and locking in separate transactions)*:
+1. **Fetch or provision initial range** *(single transaction)*: `fetchOrProvisionInitialRange()` reads `SELECT MAX(WNDW_END_TS) FROM RL_WNDW_FRONTIER_TRK WHERE REQ_TS = alignedStart`. If the frontier exists, returns it immediately (fast read, ~1ms). If null (first request for this `alignedStart`), provisions the initial chunk (`maxWindowsInChunk` rows, default 100) and inserts the frontier row — all atomically in the same transaction.
+2. **Find+lock+claim** *(own transaction)*: `findLockAndClaim()` runs `findAndLockFirstAvailableWindow()` + `claimSlot()` together in a focused transaction that holds the row lock only for the duration of the find+lock and the INSERT+UPDATE:
    - **`nestedFindAndLock()`** — a single SQL with nested subquery: inner `SELECT ... FETCH FIRST 1 ROW ONLY` finds the earliest candidate (no lock), outer `SELECT ... FOR UPDATE SKIP LOCKED` locks it by primary key and re-checks `SLOT_CT` under the lock. One round-trip on success.
    - **On null**: run **`findEarliestCandidateWindow()`** — a non-locking scout query that distinguishes "no candidates exist" (O(1) exit) from "candidate was locked by another session" (advance `searchFrom` past it and retry).
    - The retry loop continues until a window is locked or the range is exhausted.
-3. **Extension loop**: If the range is full, extend from the frontier up to `max-chunks-to-search` (default 2) chunks. Each iteration runs two separate transactions: (a) `provisionChunk()` — batch-provision a chunk (guard: skip if last window already exists) + append a new frontier row (catch DUP), then (b) `findLockAndClaim()` — find+lock+claim in a focused transaction. Client retries naturally extend further.
+3. **Extension loop** *(Phase 3)*: If the range is full, extend from the frontier up to `max-chunks-to-search` (default 2) chunks. Each iteration runs two separate transactions: (a) `provisionChunk()` — batch-provision a chunk (guard: skip if last window already exists) + append a new frontier row (catch DUP), then (b) `findLockAndClaim()` — find+lock+claim in a focused transaction. Client retries naturally extend further.
 
 ### Frontier Tracking (`RL_WNDW_FRONTIER_TRK`)
 
@@ -344,9 +344,17 @@ sequenceDiagram
     DB-->>SAS: count (if < maxFirstWindow, claim + commit)
     SAS->>DB: COMMIT TXN₁
 
-    Note over SAS: Phase 2: Frontier read (own transaction)
+    Note over SAS: Phase 2: fetchOrProvisionInitialRange (single transaction)
+    SAS->>DB: BEGIN TXN_frontier
     SAS->>DB: SELECT MAX(WNDW_END_TS) FROM RL_WNDW_FRONTIER_TRK
-    DB-->>SAS: windowEnd (or null → provisionInitialRange<br/>in separate txn: batchInsert 100 rows + insert frontier)
+    alt frontier exists (common case)
+        DB-->>SAS: windowEnd (~1ms fast read)
+    else null (first request for this alignedStart)
+        SAS->>DB: batchInsert 100 RL_WNDW_CT rows
+        SAS->>DB: INSERT RL_WNDW_FRONTIER_TRK (catch DUP)
+        DB-->>SAS: windowEnd (provisioned atomically)
+    end
+    SAS->>DB: COMMIT TXN_frontier
 
     Note over SAS,DB: Find+lock+claim (own transaction)
     SAS->>DB: BEGIN TXN₂
@@ -423,11 +431,11 @@ flowchart TD
     CACHE_SET --> FRONTIER
     SKIP1 --> FRONTIER
 
-    FRONTIER["fetchWindowEnd (own txn)<br/>SELECT MAX(WNDW_END_TS)<br/>from RL_WNDW_FRONTIER_TRK<br/>null → provisionInitialRange (own txn):<br/>batchInsert 100 rows + insert frontier"]
+    FRONTIER["fetchOrProvisionInitialRange (single txn)<br/>SELECT MAX(WNDW_END_TS)<br/>from RL_WNDW_FRONTIER_TRK<br/>null → provision in same txn:<br/>batchInsert 100 rows + insert frontier"]
 
     FRONTIER --> FIND_LOCK
 
-    subgraph TX2 ["TXN₂ — Find+Lock+Claim"]
+    subgraph TX2 ["TXN₂ — findLockAndClaim"]
         subgraph FIND_LOCK ["findAndLockFirstAvailableWindow (retry loop)"]
             direction TB
             NFL["nestedFindAndLock<br/>Inner: SELECT ... FETCH FIRST 1 ROW ONLY (no lock)<br/>Outer: SELECT ... FOR UPDATE SKIP LOCKED"]
@@ -486,10 +494,10 @@ flowchart TD
 |---|---|
 | **Epoch-aligned windows** | `windowStart = epochSec - (epochSec % windowSizeSecs)` — deterministic, no drift |
 | **Proportional first-window capacity** | `maxFirstWindow = floor(maxPerWindow × remainingMs / windowSizeMs)` — prevents overscheduling in a partially-elapsed window |
-| **Frontier-tracked search** | Append-only `RL_WNDW_FRONTIER_TRK` table tracks the provisioned boundary per `alignedStart`. New requests jump directly to the frontier instead of scanning from chunk 0 |
+| **Frontier-tracked search** | Append-only `RL_WNDW_FRONTIER_TRK` table tracks the provisioned boundary per `alignedStart`. `fetchOrProvisionInitialRange()` reads or provisions the frontier atomically in a single transaction. New requests jump directly to the frontier instead of scanning from chunk 0 |
 | **Nested find+lock query** | Nested subquery: inner `SELECT ... FETCH FIRST 1 ROW ONLY` (no lock) finds earliest candidate; outer `SELECT ... FOR UPDATE SKIP LOCKED` locks it by PK. Retry loop with non-locking scout query advances past locked rows. One SQL round-trip on success |
 | **Configurable chunk extensions** | `max-chunks-to-search` (default 2) controls how many additional chunks are provisioned and searched when the initial range is full |
-| **Idempotency** | Phase 0 pre-transaction check (own short-lived txn, ~1ms) + `UNIQUE(EVENT_ID)` constraint with `DUP_VAL_ON_INDEX` recovery — duplicate calls return the same slot without incrementing counters and without entering the heavier assignment phases |
+| **Idempotency** | Phase 0 pre-transaction check via `fetchAssignedSlot()` (own short-lived txn, ~1ms) + `UNIQUE(EVENT_ID)` constraint with `DUP_VAL_ON_INDEX` recovery — duplicate calls return the same slot without incrementing counters and without entering the heavier assignment phases |
 | **SKIP LOCKED concurrency** | Row-level locking skips contended rows instead of blocking — concurrent threads don't wait for each other |
 | **JVM-local first-window cache** | `ConcurrentHashMap<Instant, Boolean>` caches exhausted first windows to skip re-locking |
 | **Config-agnostic counters** | `SLOT_CT` tracks total usage regardless of which config version assigned each slot — capacity changes take effect immediately on existing windows |
@@ -511,11 +519,11 @@ Each extension chunk must be provisioned and scanned before the next. There is n
 
 #### 4. Multiple Short-Lived Transactions
 
-Each phase runs in its own short-lived transaction to minimize connection hold time. Chunk provisioning (100 INSERTs) runs in a separate transaction from the find+lock+claim, so row locks are only held for the focused claim operation. The trade-off is more connection checkouts, but each is held briefly — under high TPS this dramatically reduces pool contention compared to a single long-held transaction.
+Each phase runs in its own short-lived transaction to minimize connection hold time. Phase 2's `fetchOrProvisionInitialRange()` combines frontier read and initial provisioning in a single transaction (fast read on the common path). Extension loop chunk provisioning (100 INSERTs) runs in a separate transaction from the find+lock+claim, so row locks are only held for the focused claim operation. The trade-off is more connection checkouts, but each is held briefly — under high TPS this dramatically reduces pool contention compared to a single long-held transaction.
 
 #### 5. Frontier Read Overhead
 
-`SELECT MAX(WNDW_END_TS) FROM RL_WNDW_FRONTIER_TRK WHERE REQ_TS = ?` scans all frontier rows for a given `requestedTime`. The row count grows linearly with extension iterations across all clients — each extension appends a new row.
+`fetchOrProvisionInitialRange()` reads `SELECT MAX(WNDW_END_TS) FROM RL_WNDW_FRONTIER_TRK WHERE REQ_TS = ?` and scans all frontier rows for a given `alignedStart`. The row count grows linearly with extension iterations across all clients — each extension appends a new row.
 
 #### 6. JVM-Local First-Window Cache
 
@@ -543,7 +551,7 @@ See [Known Limitations](#known-limitations) for: shared windows across `requeste
 
 5. **JVM-local first-window cache**: `ConcurrentHashMap<Instant, Boolean>` caches exhausted first windows. Once a first window is known to be full, subsequent requests skip the Phase 1 lock attempt entirely, avoiding a DB round-trip. This is a simple but effective optimization for steady-state load where the first window fills quickly.
 
-6. **Idempotency without distributed state**: The unique constraint on `EVENT_ID` in `RL_EVENT_SLOT_DTL` plus the Phase 0 pre-transaction check provides strong idempotency guarantees without needing Redis or any external coordination. Phase 0 runs in its own short-lived transaction (~1ms), so duplicate/retry requests release their connection immediately without entering the heavier assignment phases. The `claimSlot()` function also handles the rare case where a concurrent thread inserts the same `EVENT_ID` between the Phase 0 check and the INSERT — it catches the duplicate key and re-reads the existing slot without incrementing the counter.
+6. **Idempotency without distributed state**: The unique constraint on `EVENT_ID` in `RL_EVENT_SLOT_DTL` plus the Phase 0 `fetchAssignedSlot()` pre-transaction check provides strong idempotency guarantees without needing Redis or any external coordination. Phase 0 runs in its own short-lived transaction (~1ms), so duplicate/retry requests release their connection immediately without entering the heavier assignment phases. The `claimSlot()` function also handles the rare case where a concurrent thread inserts the same `EVENT_ID` between the Phase 0 check and the INSERT — it catches the duplicate key and re-reads the existing slot without incrementing the counter.
 
 7. **Config-agnostic counters**: By tracking `SLOT_CT` independently of config versions, the system handles dynamic config changes gracefully. Increasing capacity takes effect immediately on partially-filled windows. Decreasing capacity treats over-filled windows as full without modifying existing assignments.
 
@@ -551,7 +559,7 @@ See [Known Limitations](#known-limitations) for: shared windows across `requeste
 
 | Decision | Benefit | Cost |
 |---|---|---|
-| **Split short-lived transactions** | Short connection hold times — each transaction releases its connection quickly, reducing pool contention under high TPS. Provisioning (batch INSERTs) doesn't block the lock-holding transaction. | More connection checkouts per request. A crash between provisioning and claiming leaves provisioned-but-unclaimed rows (harmless — provisioning is idempotent). Find+lock+claim still runs atomically in one transaction. |
+| **Split short-lived transactions** | Short connection hold times — each transaction releases its connection quickly, reducing pool contention under high TPS. Phase 2's `fetchOrProvisionInitialRange()` combines the frontier read and initial provisioning atomically in one transaction (fast read on the common path, provision on first request). Extension loop provisioning (batch INSERTs) doesn't block the lock-holding transaction. | More connection checkouts per request. A crash between provisioning and claiming leaves provisioned-but-unclaimed rows (harmless — provisioning is idempotent). Find+lock+claim still runs atomically in one transaction. |
 | **Append-only `RL_WNDW_FRONTIER_TRK`** | No UPDATE contention on frontier rows. Concurrent threads safely deduplicate. | Row count grows linearly with extension iterations. `SELECT MAX(WNDW_END_TS)` scans more rows over time. Could be mitigated with a covering index or periodic cleanup. |
 | **Batch provisioning (100 rows per chunk)** | Amortizes the cost of provisioning — one thread pays upfront, all others benefit. Larger chunks mean less frequent provisioning. | First thread to hit an unprovisioned chunk pays O(W) INSERTs while holding the transaction open. With W=100 and 4s windows, this provisions 400 seconds into the future. |
 | **JVM-local `firstWindowFull` cache** | Avoids a DB round-trip for a known-full first window. Simple `ConcurrentHashMap`, no external dependencies. | Not shared across nodes — each node independently discovers full first-windows. No TTL eviction — entries accumulate for past windows (memory leak in long-running instances). |
@@ -595,7 +603,7 @@ Let **W** = `max-windows-in-chunk` (default 100), **C** = `max-chunks-to-search`
 |---|---|---|---|---|
 | **Best: Idempotent hit** (Phase 0) | O(1) | 1 SELECT | 0 | 0 |
 | **Best: First window available** (Phase 1) | O(1) | ~5 (SELECT + INSERT + SELECT FOR UPDATE + INSERT + UPDATE) | 1 | 0–1 |
-| **Average: Slot in provisioned range** (Phase 2) | O(K) where K=contended rows | ~5 + 1 SELECT MAX + K×(nested subquery + scout) + INSERT + UPDATE | K retries | 0 (or W if first to provision) |
+| **Average: Slot in provisioned range** (Phase 2) | O(K) where K=contended rows | ~5 + fetchOrProvisionInitialRange (1 txn: SELECT MAX + optional W INSERTs) + K×(nested subquery + scout) + INSERT + UPDATE | K retries | 0 (or W if first to provision) |
 | **Worst: Extension loop** (Phase 3) | O(W × (1 + C)) | Phase 2 + C × (W INSERTs + 1 INSERT frontier + nested find+lock retries) | W × (1 + C) | C × W |
 | **Worst: Exhaustion** | O(W × (1 + C)) | Same as Phase 3 | W × (1 + C) | C × W |
 

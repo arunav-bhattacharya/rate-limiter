@@ -793,11 +793,11 @@
     <!-- ===== SCENE 7: IDEMPOTENCY ===== -->
     <section class="scene" id="scene-7">
         <div class="scene-title">Step 3: Split Transactions</div>
-        <div class="scene-subtitle">Phase 0 &mdash; Idempotency (own short-lived txn) &mdash; Same event_id always returns the same slot</div>
+        <div class="scene-subtitle">Phase 0 &mdash; Idempotency via fetchAssignedSlot() (own short-lived txn) &mdash; Same event_id always returns the same slot</div>
         <div class="idem-container">
-            <div class="jdbc-banner" id="jdbc-banner-7">TXN&#8320; &mdash; Idempotency check (~1ms, releases connection immediately)</div>
+            <div class="jdbc-banner" id="jdbc-banner-7">TXN&#8320; &mdash; fetchAssignedSlot() (~1ms, releases connection immediately)</div>
             <div class="plsql-bar" id="plsql-bar-7">
-                <div class="plsql-func active" id="func-check-7">queryAssignedSlot</div>
+                <div class="plsql-func active" id="func-check-7">fetchAssignedSlot</div>
                 <div class="plsql-func" id="func-first-7">tryLockFirstWindow</div>
                 <div class="plsql-func" id="func-find-7">findAndLockFirstAvailableWindow</div>
                 <div class="plsql-func" id="func-claim-7">claimSlot</div>
@@ -843,7 +843,7 @@
         <div class="skip-container">
             <div class="jdbc-banner">TXN&#8321; &mdash; First window lock + claim (own transaction)</div>
             <div class="plsql-bar" id="plsql-bar-8">
-                <div class="plsql-func done">queryAssignedSlot</div>
+                <div class="plsql-func done">fetchAssignedSlot</div>
                 <div class="plsql-func active" id="func-first-8">tryLockFirstWindow</div>
                 <div class="plsql-func" id="func-find-8">findAndLockFirstAvailableWindow</div>
                 <div class="plsql-func" id="func-claim-8">claimSlot</div>
@@ -901,9 +901,9 @@
         <div class="scene-title">Step 3: Split Transactions</div>
         <div class="scene-subtitle">Phase 2 &mdash; Frontier-Tracked Find+Lock</div>
         <div class="walk-container">
-            <div class="jdbc-banner">TXN&#8322; &mdash; Find+lock+claim (provisioning in separate txn)</div>
+            <div class="jdbc-banner">fetchOrProvisionInitialRange (single txn) &rarr; findLockAndClaim (own txn)</div>
             <div class="plsql-bar" id="plsql-bar-9">
-                <div class="plsql-func done">queryAssignedSlot</div>
+                <div class="plsql-func done">fetchAssignedSlot</div>
                 <div class="plsql-func done">tryLockFirstWindow</div>
                 <div class="plsql-func active" id="func-find-9">findAndLockFirstAvailableWindow</div>
                 <div class="plsql-func" id="func-claim-9">claimSlot</div>
@@ -944,7 +944,7 @@
         <div class="claim-container">
             <div class="jdbc-banner">Within the find+lock+claim transaction &mdash; atomic with the row lock</div>
             <div class="plsql-bar" id="plsql-bar-10">
-                <div class="plsql-func done">queryAssignedSlot</div>
+                <div class="plsql-func done">fetchAssignedSlot</div>
                 <div class="plsql-func done">tryLockFirstWindow</div>
                 <div class="plsql-func done">findAndLockFirstAvailableWindow</div>
                 <div class="plsql-func active" id="func-claim-10">claimSlot</div>
@@ -1476,7 +1476,7 @@
                 resetDbState();
 
                 // Step 0: JDBC banner + functions bar
-                dbState.label = 'Transaction begins \u2014 queryAssignedSlot()';
+                dbState.label = 'TXN\u2080 begins \u2014 fetchAssignedSlot()';
 
                 if (step >= 1) {
                     // First call: SELECT, NO_DATA_FOUND
@@ -1645,7 +1645,7 @@
                 dbState.windowCounter = [
                     { windowStart: '12:00:00', slotCount: 100, cssClass: 'row-full' }
                 ];
-                dbState.label = 'Phase 2 begins: fetchWindowEnd(alignedStart) \u2192 NULL (first request). Calls initWindowEnd().';
+                dbState.label = 'Phase 2 begins: fetchOrProvisionInitialRange(alignedStart) \u2014 single txn: reads frontier, provisions if NULL.';
 
                 // Compute window center positions dynamically
                 const w0 = getWinX(0), w1 = getWinX(1), w2 = getWinX(2), w3 = getWinX(3);
@@ -1670,7 +1670,7 @@
                     dbState.trackWindowEnd = [
                         { requestedTime: '12:00:00', windowEnd: '12:06:44', cssClass: 'row-insert' }
                     ];
-                    dbState.label = 'initWindowEnd() \u2192 ensureChunkProvisioned(): batchInsertWindows(100 rows) + INSERT RL_WNDW_FRONTIER_TRK frontier';
+                    dbState.label = 'fetchOrProvisionInitialRange() \u2192 ensureChunkProvisioned(): batchInsertWindows(100 rows) + INSERT RL_WNDW_FRONTIER_TRK frontier';
                     dbState.sqlHint = 'batchInsert INTO RL_WNDW_CT (WNDW_STRT_TS, SLOT_CT) VALUES (12:00:04,0),(12:00:08,0),...,(12:06:40,0)';
                     dbState.tweSqlHint = 'INSERT INTO RL_WNDW_FRONTIER_TRK (aligned_start=12:00:00, WNDW_END_TS=12:06:44)';
                     dbState.wcBulkNote = '100 rows batch-inserted (12:00:04 \u2192 12:06:40, every 4s)';

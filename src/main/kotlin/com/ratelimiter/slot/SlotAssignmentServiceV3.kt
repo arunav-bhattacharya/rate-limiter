@@ -11,7 +11,6 @@ import org.jetbrains.exposed.exceptions.ExposedSQLException
 import org.jetbrains.exposed.sql.Transaction
 import java.sql.BatchUpdateException
 import org.jetbrains.exposed.sql.transactions.transaction
-import org.slf4j.LoggerFactory
 import java.time.Duration
 import java.time.Instant
 import java.util.concurrent.ConcurrentHashMap
@@ -98,8 +97,7 @@ class SlotAssignmentServiceV3 @Inject constructor(
         // Phase 2: Frontier-tracked find+lock (provisioning and locking in separate transactions)
         val windowSize = config.windowSize
 
-        val windowEnd = windowEndTrackerRepository.fetchWindowEnd(alignedStart)
-            ?: provisionInitialRange(alignedStart, windowSize)
+        val windowEnd = fetchOrProvisionInitialRange(alignedStart, windowSize)
 
         val foundInRange = findLockAndClaim(
             eventId, alignedStart.plus(windowSize), windowEnd,
@@ -142,25 +140,28 @@ class SlotAssignmentServiceV3 @Inject constructor(
     // Each helper runs its own short-lived transaction to minimize connection hold time.
 
     /**
-     * Provision the initial range of windows and record the frontier.
-     * Runs in its own transaction (idempotent batch inserts + frontier insert).
+     * Fetch the provisioning frontier for this alignedStart, or provision the initial range
+     * if none exists. Runs in a single transaction — the common case (already provisioned)
+     * is a fast read; the rare case (first request for this alignedStart) provisions and
+     * records the frontier atomically.
      */
-    private fun provisionInitialRange(alignedStart: Instant, windowSize: Duration): Instant {
-        val chunkStart = alignedStart.plus(windowSize)
-        val windowEnd = chunkStart.plus(windowSize.multipliedBy(maxWindowsInChunk.toLong()))
-        transaction {
-            ensureChunkProvisioned(chunkStart, maxWindowsInChunk, windowSize)
-            try {
-                with(windowEndTrackerRepository) {
-                    insertWindowEnd(alignedStart, windowEnd)
+    private fun fetchOrProvisionInitialRange(alignedStart: Instant, windowSize: Duration): Instant {
+        return transaction {
+            with(windowEndTrackerRepository) { fetchMaxWindowEnd(alignedStart) }
+                ?: run {
+                    val chunkStart = alignedStart.plus(windowSize)
+                    val windowEnd = chunkStart.plus(windowSize.multipliedBy(maxWindowsInChunk.toLong()))
+                    ensureChunkProvisioned(chunkStart, maxWindowsInChunk, windowSize)
+                    try {
+                        with(windowEndTrackerRepository) { insertWindowEnd(alignedStart, windowEnd) }
+                    } catch (_: ExposedSQLException) {
+                        // Concurrent thread already inserted this frontier — safe to ignore
+                    } catch (_: BatchUpdateException) {
+                        // Concurrent thread already inserted this frontier — safe to ignore
+                    }
+                    windowEnd
                 }
-            } catch (_: ExposedSQLException) {
-                // Concurrent thread already inserted this frontier — safe to ignore
-            } catch (_: BatchUpdateException) {
-                // Concurrent thread already inserted this frontier — safe to ignore
-            }
         }
-        return windowEnd
     }
 
     /**

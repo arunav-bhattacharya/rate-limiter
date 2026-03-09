@@ -6,20 +6,117 @@ quarkus:
     username: ${DB_USERNAME:rate_limiter}
     password: ${DB_PASSWORD:rate_limiter}
     jdbc:
-      url: ${DB_URL:jdbc:oracle:thin:@(DESCRIPTION=(ADDRESS=(PROTOCOL=TCP)(HOST=localhost)(PORT=1521))(CONNECT_DATA=(SERVICE_NAME=ORCLPDB1))(TRANSPORT_CONNECT_TIMEOUT=5000)(CONNECT_TIMEOUT=10000)(RETRY_COUNT=3))}
-      min-size: 50
+      # Connection properties without JavaBean setters on OracleDataSourceImpl are
+      # appended to the URL as ?key=value — Agroal silently ignores them in
+      # additional-jdbc-properties. Production DB_URL must also include these.
+      url: ${DB_URL:jdbc:oracle:thin:@(DESCRIPTION=(ADDRESS=(PROTOCOL=TCP)(HOST=localhost)(PORT=1521))(CONNECT_DATA=(SERVICE_NAME=ORCLPDB1)(FAILOVER=ON))(TRANSPORT_CONNECT_TIMEOUT=5000)(CONNECT_TIMEOUT=10000)(RETRY_COUNT=3))?oracle.jdbc.ReadTimeout=5000&oracle.net.keepAlive=true&oracle.jdbc.useThreadLocalBufferCache=true}
+      min-size: 100
       max-size: 150
-      acquisition-timeout: 20S
+
+      # Max time to wait for a connection from the pool. With split transactions
+      # (3-10ms hold time) and min-size 100, acquisition should be near-instant in
+      # steady state. If a connection isn't available in 5s, the pool is genuinely
+      # exhausted (e.g., Oracle slowdown causing 100x longer hold times) — fail-fast
+      # is better than queueing for 20s and causing cascading timeouts downstream.
+      acquisition-timeout: 5S
+
+      # How long a connection above min-size can sit idle before being closed.
+      # After traffic burst grows the pool beyond 100, excess connections drain
+      # back to min-size after 5 minutes of idle. Does not remove connections at or
+      # below min-size — those 100 stay warm permanently.
       idle-removal-timeout: 5M
+
+      # On connection borrow, validates only if the connection has been idle longer
+      # than this interval. At 100+ TPS, connections cycle every ~10ms and almost
+      # never exceed 2s idle — so this adds near-zero overhead in steady state.
+      # Acts as a safety net during traffic dips: catches stale connections that
+      # firewalls/NAT may have killed while idle. Uses the default NETWORK validation
+      # (~0.1-0.2ms Oracle Net ping per check).
+      foreground-validation-interval: 2S
+
+      # A background thread wakes at this interval and validates ALL idle connections
+      # in the pool. Secondary safety net behind foreground validation. With NETWORK
+      # validation and 100 idle connections: 100 x 0.15ms ≈ 15ms total every 2 minutes.
+      # Catches connections that went stale between borrow cycles. With TAC/FAN enabled,
+      # dead connections are proactively removed by FAN events, making this less critical.
       background-validation-interval: 2M
+
+      # Flags connections held longer than this as potential leaks (logs a warning with
+      # the acquisition stack trace). With main app hold times of 10-50ms and rate-limiter
+      # hold times of 3-10ms, anything held >10s is almost certainly a stuck query or
+      # leaked connection. Does NOT close the connection — only logs a diagnostic warning.
+      # Safe for production; the overhead is a single timestamp comparison per connection.
       leak-detection-interval: 10S
-      new-connection-sql: SELECT 1 FROM DUAL
+
+      # Disables JTA/Narayana transaction enlistment. Safe because all DB work uses
+      # Exposed's transaction {} blocks, which manage BEGIN/COMMIT/ROLLBACK directly.
+      # With 'enabled' (default), Agroal enlists every connection in a JTA transaction
+      # on top of Exposed's own management — double-wrapping that adds overhead for
+      # zero benefit. Also avoids TAC replay being disabled due to JTA enlistment.
+      # NOTE: Do NOT use 'disabled' if any code uses @Transactional / JPA / Hibernate.
+      transactions: disabled
+
+      # Our Oracle version is 19c, so all properties and timeouts are chosen based on Oracle 19c.
       additional-jdbc-properties:
-        # Redundant safety — applies even if DB_URL is overridden with a simple URL
+        # Max time to establish a TCP connection to Oracle. For datacenter/local
+        # connections this completes in <100ms. 10s handles cross-region or DNS
+        # resolution delays. Applied even if DB_URL is overridden with a simple URL.
+        # Ref: https://docs.oracle.com/en/database/oracle/oracle-database/19/jajdb/oracle/jdbc/OracleConnection.html
+        #      (CONNECTION_PROPERTY_THIN_NET_CONNECT_TIMEOUT)
         oracle.net.CONNECT_TIMEOUT: "10000"
-        # Must exceed slowest query (batch inserts take 5-6s)
-        oracle.jdbc.ReadTimeout: "60000"
-        oracle.net.READ_TIMEOUT: "60000"
+
+        # Max wait time for Oracle to respond after sending a SQL statement (per
+        # individual socket read, not per transaction). Acts as a blast-radius limiter:
+        # reclaims hung connections instead of blocking indefinitely.
+        # Normal operations: 1-15ms. Under 10x Oracle stress (redo log sync storms,
+        # buffer cache pressure): 50-150ms. 5s gives ~30x headroom over worst-case stress.
+        # Two properties control the same timeout at different layers (JDBC vs Oracle Net).
+        # Setting both ensures the timeout applies regardless of driver version or
+        # internal code path. oracle.jdbc.ReadTimeout (12c+) takes precedence in newer
+        # drivers; oracle.net.READ_TIMEOUT is the fallback for older drivers.
+        # Ref: https://docs.oracle.com/en/database/oracle/oracle-database/19/jajdb/oracle/jdbc/OracleConnection.html
+        #      (CONNECTION_PROPERTY_THIN_READ_TIMEOUT)
+        oracle.jdbc.ReadTimeout: "5000"
+        oracle.net.READ_TIMEOUT: "5000"
+
+        # Enables TCP SO_KEEPALIVE on the socket to Oracle. The OS sends periodic
+        # probes on idle connections to detect dead peers and prevent firewalls/NAT
+        # from silently dropping idle connections (typical cloud idle timeout: 300-350s).
+        # Without this, idle connections in the pool (min-size: 100) can be silently
+        # killed during low-traffic periods; the next request on that connection hangs
+        # until ReadTimeout (10s) before failing.
+        # Ref: https://docs.oracle.com/en/database/oracle/oracle-database/19/jajdb/oracle/jdbc/OracleConnection.html
+        #      (CONNECTION_PROPERTY_NET_KEEPALIVE)
+        oracle.net.keepAlive: "true"
+
+        # Caches prepared statements at the JDBC driver level. When a PreparedStatement
+        # is closed, it's cached by SQL text instead of destroyed. Next prepareStatement()
+        # with the same SQL skips the server-side parse phase (~0.1-0.5ms saved per call).
+        # At 100 TPS with ~25 ops/request = ~2500 statement executions/sec — eliminates
+        # nearly all parse overhead after warmup. Required for TAC: Oracle's JDBC cache
+        # is replay-aware; Agroal's statement cache is not.
+        # NOTE: Each cached statement holds a server-side open cursor. 50 statements x
+        # 150 connections = up to 7500 cursors. Verify Oracle's open_cursors >= 100.
+        # Ref: https://docs.oracle.com/en/database/oracle/oracle-database/19/jajdb/oracle/jdbc/OracleConnection.html
+        #      (CONNECTION_PROPERTY_IMPLICIT_STATEMENT_CACHE_SIZE)
+        # Guide: https://docs.oracle.com/en/database/oracle/oracle-database/19/jjdbc/statement-and-resultset-caching.html
+        oracle.jdbc.implicitStatementCacheSize: "50"
+
+        # Number of rows fetched in the first network round-trip for SELECT queries
+        # (default: 10). Reduces round-trips for multi-row result sets. Most rate-limiter
+        # queries return 1 row (lock queries), but this benefits the main app's multi-row
+        # SELECTs and existence-check queries.
+        # Ref: https://docs.oracle.com/en/database/oracle/oracle-database/19/jajdb/oracle/jdbc/OracleConnection.html
+        #      (CONNECTION_PROPERTY_DEFAULT_ROW_PREFETCH)
+        oracle.jdbc.defaultRowPrefetch: "20"
+
+        # By default, Oracle JDBC caches internal byte[]/char[] buffers per-connection.
+        # This flag caches per-thread instead, sharing buffers across all connections used
+        # by that thread. With pool size (150) > active threads (~50-100), this eliminates
+        # ~50-100 redundant buffer caches, reducing memory footprint.
+        # Ref: https://docs.oracle.com/en/database/oracle/oracle-database/19/jajdb/oracle/jdbc/OracleConnection.html
+        #      (CONNECTION_PROPERTY_USE_THREADLOCAL_BUFFER_CACHE)
+        oracle.jdbc.useThreadLocalBufferCache: "true"
 
   log:
     category:
