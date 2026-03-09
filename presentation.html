@@ -1330,7 +1330,7 @@
         1: {
             enter() {
                 scenes[1].querySelectorAll('.anim-item').forEach((el, i) => schedule(() => el.classList.add('show'), i * 150));
-                const order = ['arch-client', 'arrow-1', 'arch-api', 'arrow-2', 'arch-resource', 'arrow-3', 'arch-service', 'arrow-4', 'arch-config', 'arch-sql', 'arrow-5', 'arch-db'];
+                const order = ['arch-client', 'arrow-1', 'arch-api', 'arrow-2', 'arch-resource', 'arrow-3', 'arch-service', 'arrow-4', 'arch-config', 'arch-repos', 'arrow-5', 'arch-db'];
                 let d = 400;
                 order.forEach(id => {
                     const el = document.getElementById(id);
