@@ -147,8 +147,7 @@
         .arch-box.visible { animation: popIn 0.4s ease forwards; }
         .arch-box.highlight { border-color: var(--primary); box-shadow: 0 0 15px rgba(74,158,255,0.2); }
 
-        /* ===== STEP CONTROLS (shared across scenes) ===== */
-        .step-controls { display: none; }
+        /* ===== STEP CONTROLS ===== */
         #step-controls-global {
             display: none; align-items: center;
             gap: 16px;
@@ -186,7 +185,7 @@
         .func-bar .func-item.done {
             opacity: 0.7; border-color: var(--success); color: var(--success);
         }
-        .jdbc-banner {
+        .txn-banner {
             text-align: center; margin-bottom: 18px;
             padding: 6px 16px; border-radius: 8px;
             background: rgba(74,158,255,0.1); border: 1px solid rgba(74,158,255,0.3);
@@ -272,7 +271,7 @@
         #scene-2 .arch-arrow { width: 2px; height: 40px; position: relative; overflow: visible; z-index: 1; }
         #scene-2 .arch-arrow-line { width: 2px; height: 0; background: var(--primary); transition: height 0.4s ease; margin: 0 auto; }
         #scene-2 .arch-arrow-line.drawn { height: 100%; }
-        #scene-2 .branch-container { display: flex; gap: 40px; align-items: flex-start; position: relative; }
+        #scene-2 .branch-container { display: flex; gap: 40px; align-items: stretch; position: relative; }
         #scene-2 .db-tables { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; }
         #scene-2 .db-table-name { font-family: var(--mono); font-size: 11px; color: var(--text-muted); padding: 4px 10px; background: rgba(255,255,255,0.03); border-radius: 4px; border-left: 2px solid var(--warning); }
 
@@ -490,7 +489,7 @@
         /* ===== SCENE 10: CLAIM SLOT ===== */
         #scene-10 .claim-container { width: 100%; max-width: 820px; }
         #scene-10 .func-bar { margin-bottom: 6px; }
-        #scene-10 .jdbc-banner { margin-bottom: 6px; font-size: 11px; padding: 4px 12px; }
+        #scene-10 .txn-banner { margin-bottom: 6px; font-size: 11px; padding: 4px 12px; }
         #scene-10 .row-data { font-size: 11px; line-height: 1.5; }
         #scene-10 .jitter-box {
             text-align: center; margin-bottom: 6px; padding: 6px 10px;
@@ -543,17 +542,6 @@
         #scene-11 .response-json { max-width: 500px; margin: 0 auto; transition: all 0.3s ease; }
         #scene-11 .response-json .resp-header { font-weight: 600; margin-bottom: 8px; }
         #scene-11 .response-json .resp-note { font-size: 12px; margin-top: 8px; font-style: italic; }
-        #scene-11 .summary-replay { margin-top: 20px; text-align: center; }
-        #scene-11 .replay-flow { display: flex; align-items: center; justify-content: center; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
-        #scene-11 .replay-node {
-            padding: 6px 14px; border-radius: 6px; font-size: 12px;
-            background: var(--surface); border: 1px solid var(--border);
-            opacity: 0; transition: all 0.3s ease;
-        }
-        #scene-11 .replay-node.visible { opacity: 1; }
-        #scene-11 .replay-node.active-node { border-color: var(--primary); background: rgba(74,158,255,0.15); }
-        #scene-11 .replay-arrow { color: var(--primary); font-size: 14px; opacity: 0; transition: opacity 0.2s ease; }
-        #scene-11 .replay-arrow.visible { opacity: 1; }
 
     </style>
 </head>
@@ -597,13 +585,13 @@
             <div class="arch-row"><div class="arch-box highlight" id="arch-service">SlotAssignmentService</div></div>
             <div class="arch-arrow"><div class="arch-arrow-line" id="arrow-4"></div></div>
             <div class="branch-container">
-                <div class="arch-box" id="arch-config">
-                    RateLimitConfigRepository
-                    <br><span class="ttl-badge" style="margin-top: 6px;">TTL: 5s cache</span>
+                <div class="arch-box" id="arch-config" style="flex-direction: column; align-items: center; text-align: center; padding: 10px 16px;">
+                    Config Repository
+                    <span class="ttl-badge" style="margin-top: 4px;">TTL: 5s cache</span>
                 </div>
-                <div class="arch-box" id="arch-repos">
-                    Repositories
-                    <br><span style="font-size: 11px; color: var(--text-muted);">EventSlot / WindowSlotCounter / WindowEndTracker</span>
+                <div class="arch-box" id="arch-repos" style="flex-direction: column; align-items: center; text-align: center; padding: 10px 16px;">
+                    Transactional Repositories
+                    <span style="font-size: 10px; color: var(--text-muted); line-height: 1.3;">EventSlot · WindowSlotCounter · WindowEndTracker</span>
                 </div>
             </div>
             <div class="arch-arrow"><div class="arch-arrow-line" id="arrow-5"></div></div>
@@ -651,7 +639,7 @@
             <div class="step-connector" id="conn-2"></div>
             <div class="step-card" id="step-3">
                 <div class="step-number">3</div>
-                <div class="step-content"><h3>Split Transactions</h3><p>Idempotency, provisioning, find+lock+claim &mdash; each in short-lived transactions</p></div>
+                <div class="step-content"><h3>Core Processing</h3><p>Idempotency, provisioning, find+lock+claim &mdash; each in short-lived transactions</p></div>
             </div>
             <div class="step-connector" id="conn-3"></div>
             <div class="step-card" id="step-4">
@@ -704,11 +692,6 @@
                     <span class="field-name">isActive:</span> <span class="field-val">true</span>
                 </div>
             </div>
-        </div>
-        <div class="step-controls" id="step-controls-5">
-            <button class="step-btn" id="s5-prev" disabled>&#9664;</button>
-            <span class="step-indicator" id="s5-indicator">Step 1 / 3</span>
-            <button class="step-btn" id="s5-next">&#9654;</button>
         </div>
     </section>
 
@@ -783,24 +766,19 @@
             </div>
         </div>
         <div class="step-desc" id="s6-desc"></div>
-        <div class="step-controls" id="step-controls-6">
-            <button class="step-btn" id="s6-prev" disabled>&#9664;</button>
-            <span class="step-indicator" id="s6-indicator">Step 1 / 7</span>
-            <button class="step-btn" id="s6-next">&#9654;</button>
-        </div>
     </section>
 
     <!-- ===== SCENE 7: IDEMPOTENCY ===== -->
     <section class="scene" id="scene-7">
-        <div class="scene-title">Step 3: Split Transactions</div>
+        <div class="scene-title">Step 3: Core Process</div>
         <div class="scene-subtitle">Phase 0 &mdash; Idempotency via fetchAssignedSlot() (own short-lived txn) &mdash; Same event_id always returns the same slot</div>
         <div class="idem-container">
-            <div class="jdbc-banner" id="jdbc-banner-7">TXN&#8320; &mdash; fetchAssignedSlot() (~1ms, releases connection immediately)</div>
-            <div class="func-bar" id="func-bar-7">
-                <div class="func-item active" id="func-check-7">fetchAssignedSlot</div>
-                <div class="func-item" id="func-first-7">tryLockFirstWindow</div>
-                <div class="func-item" id="func-find-7">findAndLockFirstAvailableWindow</div>
-                <div class="func-item" id="func-claim-7">claimSlot</div>
+            <div class="txn-banner"><b>TXN&#8320;</b> &mdash; <i>fetchAssignedSlot() (~1ms, releases connection immediately)</i></div>
+            <div class="func-bar">
+                <div class="func-item active">fetchAssignedSlot</div>
+                <div class="func-item">tryLockFirstWindow</div>
+                <div class="func-item">findAndLockFirstAvailableWindow</div>
+                <div class="func-item">claimSlot</div>
             </div>
             <div class="idem-paths">
                 <div class="idem-path" id="idem-first-call">
@@ -829,24 +807,19 @@
             </div>
         </div>
         <div class="db-tables-panel" id="db-tables-7"></div>
-        <div class="step-controls" id="step-controls-7">
-            <button class="step-btn" id="s7-prev" disabled>&#9664;</button>
-            <span class="step-indicator" id="s7-indicator">Step 1 / 4</span>
-            <button class="step-btn" id="s7-next">&#9654;</button>
-        </div>
     </section>
 
     <!-- ===== SCENE 8: PHASE 1 — FIRST WINDOW ===== -->
     <section class="scene" id="scene-8">
-        <div class="scene-title">Step 3: Split Transactions</div>
+        <div class="scene-title">Step 3: Core Process</div>
         <div class="scene-subtitle">Phase 1 &mdash; First Window (Proportional Capacity)</div>
         <div class="skip-container">
-            <div class="jdbc-banner">TXN&#8321; &mdash; First window lock + claim (own transaction)</div>
-            <div class="func-bar" id="func-bar-8">
+            <div class="txn-banner"><b>TXN&#8321;</b> &mdash; <i>First window lock + claim (own transaction)</i></div>
+            <div class="func-bar">
                 <div class="func-item done">fetchAssignedSlot</div>
-                <div class="func-item active" id="func-first-8">tryLockFirstWindow</div>
-                <div class="func-item" id="func-find-8">findAndLockFirstAvailableWindow</div>
-                <div class="func-item" id="func-claim-8">claimSlot</div>
+                <div class="func-item active">tryLockFirstWindow</div>
+                <div class="func-item">findAndLockFirstAvailableWindow</div>
+                <div class="func-item">claimSlot</div>
             </div>
             <div class="skip-sql" id="skip-sql-8">
                 <span style="color: #c792ea;">INSERT INTO</span> RL_WNDW_CT(WNDW_STRT_TS, SLOT_CT) <span style="color: #c792ea;">VALUES</span>(alignedStart, 0) <span style="color: var(--text-muted);">&mdash; catch DUP</span><br>
@@ -889,24 +862,19 @@
             </div>
         </div>
         <div class="db-tables-panel" id="db-tables-8"></div>
-        <div class="step-controls" id="step-controls-8">
-            <button class="step-btn" id="s8-prev" disabled>&#9664;</button>
-            <span class="step-indicator" id="s8-indicator">Step 1 / 5</span>
-            <button class="step-btn" id="s8-next">&#9654;</button>
-        </div>
     </section>
 
     <!-- ===== SCENE 9: PHASE 2 — FRONTIER-TRACKED FIND+LOCK ===== -->
     <section class="scene" id="scene-9">
-        <div class="scene-title">Step 3: Split Transactions</div>
+        <div class="scene-title">Step 3: Core Process</div>
         <div class="scene-subtitle">Phase 2 &mdash; Frontier-Tracked Find+Lock</div>
         <div class="walk-container">
-            <div class="jdbc-banner">fetchOrProvisionInitialRange (single txn) &rarr; findLockAndClaim (own txn)</div>
-            <div class="func-bar" id="func-bar-9">
+            <div class="txn-banner"><b>TXN&#8322;</b> &mdash; <i>fetchOrProvisionInitialRange &rarr;</i> <b>TXN&#8323;</b> &mdash; <i>findLockAndClaim</i></div>
+            <div class="func-bar">
                 <div class="func-item done">fetchAssignedSlot</div>
                 <div class="func-item done">tryLockFirstWindow</div>
-                <div class="func-item active" id="func-find-9">findAndLockFirstAvailableWindow</div>
-                <div class="func-item" id="func-claim-9">claimSlot</div>
+                <div class="func-item active">findAndLockFirstAvailableWindow</div>
+                <div class="func-item">claimSlot</div>
             </div>
             <div class="thread-legend">
                 <div class="thread-tag"><div class="thread-dot" style="background: #4a9eff;"></div> Thread 1</div>
@@ -930,24 +898,19 @@
             <div class="nowait-label" id="nowait-label-9">SKIP LOCKED &mdash; skip contended rows atomically!</div>
         </div>
         <div class="db-tables-panel" id="db-tables-9"></div>
-        <div class="step-controls" id="step-controls-9">
-            <button class="step-btn" id="s9-prev" disabled>&#9664;</button>
-            <span class="step-indicator" id="s9-indicator">Step 1 / 5</span>
-            <button class="step-btn" id="s9-next">&#9654;</button>
-        </div>
     </section>
 
     <!-- ===== SCENE 10: CLAIM SLOT ===== -->
     <section class="scene" id="scene-10">
-        <div class="scene-title">Step 3: Split Transactions</div>
-        <div class="scene-subtitle">claimSlot() &mdash; insertEventSlot + incrementSlotCount</div>
+        <div class="scene-title">Step 3: Core Process</div>
+        <div class="scene-subtitle">Phase 2 &mdash; claimSlot() &mdash; insertEventSlot + incrementSlotCount</div>
         <div class="claim-container">
-            <div class="jdbc-banner">Within the find+lock+claim transaction &mdash; atomic with the row lock</div>
-            <div class="func-bar" id="func-bar-10">
+            <div class="txn-banner"><b>TXN&#8323;</b> &mdash; <i>Within the find+lock+claim transaction &mdash; atomic with the row lock</i></div>
+            <div class="func-bar">
                 <div class="func-item done">fetchAssignedSlot</div>
                 <div class="func-item done">tryLockFirstWindow</div>
                 <div class="func-item done">findAndLockFirstAvailableWindow</div>
-                <div class="func-item active" id="func-claim-10">claimSlot</div>
+                <div class="func-item active">claimSlot</div>
             </div>
             <!-- App Server note (outside jitter box) -->
             <div id="app-server-note-10" style="text-align: center; margin-bottom: 5px; padding: 5px 12px; border-radius: 8px; background: rgba(46,204,113,0.08); border: 1px dashed var(--success); font-size: 11px; color: var(--success); opacity: 0; transition: opacity 0.5s;">
@@ -1027,11 +990,6 @@
             </div>
         </div>
         <div class="db-tables-panel" id="db-tables-10"></div>
-        <div class="step-controls" id="step-controls-10">
-            <button class="step-btn" id="s10-prev" disabled>&#9664;</button>
-            <span class="step-indicator" id="s10-indicator">Step 1 / 4</span>
-            <button class="step-btn" id="s10-next">&#9654;</button>
-        </div>
     </section>
 
     <!-- ===== SCENE 11: RESULTS ===== -->
@@ -1237,10 +1195,6 @@
             const el = typeof id === 'string' ? document.getElementById(id) : id;
             if (el) el.classList.add('visible', 'show');
         }, delay);
-    }
-    function hideElement(id) {
-        const el = typeof id === 'string' ? document.getElementById(id) : id;
-        if (el) el.classList.remove('visible', 'show');
     }
     function resetScene(sceneId) {
         const scene = document.getElementById(sceneId);
