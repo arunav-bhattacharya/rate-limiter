@@ -1068,9 +1068,9 @@
                 <div class="walk-window" id="ww-3"><div class="win-time">12:00:12</div><div class="win-lock" id="lock-3">&#128274;</div><div class="win-status" id="status-3"></div></div>
             </div>
             <div class="sql-caption" id="sql-caption-10">
-                <span style="color: #c792ea;">SELECT</span> WNDW_STRT_TS <span style="color: #c792ea;">FROM</span> RL_WNDW_CT <span style="color: #c792ea;">WHERE</span> WNDW_STRT_TS = (<span style="color: #c792ea;">SELECT</span> WNDW_STRT_TS <span style="color: #c792ea;">WHERE</span> SLOT_CT &lt; ? <span style="color: #c792ea;">ORDER BY</span> WNDW_STRT_TS <span style="color: #c792ea;">FETCH FIRST 1 ROW ONLY</span>) <span style="color: var(--warning); font-weight: 600;">FOR UPDATE SKIP LOCKED</span>
+                <span style="color: #c792ea;">SELECT</span> WNDW_STRT_TS <span style="color: #c792ea;">FROM</span> RL_WNDW_CT <span style="color: #c792ea;">WHERE</span> WNDW_STRT_TS &gt;= ? <span style="color: #c792ea;">AND</span> SLOT_CT &lt; ? <span style="color: #c792ea;">ORDER BY</span> WNDW_STRT_TS ASC <span style="color: var(--warning); font-weight: 600;">FOR UPDATE SKIP LOCKED</span> <span style="color: var(--text-muted);">&mdash; fetchSize=1, rowPrefetch=1</span>
             </div>
-            <div class="nowait-label" id="nowait-label-10">SKIP LOCKED &mdash; skip contended rows atomically!</div>
+            <div class="nowait-label" id="nowait-label-10">SKIP LOCKED + fetchSize=1 &mdash; cursor skips locked rows server-side, each thread locks a different row!</div>
         </div>
         <div class="db-tables-panel" id="db-tables-10"></div>
     </section>
@@ -1230,7 +1230,7 @@
             <div class="ext-findlock-detail" id="ext-findlock-detail-12">
                 <div class="ext-findlock-header" id="ext-findlock-header-12">findLockAndClaim(searchFrom, chunkEnd)</div>
                 <div class="ext-findlock-body">
-                    Reuses same nested subquery + <span style="color: var(--warning); font-weight: 600;">FOR UPDATE SKIP LOCKED</span>
+                    Reuses same cursor-based <span style="color: var(--warning); font-weight: 600;">FOR UPDATE SKIP LOCKED</span> + fetchSize=1
                     pattern as initial range, but searches only the newly provisioned [searchFrom, chunkEnd) range.
                 </div>
                 <div class="ext-findlock-result" id="ext-findlock-result-12"></div>
@@ -1893,7 +1893,7 @@
                     dbState.wcBulkNote = '100 rows batch-inserted (12:00:04 \u2192 12:06:40, every 4s)';
                 }
                 if (step >= 2) {
-                    // All threads scan provisioned range with findAndLockFirstAvailableWindow
+                    // All threads scan provisioned range with cursor-based findAndLockFirstAvailableWindow (fetchSize=1)
                     // Note: code searches from alignedStart+windowSize (12:00:04), not from 12:00:00
                     dbState.windowCounter = [
                         { windowStart: '12:00:00', slotCount: 100, cssClass: 'row-full' },
@@ -1919,11 +1919,11 @@
                     document.getElementById('status-0').style.color = 'var(--error)';
                     document.getElementById('status-0').classList.add('visible');
                     document.getElementById('sql-caption-10').classList.add('visible');
-                    dbState.label = 'findAndLockFirstAvailableWindow(from=12:00:04, to=12:06:44): nested subquery finds+locks first available row.';
-                    dbState.sqlHint = 'Nested subquery: inner SELECT finds candidate (no lock), outer SELECT locks by PK (FOR UPDATE SKIP LOCKED)';
+                    dbState.label = 'findAndLockFirstAvailableWindow(from=12:00:04, to=12:06:44): cursor scans PK index, skips locked rows, locks first available.';
+                    dbState.sqlHint = 'SELECT ... ORDER BY WNDW_STRT_TS ASC FOR UPDATE SKIP LOCKED (fetchSize=1, rowPrefetch=1)';
                 }
                 if (step >= 3) {
-                    // T1 locks first available via nestedFindAndLock, T2/T3 get SKIP LOCKED
+                    // T1 locks first available, T2/T3 cursor skips locked row and locks next
                     t1.style.transition = 'all 0.8s cubic-bezier(0.25, -0.3, 0.25, 1.3)';
                     t2.style.transition = 'all 0.8s cubic-bezier(0.25, -0.3, 0.25, 1.3)';
                     t3.style.transition = 'all 0.8s cubic-bezier(0.25, -0.3, 0.25, 1.3)';
@@ -1942,8 +1942,8 @@
                         { windowStart: '12:00:12', slotCount: 0, cssClass: '' }
                     ];
                     dbState.wcBulkNote = '(showing 4 of 100 provisioned rows)';
-                    dbState.label = 'nestedFindAndLock: T1 locks 12:00:04. T2/T3 hit SKIP LOCKED \u2192 fallback findEarliestCandidateWindow \u2192 advance past it.';
-                    dbState.sqlHint = 'T1: outer SELECT locks 12:00:04 by PK; T2/T3: SKIP LOCKED \u2192 candidate=12:00:04 \u2192 searchFrom=12:00:08';
+                    dbState.label = 'T1 cursor locks 12:00:04. T2/T3 cursors skip locked row server-side \u2192 advance to 12:00:08.';
+                    dbState.sqlHint = 'fetchSize=1: Oracle cursor scans PK index, SKIP LOCKED skips T1\u2019s row, T2/T3 naturally get next available';
                 }
                 if (step >= 4) {
                     t1.style.left = w1 + 'px'; t1.style.top = '25px';
@@ -1964,7 +1964,7 @@
                     ];
                     dbState.wcBulkNote = '(showing 4 of 100 provisioned rows)';
                     dbState.label = 'T2 locks 12:00:08. T3 hits SKIP LOCKED again \u2192 advance searchFrom to 12:00:12.';
-                    dbState.sqlHint = 'nestedFindAndLock retry loop: advance past locked candidates via findEarliestCandidateWindow()';
+                    dbState.sqlHint = 'T2 cursor locks 12:00:08. T3 cursor skips both locked rows server-side \u2192 locks 12:00:12';
                 }
                 if (step >= 5) {
                     t1.style.left = w1 + 'px'; t1.style.top = '25px';

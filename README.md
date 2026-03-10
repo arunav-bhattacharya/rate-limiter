@@ -94,6 +94,60 @@ Response:
                 +-------------------------------+
 ```
 
+## Key Domain Concepts
+
+### Windows
+
+Fixed-duration time intervals used as the fundamental unit of rate limiting.
+
+- **Duration**: Configurable, default 4 seconds (`windowSize` in config)
+- **Epoch-aligned**: `windowStart = time - (time % windowSizeSecs)` — deterministic, no drift. All service instances agree on window boundaries without coordination.
+- **Capacity**: Maximum `maxPerWindow` events per window (default: 100)
+- **Example** (4-second windows):
+  ```
+  Window 0: 2025-06-01T12:00:00Z → 12:00:04Z
+  Window 1: 2025-06-01T12:00:04Z → 12:00:08Z
+  Window 2: 2025-06-01T12:00:08Z → 12:00:12Z
+  ```
+
+### Slots
+
+Assigned execution times for events within a window.
+
+- **Granularity**: Millisecond-precise (jitter applied within the window)
+- **Idempotency**: One slot per unique `eventId` via `UNIQUE(EVENT_ID)` constraint
+- **Immutability**: Once assigned, slots are never modified (only read in duplicate recovery)
+- **Result**: `AssignedSlot(eventId, scheduledTime, delay)`
+
+### Chunks
+
+Batches of windows provisioned together to amortize provisioning cost.
+
+- **Size**: Configurable via `max-windows-in-chunk` (default: 100 windows = 400 seconds at 4s window size)
+- **Provisioning**: `ensureChunkProvisioned()` batch-inserts counter rows
+- **Guard**: Existence check on last window prevents thundering herd — the first thread provisions, subsequent threads skip
+- **Idempotency**: `batchInsert` catches duplicate exceptions silently
+
+### Frontier
+
+The furthest provisioned window boundary for a given `alignedStart`.
+
+- **Storage**: `RL_WNDW_FRONTIER_TRK(REQ_TS, WNDW_END_TS)` table
+- **Read**: `SELECT MAX(WNDW_END_TS) WHERE REQ_TS = alignedStart`
+- **Write**: `INSERT (alignedStart, chunkEnd)` — append-only, deduplication via composite PK
+- **Benefit**: Eliminates tail-end scanning; requests jump directly to the provisioning frontier instead of scanning from window 0
+
+### Jitter
+
+Random offset within a window to spread load uniformly.
+
+- **Implementation**: `ThreadLocalRandom.nextLong(lower, upper)`
+- **First window**: `lower = elapsedMs` — constrains jitter so `scheduledTime >= requestedTime`
+- **Subsequent windows**: `lower = 0` — full window width available
+- **Why random**: When `maxPerWindow` is increased dynamically, new events must not cluster on deterministic grid points left by previously assigned events under a different capacity
+
+---
+
 ## REST API
 
 ### Slot Assignment
@@ -238,9 +292,8 @@ Multi-phase approach with split short-lived transactions to minimize connection 
 **Phase 2 — Frontier-Tracked Find+Lock with Extension** *(provision and locking in separate transactions)*: A unified loop that provisions window ranges and searches them. Iteration 0 covers the initial range; iterations 1..`max-chunks-to-search` (default 2) extend beyond the frontier.
 1. **Fetch or provision range** *(single transaction per iteration)*: Iteration 0 calls `fetchOrProvisionInitialRange()` — reads `SELECT MAX(WNDW_END_TS) FROM RL_WNDW_FRONTIER_TRK WHERE REQ_TS = alignedStart`. If the frontier exists, returns it immediately (fast read, ~1ms). If null (first request for this `alignedStart`), provisions the initial chunk (`maxWindowsInChunk` rows, default 100) and inserts the frontier row atomically. Subsequent iterations call `provisionChunk()` — batch-provision a chunk beyond the frontier (guard: skip if last window already exists) + append a new frontier row (catch DUP).
 2. **Find+lock+claim** *(own transaction per iteration)*: `findLockAndClaim()` runs `findAndLockFirstAvailableWindow()` + `claimSlot()` together in a focused transaction that holds the row lock only for the duration of the find+lock and the INSERT+UPDATE:
-   - **`nestedFindAndLock()`** — a single SQL with nested subquery: inner `SELECT ... FETCH FIRST 1 ROW ONLY` finds the earliest candidate (no lock), outer `SELECT ... FOR UPDATE SKIP LOCKED` locks it by primary key and re-checks `SLOT_CT` under the lock. One round-trip on success.
-   - **On null**: run **`findEarliestCandidateWindow()`** — a non-locking scout query that distinguishes "no candidates exist" (O(1) exit) from "candidate was locked by another session" (advance `searchFrom` past it and retry).
-   - The retry loop continues until a window is locked or the range is exhausted.
+   - **`findAndLockFirstAvailableWindow()`** — Uses Oracle JDBC cursor control (`fetchSize=1`, `rowPrefetch=1`) with `SELECT ... FOR UPDATE SKIP LOCKED` (no `FETCH FIRST`). Oracle processes the cursor lazily: it scans the PK index in order, tries to lock each matching row, skips locked rows server-side, and returns the first successfully locked row. Only that one row is locked.
+   - This is superior to `FETCH FIRST 1 ROW ONLY + FOR UPDATE SKIP LOCKED`, where Oracle picks 1 candidate before locking — two threads can pick the same candidate, one wins the lock, the other gets empty result and cascades to fallback. With `fetchSize=1`, concurrent threads naturally lock different rows because the skip-locked logic runs within the cursor scan.
 3. **Next iteration or exhaustion**: If `findLockAndClaim()` returns null, advance `searchFrom` to the end of the current range and repeat from step 1 for the next iteration. If all iterations are exhausted, throw `SlotAssignmentException`. Client retries naturally extend the frontier further.
 
 ### Frontier Tracking (`RL_WNDW_FRONTIER_TRK`)
@@ -254,13 +307,16 @@ This eliminates the tail-end scanning problem: instead of starting from chunk 0 
 
 ### Concurrency
 
-Three-method pattern for zero-wait contention resolution:
+Cursor-based zero-wait contention resolution:
 
-1. **`nestedFindAndLock()`** — Nested subquery: inner `SELECT` finds earliest candidate (no lock, `FETCH FIRST 1 ROW ONLY`), outer `SELECT` locks exactly that row by PK (`FOR UPDATE SKIP LOCKED`) and re-checks `SLOT_CT < max` under the lock. One SQL round-trip on the success path.
-2. **`findEarliestCandidateWindow()`** — Non-locking scout query. Runs only when `nestedFindAndLock()` returns null, to distinguish "no candidates exist" (O(1) exit) from "candidate was locked by another session" (advance past it).
-3. **`findAndLockFirstAvailableWindow()`** — Retry loop combining the two: try nested find+lock → on null, scout → if locked, advance `searchFrom` past the locked candidate → retry. Terminates when a window is locked or the range is truly exhausted.
+**`findAndLockFirstAvailableWindow()`** — Uses Oracle JDBC cursor control (`fetchSize=1`, `rowPrefetch=1`) with `SELECT ... ORDER BY WNDW_STRT_TS ASC FOR UPDATE SKIP LOCKED`. No `FETCH FIRST` — the row limiting is done at the JDBC level, not the SQL level. Oracle processes the cursor lazily through the PK index: for each matching row, it tries to acquire the row lock; if locked by another session, `SKIP LOCKED` skips it server-side and advances to the next row. The client reads one row (`rs.next()` once) and closes the cursor.
 
-This ensures concurrent threads never block each other — each thread either acquires a different row or skips past locked rows atomically.
+This ensures concurrent threads naturally lock different rows without blocking:
+- Thread A scans → Window 5 → locks it ✓
+- Thread B scans → Window 5 → locked → SKIP → Window 6 → locks it ✓
+- Thread C scans → Window 5 → SKIP → Window 6 → SKIP → Window 7 → locks it ✓
+
+This is superior to `FETCH FIRST 1 ROW ONLY + FOR UPDATE SKIP LOCKED`, where Oracle picks 1 candidate before locking — two threads can select the same candidate, one wins, the other gets an empty result and must fall back.
 
 ### Pre-Provisioning
 
@@ -355,21 +411,14 @@ sequenceDiagram
 
         Note over SAS,DB: Find+lock+claim (own transaction)
         SAS->>DB: BEGIN TXN_claim
-        loop until window found or range exhausted
-            SAS->>DB: nestedFindAndLock: SELECT WNDW_STRT_TS<br/>WHERE WNDW_STRT_TS = (SELECT ... FETCH FIRST 1 ROW ONLY)<br/>AND SLOT_CT < max FOR UPDATE SKIP LOCKED
-            alt locked a window
-                SAS->>DB: INSERT RL_EVENT_SLOT_DTL (catch DUP)
-                SAS->>DB: UPDATE RL_WNDW_CT SET SLOT_CT = SLOT_CT + 1
-                SAS->>DB: COMMIT TXN_claim
-                SAS-->>Caller: AssignedSlot
-            else null — scout to distinguish
-                SAS->>DB: findEarliestCandidateWindow (no lock)
-                alt no candidates exist
-                    Note over SAS: range exhausted — next iteration
-                else candidate locked by another thread
-                    Note over SAS: advance searchFrom past it, retry
-                end
-            end
+        SAS->>DB: findAndLockFirstAvailableWindow:<br/>SELECT WNDW_STRT_TS FROM RL_WNDW_CT<br/>WHERE ... ORDER BY WNDW_STRT_TS ASC<br/>FOR UPDATE SKIP LOCKED<br/>(fetchSize=1, rowPrefetch=1 — cursor skips locked rows server-side)
+        alt locked a window
+            SAS->>DB: INSERT RL_EVENT_SLOT_DTL (catch DUP)
+            SAS->>DB: UPDATE RL_WNDW_CT SET SLOT_CT = SLOT_CT + 1
+            SAS->>DB: COMMIT TXN_claim
+            SAS-->>Caller: AssignedSlot
+        else null — range exhausted
+            Note over SAS: next iteration (provision + retry)
         end
     end
     SAS-->>Caller: throw SlotAssignmentException
@@ -417,20 +466,11 @@ flowchart TD
         FRONTIER --> FIND_LOCK
 
         subgraph TX2 ["findLockAndClaim (own txn)"]
-            subgraph FIND_LOCK ["findAndLockFirstAvailableWindow (retry loop)"]
-                direction TB
-                NFL["nestedFindAndLock<br/>Inner: SELECT ... FETCH FIRST 1 ROW ONLY (no lock)<br/>Outer: SELECT ... FOR UPDATE SKIP LOCKED"]
-                NFL --> NFL_C{Result?}
-                NFL_C -- "non-null<br/>(locked!)" --> LOCKED_WIN[Window locked]
-                NFL_C -- "null" --> SCOUT["findEarliestCandidateWindow<br/>(non-locking scout query)"]
-                SCOUT --> SCOUT_C{Candidate exists?}
-                SCOUT_C -- "null<br/>(no candidates)" --> NO_WIN[Range exhausted]
-                SCOUT_C -- "non-null<br/>(was locked)" --> ADVANCE["searchFrom =<br/>candidate + windowSize"]
-                ADVANCE --> NFL
-            end
-
-            LOCKED_WIN --> CLAIM2[claimSlot<br/>fullJitterMs]
+            CURSOR["findAndLockFirstAvailableWindow<br/>SELECT ... ORDER BY WNDW_STRT_TS ASC<br/>FOR UPDATE SKIP LOCKED<br/>(fetchSize=1, rowPrefetch=1)<br/>Oracle cursor skips locked rows server-side"]
+            CURSOR --> CURSOR_C{Result?}
+            CURSOR_C -- "non-null<br/>(locked!)" --> CLAIM2[claimSlot<br/>fullJitterMs]
             CLAIM2 --> NEW2[/NEW/]
+            CURSOR_C -- "null<br/>(range exhausted)" --> NO_WIN[Range exhausted]
         end
 
         NO_WIN --> EXT_NEXT{More iterations?}
@@ -448,8 +488,7 @@ flowchart TD
     style RET_N fill:#2ecc71,color:#fff
     style F fill:#e74c3c,color:#fff
     style RET_X fill:#e74c3c,color:#fff
-    style NFL fill:#9b59b6,color:#fff
-    style SCOUT fill:#e67e22,color:#fff
+    style CURSOR fill:#9b59b6,color:#fff
     style CACHE_CHK fill:#f39c12,color:#fff
     style CACHE_SET fill:#f39c12,color:#fff
 ```
@@ -465,7 +504,7 @@ flowchart TD
 | **Epoch-aligned windows** | `windowStart = epochSec - (epochSec % windowSizeSecs)` — deterministic, no drift |
 | **Proportional first-window capacity** | `maxFirstWindow = floor(maxPerWindow × remainingMs / windowSizeMs)` — prevents overscheduling in a partially-elapsed window |
 | **Frontier-tracked search** | Append-only `RL_WNDW_FRONTIER_TRK` table tracks the provisioned boundary per `alignedStart`. `fetchOrProvisionInitialRange()` reads or provisions the frontier atomically in a single transaction. New requests jump directly to the frontier instead of scanning from chunk 0 |
-| **Nested find+lock query** | Nested subquery: inner `SELECT ... FETCH FIRST 1 ROW ONLY` (no lock) finds earliest candidate; outer `SELECT ... FOR UPDATE SKIP LOCKED` locks it by PK. Retry loop with non-locking scout query advances past locked rows. One SQL round-trip on success |
+| **Cursor-based find+lock** | Oracle JDBC cursor with `fetchSize=1` + `rowPrefetch=1` and `SELECT ... FOR UPDATE SKIP LOCKED` (no `FETCH FIRST`). Oracle scans the PK index lazily, skips locked rows server-side, and returns the first successfully locked row. Concurrent threads naturally lock different rows — no cascading fallbacks |
 | **Configurable chunk extensions** | `max-chunks-to-search` (default 2) controls how many additional chunks are provisioned and searched when the initial range is full |
 | **Idempotency** | Phase 0 pre-transaction check via `fetchAssignedSlot()` (own short-lived txn, ~1ms) + `UNIQUE(EVENT_ID)` constraint with `DUP_VAL_ON_INDEX` recovery — duplicate calls return the same slot without incrementing counters and without entering the heavier assignment phases |
 | **SKIP LOCKED concurrency** | Row-level locking skips contended rows instead of blocking — concurrent threads don't wait for each other |
@@ -479,9 +518,9 @@ flowchart TD
 
 `ensureChunkProvisioned()` inserts `maxWindowsInChunk` (default 100) rows per chunk via `batchInsert`. The first thread to hit an unprovisioned chunk pays the full provisioning cost; subsequent threads skip via the existence-check guard on the last window.
 
-#### 2. Nested Subquery Retry Cost
+#### 2. Cursor Scan Cost Under High Contention
 
-`findAndLockFirstAvailableWindow()` uses a retry loop: `nestedFindAndLock()` attempts an atomic find+lock, and on failure (SKIP LOCKED), a non-locking scout query identifies the locked row so `searchFrom` can advance past it. Under high contention (many threads locking adjacent windows simultaneously), this loop may execute multiple iterations — each iteration costs 2 SQL round-trips (one nested subquery + one scout query). The index `RL_WNDW_CT_I01X` on `(WNDW_STRT_TS, SLOT_CT)` helps the inner subquery find candidates efficiently, but degrades as most windows approach capacity.
+`findAndLockFirstAvailableWindow()` uses an Oracle cursor with `fetchSize=1` that scans the PK index in order, skipping locked rows server-side via `FOR UPDATE SKIP LOCKED`. Under extreme contention (many threads locking adjacent windows simultaneously), Oracle may need to skip several locked rows before finding an available one. Each skip is a server-side operation (no additional round-trip), but the cursor holds the connection while scanning. The index `RL_WNDW_CT_I01X` on `(WNDW_STRT_TS, SLOT_CT)` helps filter candidates efficiently.
 
 #### 3. Sequential Extension Loop
 
@@ -511,9 +550,7 @@ See [Known Limitations](#known-limitations) for: shared windows across `requeste
 
 ### Design Accomplishments
 
-1. **Zero-wait concurrency via nested subquery**: The `nestedFindAndLock()` pattern achieves atomic find+lock in a single SQL statement. The inner subquery finds the earliest candidate without acquiring a lock (`FETCH FIRST 1 ROW ONLY`), and the outer query locks exactly that row by primary key (`FOR UPDATE SKIP LOCKED`). This avoids the range-lock problem where a broad `WHERE ... FOR UPDATE SKIP LOCKED` acquires locks on rows that may not be the target, and achieves one round-trip on the success path.
-
-2. **Disambiguating SKIP LOCKED null via scout query**: When `nestedFindAndLock()` returns null, it's ambiguous — either no candidates exist or the candidate was locked by another session. The non-locking `findEarliestCandidateWindow()` scout query resolves this in O(1) by checking if a candidate exists without acquiring a lock. If no candidate exists, the loop exits immediately instead of retrying fruitlessly.
+1. **Zero-wait concurrency via cursor-based locking**: `findAndLockFirstAvailableWindow()` uses Oracle JDBC cursor control (`fetchSize=1`, `rowPrefetch=1`) with `SELECT ... FOR UPDATE SKIP LOCKED` — no `FETCH FIRST`. The row limiting is done at the JDBC level, not the SQL level. Oracle processes the cursor lazily through the PK index: for each matching row, it tries to acquire the row lock; if locked, `SKIP LOCKED` skips it server-side and advances to the next. The client reads one row and closes the cursor. This is superior to `FETCH FIRST 1 ROW ONLY + FOR UPDATE SKIP LOCKED`, where Oracle picks 1 candidate before locking — two threads can pick the same candidate, causing one to get an empty result and cascade to fallback. With `fetchSize=1`, concurrent threads naturally lock different rows because the skip-locked logic runs within the cursor scan — no retry loops, no scout queries, no disambiguation needed.
 
 3. **Append-only frontier tracking**: The `RL_WNDW_FRONTIER_TRK` table uses INSERT-only writes with a composite PK `(REQ_TS, WNDW_END_TS)`. No `UPDATE` contention — concurrent threads inserting the same frontier row deduplicate via the PK constraint. This eliminates the need for pessimistic locking on frontier rows.
 
@@ -534,8 +571,7 @@ See [Known Limitations](#known-limitations) for: shared windows across `requeste
 | **Batch provisioning (100 rows per chunk)** | Amortizes the cost of provisioning — one thread pays upfront, all others benefit. Larger chunks mean less frequent provisioning. | First thread to hit an unprovisioned chunk pays O(W) INSERTs while holding the transaction open. With W=100 and 4s windows, this provisions 400 seconds into the future. |
 | **JVM-local `firstWindowFull` cache** | Avoids a DB round-trip for a known-full first window. Simple `ConcurrentHashMap`, no external dependencies. | Not shared across nodes — each node independently discovers full first-windows. No TTL eviction — entries accumulate for past windows (memory leak in long-running instances). |
 | **Random jitter (not deterministic grid)** | Safe under dynamic config changes — new events don't cluster on grid points left by previously assigned events under a different `maxPerWindow`. | Instantaneous TPS guarantee is statistical, not absolute. Sub-second bursts can theoretically exceed the per-window limit. |
-| **Scout query on SKIP LOCKED null** | Distinguishes "no candidates" from "locked" in O(1), preventing infinite retry loops. | Extra round-trip on the contention path (2 queries instead of 1). Acceptable because contention is the exception, not the rule. |
-| **`FETCH FIRST 1 ROW ONLY` in inner subquery** | Stops scanning after the first match — O(1) per invocation when candidates exist. The outer query then locks exactly one row. | If the found candidate is locked by another session (SKIP LOCKED), we need the scout query fallback. A full range scan would find the next candidate immediately but would acquire broader locks. |
+| **JDBC cursor control (`fetchSize=1`) instead of `FETCH FIRST`** | Oracle's cursor scans lazily, skipping locked rows server-side. Concurrent threads naturally lock different rows — no cascading fallbacks, no scout queries, no retry loops. Single round-trip on success. | Couples the find+lock method to Oracle's JDBC driver (`OracleConnection`, `OraclePreparedStatement`). The cursor holds the connection during the scan, though with short transactions this is negligible. |
 
 ### What Could Be Improved (and Why We Didn't)
 
@@ -543,9 +579,9 @@ See [Known Limitations](#known-limitations) for: shared windows across `requeste
 
 #### 2. Use `SELECT ... FOR UPDATE SKIP LOCKED` with `FETCH FIRST N ROWS ONLY` to lock multiple rows at once
 
-**Idea**: Instead of locking one row per nested subquery call, lock a batch of N rows and iterate locally, returning the first non-full one.
+**Idea**: Instead of locking one row via cursor control, lock a batch of N rows and iterate locally, returning the first non-full one.
 
-**Why we didn't**: Locking N rows acquires locks on rows that may not be needed, increasing contention with other threads. The nested subquery pattern locks exactly one row — the minimum possible. Under typical load, the first `nestedFindAndLock()` call succeeds (one round-trip), and the retry loop only fires under genuine contention. Locking N rows would hurt the common case to optimize the rare contention case.
+**Why we didn't**: Locking N rows acquires locks on rows that may not be needed, increasing contention with other threads. The cursor-based approach with `fetchSize=1` locks exactly one row — the minimum possible. Oracle's cursor lazily skips locked rows server-side, so concurrent threads naturally lock different rows without retry loops. Locking N rows would hurt the common case to optimize a scenario that doesn't occur with cursor-based locking.
 
 #### 3. Use advisory locks instead of `SELECT FOR UPDATE`
 
@@ -573,15 +609,91 @@ Let **W** = `max-windows-in-chunk` (default 100), **C** = `max-chunks-to-search`
 |---|---|---|---|---|
 | **Best: Idempotent hit** (Phase 0) | O(1) | 1 SELECT | 0 | 0 |
 | **Best: First window available** (Phase 1) | O(1) | ~5 (SELECT + INSERT + SELECT FOR UPDATE + INSERT + UPDATE) | 1 | 0–1 |
-| **Average: Slot in initial range** (Phase 2, iteration 0) | O(K) where K=contended rows | ~5 + fetchOrProvisionInitialRange (1 txn: SELECT MAX + optional W INSERTs) + K×(nested subquery + scout) + INSERT + UPDATE | K retries | 0 (or W if first to provision) |
+| **Average: Slot in initial range** (Phase 2, iteration 0) | O(1) amortized | ~5 + fetchOrProvisionInitialRange (1 txn: SELECT MAX + optional W INSERTs) + cursor scan (skips locked rows server-side) + INSERT + UPDATE | 1 (cursor skips locked rows) | 0 (or W if first to provision) |
 | **Worst: Extension loop** (Phase 2, iterations 1+) | O(W × (1 + C)) | Phase 2 iter 0 + C × (W INSERTs + 1 INSERT frontier + nested find+lock retries) | W × (1 + C) | C × W |
 | **Worst: Exhaustion** | O(W × (1 + C)) | Same as extension loop | W × (1 + C) | C × W |
 
 With defaults (W=100, C=2): worst case scans up to **300 windows** and provisions up to **200 additional rows**.
 
 **Throughput ceiling**: At steady state with concurrent load, throughput is bounded by:
-- **Lock contention**: Each `claimSlot()` holds a row lock for INSERT + UPDATE in a focused transaction. With M slots per window and W windows provisioned, up to W concurrent threads can claim simultaneously (one per window).
+- **Lock contention**: Each `claimSlot()` holds a row lock for INSERT + UPDATE in a focused transaction. With M slots per window and W windows provisioned, up to W concurrent threads can claim simultaneously (one per window). The cursor-based `fetchSize=1` approach ensures concurrent threads naturally lock different rows — Oracle skips locked rows server-side within the cursor scan.
 - **Provisioning bottleneck**: The first thread to exhaust a range pays O(W) INSERTs in a separate provisioning transaction. This no longer blocks the lock-holding transaction — other threads can find+lock+claim concurrently while provisioning completes.
+
+---
+
+## Window Size Tuning
+
+The `windowSize` parameter (set via `POST /admin/rate-limit/config`) is the single most impactful tuning lever. It controls how time is divided, and cascades through every phase of the algorithm.
+
+### How Window Size Affects Each Dimension
+
+All examples assume a constant scheduling rate of 25 TPS and `maxWindowsInChunk=100`.
+
+| Dimension | 1s (max=25) | 4s (max=100) | 30s (max=750) | 60s (max=1500) |
+|---|---|---|---|---|
+| **Phase 1 success rate** | ~50% | ~50% | ~50% | ~50% |
+| **Provisioning frequency** | Every ~100s | Every ~7 min | Every ~50 min | Every ~100 min |
+| **`RL_WNDW_CT` rows/day** | 86,400 | 21,600 | 2,880 | 1,440 |
+| **Extension search horizon** | 5 min | 20 min | 2.5 hrs | 5 hrs |
+| **Scheduling delay (Phase 2)** | 0.5-1.5s | 2-6s | 15-45s | 30-90s |
+| **500-event burst absorption** | 19 windows needed | 5 windows needed | Fits in Phase 1 | Fits in Phase 1 |
+| **`firstWindowFull` cache entries/day** | 86,400 | 21,600 | 2,880 | 1,440 |
+
+Phase 1 success rate (~50%) is independent of window size — the proportional capacity formula cancels out: events in the first half of a window succeed, events in the second half overflow. Similarly, lock contention ratio (`TPS * lockHoldTime / 1s`) is constant because the per-second rate is the same regardless of window duration.
+
+### Why Larger Windows Are Generally Better
+
+**Provisioning overhead scales inversely.** Each chunk provisions `100 * windowSize` of future time. With 1s windows, a chunk covers 100 seconds and reprovisioning recurs ~36 times/hour. With 30s windows, a chunk covers 50 minutes and reprovisioning recurs ~1.2 times/hour — a 30x reduction in batch INSERT work.
+
+**Table growth scales inversely.** `RL_WNDW_CT` gains one row per window. 1s windows produce 86,400 rows/day; 30s windows produce 2,880. The index on `(WNDW_STRT_TS, SLOT_CT)` stays smaller, and `findAndLockFirstAvailableWindow()` scans fewer full rows before finding a non-full candidate.
+
+**Burst absorption improves.** A 500-event burst arriving mid-window: with 30s windows (`maxPerWindow=750`), most or all events fit in Phase 1 (single transaction, no Phase 2/3 work). With 1s windows (`maxPerWindow=25`), 475 events overflow to Phase 2, consuming 19 additional windows and triggering multiple find+lock+claim transactions.
+
+**Extension coverage deepens proportionally.** With `maxChunksToSearch=2`, the total search horizon is `3 * 100 * windowSize`. For 1s windows that's 5 minutes (7,500 events before exhaustion); for 30s windows that's 2.5 hours (225,000 events). Same config, dramatically different burst tolerance.
+
+### The Upper Bound: Why Not 60s+
+
+Beyond ~60s, two problems emerge:
+
+1. **Hot row contention.** All concurrent events within a window target the same `RL_WNDW_CT` row for `FOR UPDATE SKIP LOCKED`. At 100 TPS with 3ms lock hold time, the cumulative lock pressure on a single row is significant — heavy SKIP LOCKED skipping occurs, pushing threads to the next window.
+
+2. **SKIP LOCKED delay penalty.** When a thread is skipped, it jumps to the next window — 60+ seconds into the future. For a payments rate limiter, 30-90s scheduling delays on ~50% of events is operationally unacceptable.
+
+**30s vs 60s**: Operational costs (provisioning frequency, table growth) are nearly identical — both are in the "rarely matters" range. The differentiator is delay: 30s gives half the scheduling delay for Phase 2 events, with no meaningful downside.
+
+### The Lower Bound: Why Not <4s
+
+Small windows cause:
+- **Frequent provisioning** — batch INSERTs become a recurring hot-path cost instead of an amortized cold-path cost
+- **Rapid table growth** — 86,400 rows/day for 1s windows, straining index scans
+- **Shallow extension coverage** — 5 minutes of search horizon with 1s windows; a sustained burst of 75 events/sec for 100 seconds exhausts the entire search space
+- **Cascading SKIP LOCKED spillover** — each window holds only 25 slots; when Thread A locks window W, Thread B skips to W+1, which fills in <1 second, cascading further. Larger windows (750 slots) absorb spillover without cascading
+- **Cache memory leak** — `firstWindowFull` accumulates 86,400 entries/day with no TTL eviction
+
+The only advantage of small windows is **tighter instantaneous rate control** — jitter spreads events over the full window, so a 1s window provides near-exact per-second delivery rates. A 30s window allows sub-second bursts within the window.
+
+### Recommendation
+
+| Requirement | Recommended Window Size |
+|---|---|
+| Strict per-second rate precision (payment gateway with hard per-second limit) | 1-4s |
+| General rate limiting with moderate precision | 4-10s |
+| Throughput-optimized, delay-tolerant | 10-30s |
+
+The default `PT4S` is a good general-purpose choice. If sub-second rate precision isn't critical, increasing to 10-30s reduces provisioning overhead, table growth, and Phase 3 frequency while improving burst absorption.
+
+### Chunk Provisioning Size
+
+The `max-windows-in-chunk` parameter (default 100) controls how many windows are batch-provisioned at once. With 30s windows at 25-30 TPS scheduling / 100 TPS incoming:
+
+| Chunk Size | Initial Range Duration | Phase 3 Trigger Interval | Batch INSERT Cost |
+|---|---|---|---|
+| 20 | ~3 min | ~3 min | ~2-5ms |
+| 50 | ~7 min | ~7 min | ~3-8ms |
+| **100** | **~14-18 min** | **~14-18 min** | **~5-15ms** |
+| 200 | ~28-36 min | ~28-36 min | ~10-30ms |
+
+**100 is the sweet spot.** It provides 14-18 minutes of capacity before any extension is needed, and the 5-15ms batch INSERT in a separate short transaction is negligible in a 150-connection pool. Going higher than 200 risks recreating the connection-hold-time problem that split transactions were designed to fix (50-150ms provisioning transactions). Below 30 increases Phase 3 frequency without meaningful benefit.
 
 ---
 
