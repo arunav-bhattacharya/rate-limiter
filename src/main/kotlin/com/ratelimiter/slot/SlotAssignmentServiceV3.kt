@@ -7,10 +7,7 @@ import com.ratelimiter.repo.WindowSlotCounterRepository
 import jakarta.enterprise.context.ApplicationScoped
 import jakarta.inject.Inject
 import org.eclipse.microprofile.config.inject.ConfigProperty
-import com.ratelimiter.db.isDuplicateKeyViolation
-import org.jetbrains.exposed.exceptions.ExposedSQLException
 import org.jetbrains.exposed.sql.Transaction
-import java.sql.BatchUpdateException
 import org.jetbrains.exposed.sql.transactions.transaction
 import java.time.Duration
 import java.time.Instant
@@ -143,12 +140,8 @@ class SlotAssignmentServiceV3 @Inject constructor(
                 ?: run {
                     val chunkStart = alignedStart.plus(windowSize)
                     val windowEnd = chunkStart.plus(windowSize.multipliedBy(maxWindowsInChunk.toLong()))
-                    try {
-                        ensureChunkProvisioned(chunkStart, maxWindowsInChunk, windowSize)
-                        with(windowEndTrackerRepository) { insertWindowEnd(alignedStart, windowEnd) }
-                    } catch (e: ExposedSQLException) {
-                        if (!e.isDuplicateKeyViolation()) throw e
-                    }
+                    ensureChunkProvisioned(chunkStart, maxWindowsInChunk, windowSize)
+                    with(windowEndTrackerRepository) { insertWindowEnd(alignedStart, windowEnd) }
                     windowEnd
                 }
         }
@@ -166,13 +159,9 @@ class SlotAssignmentServiceV3 @Inject constructor(
         chunkEnd: Instant
     ) {
         transaction {
-            try {
-                ensureChunkProvisioned(from, windowCount, windowSize)
-                with(windowEndTrackerRepository) {
-                    insertWindowEnd(alignedStart, chunkEnd)
-                }
-            } catch (e: ExposedSQLException) {
-                if (!e.isDuplicateKeyViolation()) throw e
+            ensureChunkProvisioned(from, windowCount, windowSize)
+            with(windowEndTrackerRepository) {
+                insertWindowEnd(alignedStart, chunkEnd)
             }
         }
     }
@@ -217,13 +206,7 @@ class SlotAssignmentServiceV3 @Inject constructor(
         val windows = (0 until windowCount).map { i ->
             from.plus(windowSize.multipliedBy(i.toLong()))
         }
-        try {
-            with(windowSlotCounterRepository) { batchInsertWindows(windows) }
-        } catch (e: ExposedSQLException) {
-            if (!e.isDuplicateKeyViolation()) throw e
-        } catch (e: BatchUpdateException) {
-            if (!e.isDuplicateKeyViolation()) throw e
-        }
+        with(windowSlotCounterRepository) { batchInsertWindows(windows) }
     }
 
     /**

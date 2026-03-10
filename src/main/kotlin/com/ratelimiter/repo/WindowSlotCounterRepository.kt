@@ -7,6 +7,7 @@ import oracle.jdbc.OracleConnection
 import oracle.jdbc.OraclePreparedStatement
 import org.jetbrains.exposed.exceptions.ExposedSQLException
 import org.jetbrains.exposed.sql.IntegerColumnType
+import java.sql.BatchUpdateException
 import org.jetbrains.exposed.sql.SqlExpressionBuilder
 import org.jetbrains.exposed.sql.Transaction
 import org.jetbrains.exposed.sql.batchInsert
@@ -145,10 +146,16 @@ class WindowSlotCounterRepository {
 
     fun Transaction.batchInsertWindows(windows: List<Instant>) {
         val now = Instant.now()
-        WindowCounterTable.batchInsert(windows, shouldReturnGeneratedValues = false) { window ->
-            this[WindowCounterTable.windowStart] = window
-            this[WindowCounterTable.slotCount] = 0
-            this[WindowCounterTable.createdAt] = now
+        try {
+            WindowCounterTable.batchInsert(windows, shouldReturnGeneratedValues = false) { window ->
+                this[WindowCounterTable.windowStart] = window
+                this[WindowCounterTable.slotCount] = 0
+                this[WindowCounterTable.createdAt] = now
+            }
+        } catch (e: BatchUpdateException) {
+            if (!e.isDuplicateKeyViolation()) throw e
+        } catch (e: ExposedSQLException) {
+            if (!e.isDuplicateKeyViolation()) throw e
         }
     }
 
