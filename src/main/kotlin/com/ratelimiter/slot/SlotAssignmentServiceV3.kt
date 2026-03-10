@@ -142,12 +142,10 @@ class SlotAssignmentServiceV3 @Inject constructor(
                 ?: run {
                     val chunkStart = alignedStart.plus(windowSize)
                     val windowEnd = chunkStart.plus(windowSize.multipliedBy(maxWindowsInChunk.toLong()))
-                    ensureChunkProvisioned(chunkStart, maxWindowsInChunk, windowSize)
                     try {
+                        ensureChunkProvisioned(chunkStart, maxWindowsInChunk, windowSize)
                         with(windowEndTrackerRepository) { insertWindowEnd(alignedStart, windowEnd) }
                     } catch (_: ExposedSQLException) {
-                        // Concurrent thread already inserted this frontier — safe to ignore
-                    } catch (_: BatchUpdateException) {
                         // Concurrent thread already inserted this frontier — safe to ignore
                     }
                     windowEnd
@@ -167,14 +165,12 @@ class SlotAssignmentServiceV3 @Inject constructor(
         chunkEnd: Instant
     ) {
         transaction {
-            ensureChunkProvisioned(from, windowCount, windowSize)
             try {
+                ensureChunkProvisioned(from, windowCount, windowSize)
                 with(windowEndTrackerRepository) {
                     insertWindowEnd(alignedStart, chunkEnd)
                 }
             } catch (_: ExposedSQLException) {
-                // Concurrent thread already inserted this frontier — safe to ignore
-            } catch (_: BatchUpdateException) {
                 // Concurrent thread already inserted this frontier — safe to ignore
             }
         }
