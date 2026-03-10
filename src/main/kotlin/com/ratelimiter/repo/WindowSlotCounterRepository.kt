@@ -91,13 +91,11 @@ class WindowSlotCounterRepository {
         }
 
         // Don't use connection.close as that will close the entire transaction — just close the statement and result set.
-        return try {
+        return stmt.use { stmt ->
             val rs = stmt.executeQuery()
             val result = if (rs.next()) rs.getTimestamp("WNDW_STRT_TS").toInstant() else null
             rs.close()
             result
-        } finally {
-            stmt.close()
         }
     }
 
