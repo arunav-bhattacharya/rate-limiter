@@ -7,6 +7,7 @@ import com.ratelimiter.repo.WindowSlotCounterRepository
 import jakarta.enterprise.context.ApplicationScoped
 import jakarta.inject.Inject
 import org.eclipse.microprofile.config.inject.ConfigProperty
+import com.ratelimiter.db.isDuplicateKeyViolation
 import org.jetbrains.exposed.exceptions.ExposedSQLException
 import org.jetbrains.exposed.sql.Transaction
 import java.sql.BatchUpdateException
@@ -145,8 +146,8 @@ class SlotAssignmentServiceV3 @Inject constructor(
                     try {
                         ensureChunkProvisioned(chunkStart, maxWindowsInChunk, windowSize)
                         with(windowEndTrackerRepository) { insertWindowEnd(alignedStart, windowEnd) }
-                    } catch (_: ExposedSQLException) {
-                        // Concurrent thread already inserted this frontier — safe to ignore
+                    } catch (e: ExposedSQLException) {
+                        if (!e.isDuplicateKeyViolation()) throw e
                     }
                     windowEnd
                 }
@@ -170,8 +171,8 @@ class SlotAssignmentServiceV3 @Inject constructor(
                 with(windowEndTrackerRepository) {
                     insertWindowEnd(alignedStart, chunkEnd)
                 }
-            } catch (_: ExposedSQLException) {
-                // Concurrent thread already inserted this frontier — safe to ignore
+            } catch (e: ExposedSQLException) {
+                if (!e.isDuplicateKeyViolation()) throw e
             }
         }
     }
@@ -218,10 +219,10 @@ class SlotAssignmentServiceV3 @Inject constructor(
         }
         try {
             with(windowSlotCounterRepository) { batchInsertWindows(windows) }
-        } catch (_: ExposedSQLException) {
-            // Concurrent thread already provisioned some/all rows — safe to ignore
-        } catch (_: BatchUpdateException) {
-            // Concurrent thread already provisioned some/all rows — safe to ignore
+        } catch (e: ExposedSQLException) {
+            if (!e.isDuplicateKeyViolation()) throw e
+        } catch (e: BatchUpdateException) {
+            if (!e.isDuplicateKeyViolation()) throw e
         }
     }
 

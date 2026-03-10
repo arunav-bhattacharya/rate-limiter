@@ -1,6 +1,7 @@
 package com.ratelimiter.repo
 
 import com.ratelimiter.db.WindowEndTrackerTable
+import com.ratelimiter.db.isDuplicateKeyViolation
 import jakarta.enterprise.context.ApplicationScoped
 import org.jetbrains.exposed.exceptions.ExposedSQLException
 import org.jetbrains.exposed.sql.Transaction
@@ -48,8 +49,8 @@ class WindowEndTrackerRepository {
                 it[WindowEndTrackerTable.windowEnd] = windowEnd
                 it[createdAt] = Instant.now()
             }
-        } catch (_: ExposedSQLException) {
-            // Duplicate key — another thread already inserted this exact frontier row
+        } catch (e: ExposedSQLException) {
+            if (!e.isDuplicateKeyViolation()) throw e
         }
     }
 }

@@ -1,6 +1,7 @@
 package com.ratelimiter.repo
 
 import com.ratelimiter.db.WindowCounterTable
+import com.ratelimiter.db.isDuplicateKeyViolation
 import jakarta.enterprise.context.ApplicationScoped
 import oracle.jdbc.OracleConnection
 import oracle.jdbc.OraclePreparedStatement
@@ -110,8 +111,8 @@ class WindowSlotCounterRepository {
                 it[slotCount] = 0
                 it[createdAt] = Instant.now()
             }
-        } catch (_: ExposedSQLException) {
-            // Duplicate key — window already exists
+        } catch (e: ExposedSQLException) {
+            if (!e.isDuplicateKeyViolation()) throw e
         }
     }
 

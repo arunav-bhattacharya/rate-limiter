@@ -1,6 +1,7 @@
 package com.ratelimiter.repo
 
 import com.ratelimiter.db.RateLimitEventSlotTable
+import com.ratelimiter.db.isDuplicateKeyViolation
 import com.ratelimiter.slot.AssignedSlot
 import jakarta.enterprise.context.ApplicationScoped
 import org.jetbrains.exposed.exceptions.ExposedSQLException
@@ -69,7 +70,8 @@ class EventSlotRepository {
                     it[RateLimitEventSlotTable.createdAt] = now
                 }
                 true
-            } catch (_: ExposedSQLException) {
+            } catch (e: ExposedSQLException) {
+                if (!e.isDuplicateKeyViolation()) throw e
                 false
             }
         }
@@ -98,8 +100,8 @@ class EventSlotRepository {
                 it[RateLimitEventSlotTable.createdAt] = now
             }
             true
-        } catch (_: ExposedSQLException) {
-            // Unique constraint violation on event_id — slot already exists
+        } catch (e: ExposedSQLException) {
+            if (!e.isDuplicateKeyViolation()) throw e
             false
         }
     }
