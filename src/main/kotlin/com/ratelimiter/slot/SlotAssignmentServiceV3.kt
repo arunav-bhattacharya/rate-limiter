@@ -64,7 +64,7 @@ class SlotAssignmentServiceV3 @Inject constructor(
         val firstJitterMs = computeFirstWindowJitterMs(elapsedMs, config.windowSizeMs)
 
         // Phase 0: Pre-transaction idempotency check (own short-lived transaction).
-        // Releases connection in ~1ms, avoids holding a connection through Phases 1-3
+        // Releases connection in ~1ms, avoids holding a connection through Phases 1-2
         // for duplicate/retry requests.
         val existing = eventSlotRepository.fetchAssignedSlot(eventId)
         if (existing != null) {
@@ -94,36 +94,27 @@ class SlotAssignmentServiceV3 @Inject constructor(
             if (firstWindowSlot != null) return firstWindowSlot
         }
 
-        // Phase 2: Frontier-tracked find+lock (provisioning and locking in separate transactions)
+        // Phase 2: Frontier-tracked find+lock with extension
+        // Iteration 0 searches the initial provisioned range; iterations 1..maxChunksToSearch extend beyond.
         val windowSize = config.windowSize
+        var searchFrom = alignedStart.plus(windowSize)
 
-        val windowEnd = fetchOrProvisionInitialRange(alignedStart, windowSize)
-
-        val foundInRange = findLockAndClaim(
-            eventId, alignedStart.plus(windowSize), windowEnd,
-            config.maxPerWindow, windowSize, requestedTime, config.configId
-        )
-        if (foundInRange != null) {
-            return foundInRange
-        }
-
-        // Phase 3: Extension loop — provision chunks and find+lock+claim in separate transactions
-        var searchFrom = windowEnd
-        for (chunk in 0 until maxChunksToSearch) {
-            val chunkEnd = searchFrom.plus(windowSize.multipliedBy(maxWindowsInChunk.toLong()))
-
-            provisionChunk(searchFrom, maxWindowsInChunk, windowSize, alignedStart, chunkEnd)
-
-            val foundWindow = findLockAndClaim(
-                eventId, searchFrom, chunkEnd,
-                config.maxPerWindow, windowSize, requestedTime, config.configId
-            )
-
-            if (foundWindow != null) {
-                return foundWindow
+        for (iteration in 0..maxChunksToSearch) {
+            val searchTo = if (iteration == 0) {
+                fetchOrProvisionInitialRange(alignedStart, windowSize)
+            } else {
+                val chunkEnd = searchFrom.plus(windowSize.multipliedBy(maxWindowsInChunk.toLong()))
+                provisionChunk(searchFrom, maxWindowsInChunk, windowSize, alignedStart, chunkEnd)
+                chunkEnd
             }
 
-            searchFrom = chunkEnd
+            val found = findLockAndClaim(
+                eventId, searchFrom, searchTo,
+                config.maxPerWindow, windowSize, requestedTime, config.configId
+            )
+            if (found != null) return found
+
+            searchFrom = searchTo
         }
 
         throw SlotAssignmentException(

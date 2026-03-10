@@ -235,13 +235,13 @@ Multi-phase approach with split short-lived transactions to minimize connection 
 
 **Phase 1 — First Window** *(own transaction)*: Try the epoch-aligned window at `alignedStart` with proportional capacity and constrained jitter. Uses `SELECT FOR UPDATE SKIP LOCKED` to acquire a lock. If locked and has capacity, `claimSlot()` runs in the same transaction.
 
-**Phase 2 — Frontier-Tracked Find+Lock** *(fetch/provision and locking in separate transactions)*:
-1. **Fetch or provision initial range** *(single transaction)*: `fetchOrProvisionInitialRange()` reads `SELECT MAX(WNDW_END_TS) FROM RL_WNDW_FRONTIER_TRK WHERE REQ_TS = alignedStart`. If the frontier exists, returns it immediately (fast read, ~1ms). If null (first request for this `alignedStart`), provisions the initial chunk (`maxWindowsInChunk` rows, default 100) and inserts the frontier row — all atomically in the same transaction.
-2. **Find+lock+claim** *(own transaction)*: `findLockAndClaim()` runs `findAndLockFirstAvailableWindow()` + `claimSlot()` together in a focused transaction that holds the row lock only for the duration of the find+lock and the INSERT+UPDATE:
+**Phase 2 — Frontier-Tracked Find+Lock with Extension** *(provision and locking in separate transactions)*: A unified loop that provisions window ranges and searches them. Iteration 0 covers the initial range; iterations 1..`max-chunks-to-search` (default 2) extend beyond the frontier.
+1. **Fetch or provision range** *(single transaction per iteration)*: Iteration 0 calls `fetchOrProvisionInitialRange()` — reads `SELECT MAX(WNDW_END_TS) FROM RL_WNDW_FRONTIER_TRK WHERE REQ_TS = alignedStart`. If the frontier exists, returns it immediately (fast read, ~1ms). If null (first request for this `alignedStart`), provisions the initial chunk (`maxWindowsInChunk` rows, default 100) and inserts the frontier row atomically. Subsequent iterations call `provisionChunk()` — batch-provision a chunk beyond the frontier (guard: skip if last window already exists) + append a new frontier row (catch DUP).
+2. **Find+lock+claim** *(own transaction per iteration)*: `findLockAndClaim()` runs `findAndLockFirstAvailableWindow()` + `claimSlot()` together in a focused transaction that holds the row lock only for the duration of the find+lock and the INSERT+UPDATE:
    - **`nestedFindAndLock()`** — a single SQL with nested subquery: inner `SELECT ... FETCH FIRST 1 ROW ONLY` finds the earliest candidate (no lock), outer `SELECT ... FOR UPDATE SKIP LOCKED` locks it by primary key and re-checks `SLOT_CT` under the lock. One round-trip on success.
    - **On null**: run **`findEarliestCandidateWindow()`** — a non-locking scout query that distinguishes "no candidates exist" (O(1) exit) from "candidate was locked by another session" (advance `searchFrom` past it and retry).
    - The retry loop continues until a window is locked or the range is exhausted.
-3. **Extension loop** *(Phase 3)*: If the range is full, extend from the frontier up to `max-chunks-to-search` (default 2) chunks. Each iteration runs two separate transactions: (a) `provisionChunk()` — batch-provision a chunk (guard: skip if last window already exists) + append a new frontier row (catch DUP), then (b) `findLockAndClaim()` — find+lock+claim in a focused transaction. Client retries naturally extend further.
+3. **Next iteration or exhaustion**: If `findLockAndClaim()` returns null, advance `searchFrom` to the end of the current range and repeat from step 1 for the next iteration. If all iterations are exhausted, throw `SlotAssignmentException`. Client retries naturally extend the frontier further.
 
 ### Frontier Tracking (`RL_WNDW_FRONTIER_TRK`)
 
@@ -334,56 +334,45 @@ sequenceDiagram
     DB-->>SAS: count (if < maxFirstWindow, claim + commit)
     SAS->>DB: COMMIT TXN₁
 
-    Note over SAS: Phase 2: fetchOrProvisionInitialRange (single transaction)
-    SAS->>DB: BEGIN TXN_frontier
-    SAS->>DB: SELECT MAX(WNDW_END_TS) FROM RL_WNDW_FRONTIER_TRK
-    alt frontier exists (common case)
-        DB-->>SAS: windowEnd (~1ms fast read)
-    else null (first request for this alignedStart)
-        SAS->>DB: batchInsert 100 RL_WNDW_CT rows
-        SAS->>DB: INSERT RL_WNDW_FRONTIER_TRK (catch DUP)
-        DB-->>SAS: windowEnd (provisioned atomically)
-    end
-    SAS->>DB: COMMIT TXN_frontier
-
-    Note over SAS,DB: Find+lock+claim (own transaction)
-    SAS->>DB: BEGIN TXN₂
-    loop until window found or range exhausted
-        SAS->>DB: nestedFindAndLock: SELECT WNDW_STRT_TS<br/>WHERE WNDW_STRT_TS = (SELECT ... FETCH FIRST 1 ROW ONLY)<br/>AND SLOT_CT < max FOR UPDATE SKIP LOCKED
-        alt locked a window
-            SAS->>DB: INSERT RL_EVENT_SLOT_DTL (catch DUP)
-            SAS->>DB: UPDATE RL_WNDW_CT SET SLOT_CT = SLOT_CT + 1
-            SAS->>DB: COMMIT TXN₂
-            SAS-->>Caller: AssignedSlot
-        else null — scout to distinguish
-            SAS->>DB: findEarliestCandidateWindow (no lock)
-            alt no candidates exist
-                Note over SAS: O(1) exit — range exhausted
-            else candidate locked by another thread
-                Note over SAS: advance searchFrom past it, retry
+    Note over SAS: Phase 2: Frontier-tracked find+lock with extension
+    loop iteration 0 (initial range) + up to max-chunks-to-search extensions
+        Note over SAS: Provision transaction
+        SAS->>DB: BEGIN TXN_prov
+        alt iteration 0 — fetchOrProvisionInitialRange
+            SAS->>DB: SELECT MAX(WNDW_END_TS) FROM RL_WNDW_FRONTIER_TRK
+            alt frontier exists (common case)
+                DB-->>SAS: windowEnd (~1ms fast read)
+            else null (first request for this alignedStart)
+                SAS->>DB: batchInsert 100 RL_WNDW_CT rows
+                SAS->>DB: INSERT RL_WNDW_FRONTIER_TRK (catch DUP)
+                DB-->>SAS: windowEnd (provisioned atomically)
             end
-        end
-    end
-
-    alt range exhausted — extension loop
-        loop up to max-chunks-to-search
-            Note over SAS: Provisioning transaction
-            SAS->>DB: BEGIN TXN_prov
+        else iteration 1+ — provisionChunk
             SAS->>DB: ensureChunkProvisioned (batchInsert, guard on last window)
             SAS->>DB: INSERT RL_WNDW_FRONTIER_TRK (catch DUP)
-            SAS->>DB: COMMIT TXN_prov
+        end
+        SAS->>DB: COMMIT TXN_prov
 
-            Note over SAS: Find+lock+claim transaction
-            SAS->>DB: BEGIN TXN_claim
-            SAS->>DB: nestedFindAndLock + scout retry in new chunk
-            alt window found
-                SAS->>DB: INSERT RL_EVENT_SLOT_DTL + UPDATE RL_WNDW_CT
+        Note over SAS,DB: Find+lock+claim (own transaction)
+        SAS->>DB: BEGIN TXN_claim
+        loop until window found or range exhausted
+            SAS->>DB: nestedFindAndLock: SELECT WNDW_STRT_TS<br/>WHERE WNDW_STRT_TS = (SELECT ... FETCH FIRST 1 ROW ONLY)<br/>AND SLOT_CT < max FOR UPDATE SKIP LOCKED
+            alt locked a window
+                SAS->>DB: INSERT RL_EVENT_SLOT_DTL (catch DUP)
+                SAS->>DB: UPDATE RL_WNDW_CT SET SLOT_CT = SLOT_CT + 1
                 SAS->>DB: COMMIT TXN_claim
                 SAS-->>Caller: AssignedSlot
+            else null — scout to distinguish
+                SAS->>DB: findEarliestCandidateWindow (no lock)
+                alt no candidates exist
+                    Note over SAS: range exhausted — next iteration
+                else candidate locked by another thread
+                    Note over SAS: advance searchFrom past it, retry
+                end
             end
         end
-        SAS-->>Caller: throw SlotAssignmentException
     end
+    SAS-->>Caller: throw SlotAssignmentException
 ```
 
 ---
@@ -421,45 +410,37 @@ flowchart TD
     CACHE_SET --> FRONTIER
     SKIP1 --> FRONTIER
 
-    FRONTIER["fetchOrProvisionInitialRange (single txn)<br/>SELECT MAX(WNDW_END_TS)<br/>from RL_WNDW_FRONTIER_TRK<br/>null → provision in same txn:<br/>batchInsert 100 rows + insert frontier"]
+    subgraph PHASE2 ["Phase 2 — Frontier-Tracked Find+Lock with Extension"]
+        direction TB
+        FRONTIER["Provision range (own txn)<br/>Iter 0: fetchOrProvisionInitialRange<br/>Iter 1+: provisionChunk<br/>(batchInsert + insert frontier)"]
 
-    FRONTIER --> FIND_LOCK
+        FRONTIER --> FIND_LOCK
 
-    subgraph TX2 ["TXN₂ — findLockAndClaim"]
-        subgraph FIND_LOCK ["findAndLockFirstAvailableWindow (retry loop)"]
-            direction TB
-            NFL["nestedFindAndLock<br/>Inner: SELECT ... FETCH FIRST 1 ROW ONLY (no lock)<br/>Outer: SELECT ... FOR UPDATE SKIP LOCKED"]
-            NFL --> NFL_C{Result?}
-            NFL_C -- "non-null<br/>(locked!)" --> LOCKED_WIN[Window locked]
-            NFL_C -- "null" --> SCOUT["findEarliestCandidateWindow<br/>(non-locking scout query)"]
-            SCOUT --> SCOUT_C{Candidate exists?}
-            SCOUT_C -- "null<br/>(no candidates)" --> NO_WIN[Range exhausted]
-            SCOUT_C -- "non-null<br/>(was locked)" --> ADVANCE["searchFrom =<br/>candidate + windowSize"]
-            ADVANCE --> NFL
+        subgraph TX2 ["findLockAndClaim (own txn)"]
+            subgraph FIND_LOCK ["findAndLockFirstAvailableWindow (retry loop)"]
+                direction TB
+                NFL["nestedFindAndLock<br/>Inner: SELECT ... FETCH FIRST 1 ROW ONLY (no lock)<br/>Outer: SELECT ... FOR UPDATE SKIP LOCKED"]
+                NFL --> NFL_C{Result?}
+                NFL_C -- "non-null<br/>(locked!)" --> LOCKED_WIN[Window locked]
+                NFL_C -- "null" --> SCOUT["findEarliestCandidateWindow<br/>(non-locking scout query)"]
+                SCOUT --> SCOUT_C{Candidate exists?}
+                SCOUT_C -- "null<br/>(no candidates)" --> NO_WIN[Range exhausted]
+                SCOUT_C -- "non-null<br/>(was locked)" --> ADVANCE["searchFrom =<br/>candidate + windowSize"]
+                ADVANCE --> NFL
+            end
+
+            LOCKED_WIN --> CLAIM2[claimSlot<br/>fullJitterMs]
+            CLAIM2 --> NEW2[/NEW/]
         end
 
-        LOCKED_WIN --> CLAIM2[claimSlot<br/>fullJitterMs]
-        CLAIM2 --> NEW2[/NEW/]
-    end
-
-    NO_WIN --> EXT_LOOP
-
-    subgraph EXT_LOOP ["Extension Loop (max-chunks-to-search)"]
-        direction TB
-        EXT_START[chunk 0..maxChunksToSearch-1]
-        EXT_START --> EXT_PROV["provisionChunk (own txn)<br/>(guard: skip if last window exists)<br/>+ INSERT RL_WNDW_FRONTIER_TRK (catch DUP)"]
-        EXT_PROV --> EXT_FIND["findLockAndClaim (own txn)<br/>findAndLockFirstAvailableWindow<br/>+ claimSlot in focused txn"]
-        EXT_FIND --> EXT_C{Window found?}
-        EXT_C -- Yes --> NEW3[/NEW/]
-        EXT_C -- No --> EXT_NEXT{More chunks?}
-        EXT_NEXT -- Yes --> EXT_START
-        EXT_NEXT -- No --> EXH[/EXHAUSTED/]
+        NO_WIN --> EXT_NEXT{More iterations?}
+        EXT_NEXT -- "Yes" --> FRONTIER
+        EXT_NEXT -- "No" --> EXH[/EXHAUSTED/]
     end
 
     C2 --> RET_E([Return existing AssignedSlot])
     NEW1 --> RET_N([Return new AssignedSlot])
     NEW2 --> RET_N
-    NEW3 --> RET_N
     EXH --> RET_X([Throw SlotAssignmentException])
 
     style A fill:#4a9eff,color:#fff
@@ -468,7 +449,6 @@ flowchart TD
     style F fill:#e74c3c,color:#fff
     style RET_X fill:#e74c3c,color:#fff
     style NFL fill:#9b59b6,color:#fff
-    style EXT_FIND fill:#9b59b6,color:#fff
     style SCOUT fill:#e67e22,color:#fff
     style CACHE_CHK fill:#f39c12,color:#fff
     style CACHE_SET fill:#f39c12,color:#fff
@@ -593,9 +573,9 @@ Let **W** = `max-windows-in-chunk` (default 100), **C** = `max-chunks-to-search`
 |---|---|---|---|---|
 | **Best: Idempotent hit** (Phase 0) | O(1) | 1 SELECT | 0 | 0 |
 | **Best: First window available** (Phase 1) | O(1) | ~5 (SELECT + INSERT + SELECT FOR UPDATE + INSERT + UPDATE) | 1 | 0–1 |
-| **Average: Slot in provisioned range** (Phase 2) | O(K) where K=contended rows | ~5 + fetchOrProvisionInitialRange (1 txn: SELECT MAX + optional W INSERTs) + K×(nested subquery + scout) + INSERT + UPDATE | K retries | 0 (or W if first to provision) |
-| **Worst: Extension loop** (Phase 3) | O(W × (1 + C)) | Phase 2 + C × (W INSERTs + 1 INSERT frontier + nested find+lock retries) | W × (1 + C) | C × W |
-| **Worst: Exhaustion** | O(W × (1 + C)) | Same as Phase 3 | W × (1 + C) | C × W |
+| **Average: Slot in initial range** (Phase 2, iteration 0) | O(K) where K=contended rows | ~5 + fetchOrProvisionInitialRange (1 txn: SELECT MAX + optional W INSERTs) + K×(nested subquery + scout) + INSERT + UPDATE | K retries | 0 (or W if first to provision) |
+| **Worst: Extension loop** (Phase 2, iterations 1+) | O(W × (1 + C)) | Phase 2 iter 0 + C × (W INSERTs + 1 INSERT frontier + nested find+lock retries) | W × (1 + C) | C × W |
+| **Worst: Exhaustion** | O(W × (1 + C)) | Same as extension loop | W × (1 + C) | C × W |
 
 With defaults (W=100, C=2): worst case scans up to **300 windows** and provisions up to **200 additional rows**.
 

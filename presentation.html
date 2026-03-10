@@ -558,7 +558,7 @@
         #scene-11 .counter-display .counter-val { display: inline-block; transition: transform 0.4s ease; }
         #scene-11 .counter-display .counter-val.flipping { animation: numberFlip 0.4s ease; }
 
-        /* ===== SCENE 12: PHASE 3 — EXTENSION LOOP ===== */
+        /* ===== SCENE 12: PHASE 2 — EXTENSION LOOP ===== */
         #scene-12.scene { padding: 16px 24px; }
         #scene-12 .scene-title { font-size: 22px; margin-bottom: 2px; }
         #scene-12 .scene-subtitle { margin-bottom: 8px; }
@@ -933,7 +933,7 @@
                 <div class="phase-connector-label">all windows in range full &darr;</div>
             </div>
             <div class="phase-card" id="phase-card-3">
-                <div class="phase-num phase-num-3">P3</div>
+                <div class="phase-num phase-num-3">P2<sup>+</sup></div>
                 <div class="phase-info">
                     <h3>Extension Loop</h3>
                     <div class="phase-fn">provisionChunk() + findLockAndClaim()</div>
@@ -948,7 +948,7 @@
         <div class="scene-title">Step 3: Core Process</div>
         <div class="scene-subtitle">Phase 0 &mdash; Idempotency via fetchAssignedSlot() (own short-lived txn) &mdash; Same event_id always returns the same slot</div>
         <div class="idem-container">
-            <div class="txn-banner"><b>TXN&#8320;</b> &mdash; <i>fetchAssignedSlot() (~1ms, releases connection immediately)</i></div>
+            <div class="txn-banner"><strong>TXN<sub>0</sub></strong> &mdash; <i>fetchAssignedSlot() (~1ms, releases connection immediately)</i></div>
             <div class="func-bar">
                 <div class="func-item active">fetchAssignedSlot</div>
                 <div class="func-item">tryLockFirstWindow</div>
@@ -989,7 +989,7 @@
         <div class="scene-title">Step 3: Core Process</div>
         <div class="scene-subtitle">Phase 1 &mdash; First Window (Proportional Capacity)</div>
         <div class="skip-container">
-            <div class="txn-banner"><b>TXN&#8321;</b> &mdash; <i>First window lock + claim (own transaction)</i></div>
+            <div class="txn-banner"><strong>TXN<sub>1</sub></strong> &mdash; <i>First window lock + claim (own transaction)</i></div>
             <div class="func-bar">
                 <div class="func-item done">fetchAssignedSlot</div>
                 <div class="func-item active">tryLockFirstWindow</div>
@@ -1039,12 +1039,12 @@
         <div class="db-tables-panel" id="db-tables-9"></div>
     </section>
 
-    <!-- ===== SCENE 10: PHASE 2 — FRONTIER-TRACKED FIND+LOCK ===== -->
+    <!-- ===== SCENE 10: PHASE 2 — FRONTIER-TRACKED FIND+LOCK (INITIAL RANGE) ===== -->
     <section class="scene" id="scene-10">
         <div class="scene-title">Step 3: Core Process</div>
-        <div class="scene-subtitle">Phase 2 &mdash; Frontier-Tracked Find+Lock</div>
+        <div class="scene-subtitle">Phase 2 &mdash; Frontier-Tracked Find+Lock (Initial Range)</div>
         <div class="walk-container">
-            <div class="txn-banner"><b>TXN&#8322;</b> &mdash; <i>fetchOrProvisionInitialRange &rarr;</i> <b>TXN&#8323;</b> &mdash; <i>findLockAndClaim</i></div>
+            <div class="txn-banner"><strong>TXN<sub>2a</sub></strong> &mdash; <i>fetchOrProvisionInitialRange &rarr;</i> <strong>TXN<sub>2b</sub></strong> &mdash; <i>findLockAndClaim</i></div>
             <div class="func-bar">
                 <div class="func-item done">fetchAssignedSlot</div>
                 <div class="func-item done">tryLockFirstWindow</div>
@@ -1080,7 +1080,7 @@
         <div class="scene-title">Step 3: Core Process</div>
         <div class="scene-subtitle">Phase 2 &mdash; claimSlot() &mdash; insertEventSlot + incrementSlotCount</div>
         <div class="claim-container">
-            <div class="txn-banner"><strong>TXN&#8323;</strong> &mdash; <i>Within the find+lock+claim transaction &mdash; atomic with the row lock</i></div>
+            <div class="txn-banner"><strong>TXN<sub>2b</sub></strong> &mdash; <i>Within the find+lock+claim transaction &mdash; atomic with the row lock</i></div>
             <div class="func-bar">
                 <div class="func-item done">fetchAssignedSlot</div>
                 <div class="func-item done">tryLockFirstWindow</div>
@@ -1167,12 +1167,12 @@
         <div class="db-tables-panel" id="db-tables-11"></div>
     </section>
 
-    <!-- ===== SCENE 12: PHASE 3 — EXTENSION LOOP ===== -->
+    <!-- ===== SCENE 12: PHASE 2 — EXTENSION LOOP ===== -->
     <section class="scene" id="scene-12">
         <div class="scene-title">Step 3: Core Process</div>
-        <div class="scene-subtitle">Phase 3 &mdash; Extension Loop &mdash; provisionChunk() + findLockAndClaim() in separate transactions</div>
+        <div class="scene-subtitle">Phase 2 &mdash; Extension Loop &mdash; provisionChunk() + findLockAndClaim() in separate transactions</div>
         <div class="ext-container">
-            <div class="txn-banner" id="ext-txn-banner-12">Extension loop: two transactions per chunk iteration</div>
+            <div class="txn-banner" id="ext-txn-banner-12">TXN<sub>2</sub> &mdash; Extension loop: two transactions per chunk iteration</div>
             <div class="func-bar">
                 <div class="func-item done">fetchAssignedSlot</div>
                 <div class="func-item done">tryLockFirstWindow</div>
@@ -1182,8 +1182,8 @@
 
             <!-- Exhausted banner -->
             <div class="ext-exhausted" id="ext-exhausted-12">
-                <span style="color: var(--error); font-weight: 600;">&#10007; Phase 2 returned null</span> &mdash;
-                Initial range [12:00:04, 12:06:44) exhausted. All 100 windows full.
+                <span style="color: var(--error); font-weight: 600;">&#10007; Initial range returned null</span> &mdash;
+                Range [12:00:04, 12:06:44) exhausted. All 100 windows full.
             </div>
 
             <!-- Loop visualization: chunk timeline -->
@@ -1231,7 +1231,7 @@
                 <div class="ext-findlock-header" id="ext-findlock-header-12">findLockAndClaim(searchFrom, chunkEnd)</div>
                 <div class="ext-findlock-body">
                     Reuses same nested subquery + <span style="color: var(--warning); font-weight: 600;">FOR UPDATE SKIP LOCKED</span>
-                    pattern from Phase 2, but searches only the newly provisioned [searchFrom, chunkEnd) range.
+                    pattern as initial range, but searches only the newly provisioned [searchFrom, chunkEnd) range.
                 </div>
                 <div class="ext-findlock-result" id="ext-findlock-result-12"></div>
             </div>
@@ -2150,7 +2150,7 @@
             };
         })(),
 
-        // Scene 12: Phase 3 — Extension Loop (step controls + DB tables)
+        // Scene 12: Phase 2 — Extension Loop (step controls + DB tables)
         11: (() => {
             function applyStep(step) {
                 const exhausted = document.getElementById('ext-exhausted-12');
@@ -2197,7 +2197,7 @@
                     { requestedTime: '12:00:00', windowEnd: '12:06:44', cssClass: '' }
                 ];
                 dbState.wcBulkNote = '100 initial windows all full (12:00:04 \u2192 12:06:40)';
-                dbState.label = 'Phase 2 returned null \u2014 initial range exhausted. Entering extension loop.';
+                dbState.label = 'Initial range returned null \u2014 range exhausted. Entering extension loop.';
 
                 // Step 0: Range exhausted
                 if (step >= 0) {
