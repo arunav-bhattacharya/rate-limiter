@@ -2,6 +2,8 @@ package com.ratelimiter.repo
 
 import com.ratelimiter.db.WindowCounterTable
 import jakarta.enterprise.context.ApplicationScoped
+import oracle.jdbc.OracleConnection
+import oracle.jdbc.OraclePreparedStatement
 import org.jetbrains.exposed.exceptions.ExposedSQLException
 import org.jetbrains.exposed.sql.IntegerColumnType
 import org.jetbrains.exposed.sql.SqlExpressionBuilder
@@ -11,7 +13,9 @@ import org.jetbrains.exposed.sql.insert
 import org.jetbrains.exposed.sql.javatime.JavaInstantColumnType
 import org.jetbrains.exposed.sql.selectAll
 import org.jetbrains.exposed.sql.statements.StatementType
+import org.jetbrains.exposed.sql.transactions.TransactionManager
 import org.jetbrains.exposed.sql.update
+import java.sql.Timestamp
 import java.time.Duration
 import java.time.Instant
 
@@ -50,40 +54,51 @@ class WindowSlotCounterRepository {
     }
 
     /**
-     * Tier 1 (fast path): Single query that finds the earliest available window
-     * in [from, to) and locks it atomically. Uses FETCH FIRST 1 ROW ONLY with
-     * FOR UPDATE SKIP LOCKED — the contention window between candidate selection
-     * and lock acquisition is microseconds (intra-statement).
+     * Tier 1 (fast path): Finds the earliest available window in [from, to) and
+     * locks exactly one row. Uses Oracle JDBC fetchSize=1 + rowPrefetch=1 to
+     * control cursor advancement — Oracle's FOR UPDATE SKIP LOCKED processes
+     * rows lazily through the cursor, skipping locked rows server-side and
+     * returning the first successfully locked row. Only that one row is locked.
      *
-     * Returns null if no candidate exists OR if the single candidate was contended.
-     * Caller should fall back to Tier 2 (iterative scout + PK lock) to disambiguate.
+     * This is superior to FETCH FIRST 1 ROW ONLY + FOR UPDATE SKIP LOCKED,
+     * where Oracle picks 1 candidate before locking — two threads can pick the
+     * same candidate, one wins the lock, the other gets empty result. With
+     * fetchSize=1, concurrent threads naturally lock different rows because
+     * the skip-locked logic runs within the cursor scan.
      */
-    fun Transaction.fetchFirstAndLock(
+    fun Transaction.findAndLockFirstAvailableWindow(
         from: Instant,
         to: Instant,
         maxSlots: Int
     ): Instant? {
-        val sql = """
+        val conn = TransactionManager.current().connection.connection as OracleConnection
+
+        val stmt = conn.prepareStatement(
+            """
             SELECT WNDW_STRT_TS
             FROM   RL_WNDW_CT
             WHERE  WNDW_STRT_TS >= ?
             AND    WNDW_STRT_TS < ?
             AND    SLOT_CT < ?
             ORDER BY WNDW_STRT_TS ASC
-            FETCH FIRST 1 ROW ONLY
             FOR UPDATE SKIP LOCKED
-        """.trimIndent()
+            """
+        ).apply {
+            fetchSize = 1
+            (this as OraclePreparedStatement).rowPrefetch = 1
+            setTimestamp(1, Timestamp.from(from))
+            setTimestamp(2, Timestamp.from(to))
+            setInt(3, maxSlots)
+        }
 
-        return exec(
-            sql,
-            listOf(
-                Pair(JavaInstantColumnType(), from),
-                Pair(JavaInstantColumnType(), to),
-                Pair(IntegerColumnType(), maxSlots)
-            ),
-            StatementType.SELECT
-        ) { rs ->
-            if (rs.next()) rs.getTimestamp("WNDW_STRT_TS").toInstant() else null
+        // Don't use connection.close as that will close the entire transaction — just close the statement and result set.
+        return try {
+            val rs = stmt.executeQuery()
+            val result = if (rs.next()) rs.getTimestamp("WNDW_STRT_TS").toInstant() else null
+            rs.close()
+            result
+        } finally {
+            stmt.close()
         }
     }
 
@@ -138,7 +153,7 @@ class WindowSlotCounterRepository {
         windowSize: Duration
     ): Instant? {
         // Tier 1: Fast path — single query, microsecond contention window
-        val fast = fetchFirstAndLock(from, to, maxSlots)
+        val fast = findAndLockFirstAvailableWindow(from, to, maxSlots)
         if (fast != null) return fast
 
         // Tier 2: Iterative fallback — scout + targeted PK lock
