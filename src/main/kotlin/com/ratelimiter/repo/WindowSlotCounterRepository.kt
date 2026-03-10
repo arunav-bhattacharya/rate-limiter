@@ -16,7 +16,6 @@ import org.jetbrains.exposed.sql.statements.StatementType
 import org.jetbrains.exposed.sql.transactions.TransactionManager
 import org.jetbrains.exposed.sql.update
 import java.sql.Timestamp
-import java.time.Duration
 import java.time.Instant
 
 @ApplicationScoped
@@ -102,74 +101,6 @@ class WindowSlotCounterRepository {
         }
     }
 
-    /**
-     * Tier 2 scout: Find the earliest window in [from, to) with available capacity.
-     * No lock acquired — read-only. Used to disambiguate "all full" from "one row
-     * was contended" when Tier 1 returns null.
-     */
-    fun Transaction.findEarliestCandidateWindow(
-        from: Instant,
-        to: Instant,
-        maxSlots: Int
-    ): Instant? {
-        val sql = """
-            SELECT WNDW_STRT_TS
-            FROM   RL_WNDW_CT
-            WHERE  WNDW_STRT_TS >= ?
-            AND    WNDW_STRT_TS < ?
-            AND    SLOT_CT < ?
-            ORDER BY WNDW_STRT_TS ASC
-            FETCH FIRST 1 ROW ONLY
-        """.trimIndent()
-
-        return exec(
-            sql,
-            listOf(
-                Pair(JavaInstantColumnType(), from),
-                Pair(JavaInstantColumnType(), to),
-                Pair(IntegerColumnType(), maxSlots)
-            ),
-            StatementType.SELECT
-        ) { rs ->
-            if (rs.next()) rs.getTimestamp("WNDW_STRT_TS").toInstant() else null
-        }
-    }
-
-    /**
-     * Tiered find+lock: finds the earliest non-full, non-contended window
-     * in [from, to) and acquires a row lock on it.
-     *
-     * Tier 1: Single fast query (FETCH FIRST + FOR UPDATE SKIP LOCKED).
-     *         Microsecond contention window. Handles 99.9%+ of calls.
-     *
-     * Tier 2: Iterative scout (read-only) + targeted PK lock. Only fires
-     *         when Tier 1 returns null due to rare contention. Avoids
-     *         wasteful chunk provisioning by searching within the current range.
-     */
-    fun Transaction.findAndLockFirstAvailableWindow(
-        from: Instant,
-        to: Instant,
-        maxSlots: Int,
-        windowSize: Duration
-    ): Instant? {
-        // Tier 1: Fast path — single query, microsecond contention window
-        val fast = findAndLockFirstAvailableWindow(from, to, maxSlots)
-        if (fast != null) return fast
-
-        // Tier 2: Iterative fallback — scout + targeted PK lock
-        var searchFrom = from
-        while (searchFrom < to) {
-            val candidate = findEarliestCandidateWindow(searchFrom, to, maxSlots)
-                ?: return null // genuinely exhausted
-
-            val locked = tryLockFirstWindow(candidate, maxSlots)
-            if (locked == true) return candidate
-
-            // Contended or filled — advance past this window
-            searchFrom = candidate.plus(windowSize)
-        }
-        return null
-    }
 
     /**
      * INSERT a window counter row with SLOT_CT=0. Catches duplicate key silently.

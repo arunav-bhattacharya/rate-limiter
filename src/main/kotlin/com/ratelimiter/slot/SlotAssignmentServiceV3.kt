@@ -191,7 +191,7 @@ class SlotAssignmentServiceV3 @Inject constructor(
     ): AssignedSlot? {
         return transaction {
             val found = with(windowSlotCounterRepository) {
-                findAndLockFirstAvailableWindow(from, to, maxSlots, windowSize)
+                findAndLockFirstAvailableWindow(from, to, maxSlots)
             } ?: return@transaction null
 
             val jitterMs = computeFullWindowJitterMs(windowSize.toMillis())
