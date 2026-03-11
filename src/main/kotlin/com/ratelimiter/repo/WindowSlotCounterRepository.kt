@@ -145,9 +145,18 @@ class WindowSlotCounterRepository {
     }
 
     fun Transaction.batchInsertWindows(windows: List<Instant>) {
+        val existing = WindowCounterTable
+            .selectAll()
+            .where { WindowCounterTable.windowStart inList windows }
+            .map { it[WindowCounterTable.windowStart] }
+            .toSet()
+
+        val newWindows = windows.filterNot { it in existing }
+        if (newWindows.isEmpty()) return
+
         val now = Instant.now()
         try {
-            WindowCounterTable.batchInsert(windows, shouldReturnGeneratedValues = false) { window ->
+            WindowCounterTable.batchInsert(newWindows, shouldReturnGeneratedValues = false) { window ->
                 this[WindowCounterTable.windowStart] = window
                 this[WindowCounterTable.slotCount] = 0
                 this[WindowCounterTable.createdAt] = now
