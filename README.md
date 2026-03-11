@@ -133,8 +133,9 @@ Batches of windows provisioned together to amortize provisioning cost.
 The furthest provisioned window boundary for a given `alignedStart`.
 
 - **Storage**: `RL_WNDW_FRONTIER_TRK(REQ_TS, WNDW_END_TS)` table
-- **Read**: `SELECT MAX(WNDW_END_TS) WHERE REQ_TS = alignedStart`
+- **Read**: `SELECT WNDW_END_TS ... ORDER BY DESC LIMIT 1` (replaced `MAX()` aggregate for better index utilization)
 - **Write**: `INSERT (alignedStart, chunkEnd)` — append-only, deduplication via composite PK
+- **JVM cache**: 5-second TTL `ConcurrentHashMap` avoids the DB read on the hot path; updated on both read and write
 - **Benefit**: Eliminates tail-end scanning; requests jump directly to the provisioning frontier instead of scanning from window 0
 
 ### Jitter
@@ -290,7 +291,7 @@ Multi-phase approach with split short-lived transactions to minimize connection 
 **Phase 1 — First Window** *(own transaction)*: Try the epoch-aligned window at `alignedStart` with proportional capacity and constrained jitter. Uses `SELECT FOR UPDATE SKIP LOCKED` to acquire a lock. If locked and has capacity, `claimSlot()` runs in the same transaction.
 
 **Phase 2 — Frontier-Tracked Find+Lock with Extension** *(provision and locking in separate transactions)*: A unified loop that provisions window ranges and searches them. Iteration 0 covers the initial range; iterations 1..`max-chunks-to-search` (default 2) extend beyond the frontier.
-1. **Fetch or provision range** *(single transaction per iteration)*: Iteration 0 calls `fetchOrProvisionInitialRange()` — reads `SELECT MAX(WNDW_END_TS) FROM RL_WNDW_FRONTIER_TRK WHERE REQ_TS = alignedStart`. If the frontier exists, returns it immediately (fast read, ~1ms). If null (first request for this `alignedStart`), provisions the initial chunk (`maxWindowsInChunk` rows, default 100) and inserts the frontier row atomically. Subsequent iterations call `provisionChunk()` — batch-provision a chunk beyond the frontier (guard: skip if last window already exists) + append a new frontier row (catch DUP).
+1. **Fetch or provision range** *(single transaction per iteration)*: Iteration 0 calls `fetchOrProvisionInitialRange()` — reads `SELECT MAX(WNDW_END_TS) FROM RL_WNDW_FRONTIER_TRK WHERE REQ_TS = alignedStart`. If the frontier exists, returns it immediately (fast read, ~1ms). If null (first request for this `alignedStart`), provisions the initial chunk (`maxWindowsInChunk` rows, default 100) and inserts the frontier row atomically. Subsequent iterations call `provisionChunk()` — batch-provision a chunk beyond the frontier (guard: skip if last window already exists; pre-filter existing windows before batch insert) + append a new frontier row (catch ORA-00001 via `isDuplicateKeyViolation()`).
 2. **Find+lock+claim** *(own transaction per iteration)*: `findLockAndClaim()` runs `findAndLockFirstAvailableWindow()` + `claimSlot()` together in a focused transaction that holds the row lock only for the duration of the find+lock and the INSERT+UPDATE:
    - **`findAndLockFirstAvailableWindow()`** — Uses Oracle JDBC cursor control (`fetchSize=1`, `rowPrefetch=1`) with `SELECT ... FOR UPDATE SKIP LOCKED` (no `FETCH FIRST`). Oracle processes the cursor lazily: it scans the PK index in order, tries to lock each matching row, skips locked rows server-side, and returns the first successfully locked row. Only that one row is locked.
    - This is superior to `FETCH FIRST 1 ROW ONLY + FOR UPDATE SKIP LOCKED`, where Oracle picks 1 candidate before locking — two threads can pick the same candidate, one wins the lock, the other gets empty result and cascades to fallback. With `fetchSize=1`, concurrent threads naturally lock different rows because the skip-locked logic runs within the cursor scan.
@@ -299,8 +300,8 @@ Multi-phase approach with split short-lived transactions to minimize connection 
 ### Frontier Tracking (`RL_WNDW_FRONTIER_TRK`)
 
 The `RL_WNDW_FRONTIER_TRK` table is **append-only** with a composite PK `(REQ_TS, WNDW_END_TS)`:
-- **Read**: `SELECT MAX(WNDW_END_TS)` — returns the furthest provisioned boundary
-- **Write**: `INSERT (alignedStart, chunkEnd)` — catch DUP silently
+- **Read**: `SELECT WNDW_END_TS ... ORDER BY DESC LIMIT 1` — returns the furthest provisioned boundary. A 5-second JVM cache (`ConcurrentHashMap`) avoids hitting the DB on the hot path.
+- **Write**: `INSERT (alignedStart, chunkEnd)` — duplicate keys detected via `isDuplicateKeyViolation()` (ORA-00001 only); unexpected SQL exceptions are re-thrown. The cache is updated on write (merge with max logic) so subsequent reads on the same pod skip the DB.
 - **No UPDATEs**: Concurrent threads inserting the same frontier row deduplicate via the PK constraint. No contention.
 
 This eliminates the tail-end scanning problem: instead of starting from chunk 0 every time, requests jump directly to the provisioning frontier.
@@ -320,7 +321,7 @@ This is superior to `FETCH FIRST 1 ROW ONLY + FOR UPDATE SKIP LOCKED`, where Ora
 
 ### Pre-Provisioning
 
-Windows are batch-provisioned in chunks (`max-windows-in-chunk`, default 100). An existence-check guard on the last window in each chunk prevents thundering herd: the first thread provisions, subsequent threads skip via the guard.
+Windows are batch-provisioned in chunks (`max-windows-in-chunk`, default 100). An existence-check guard on the last window in each chunk prevents thundering herd: the first thread provisions, subsequent threads skip via the guard. `batchInsertWindows()` also pre-filters existing windows (SELECT + filter) before inserting only new ones, reducing unnecessary duplicate key exceptions under concurrent provisioning.
 
 ### Random Jitter
 
@@ -385,7 +386,7 @@ sequenceDiagram
 
     Note over SAS: Phase 1: First window (own transaction)
     SAS->>DB: BEGIN TXN₁
-    SAS->>DB: INSERT RL_WNDW_CT (catch DUP)
+    SAS->>DB: INSERT RL_WNDW_CT (catch ORA-00001)
     SAS->>DB: SELECT SLOT_CT FOR UPDATE SKIP LOCKED
     DB-->>SAS: count (if < maxFirstWindow, claim + commit)
     SAS->>DB: COMMIT TXN₁
@@ -400,12 +401,12 @@ sequenceDiagram
                 DB-->>SAS: windowEnd (~1ms fast read)
             else null (first request for this alignedStart)
                 SAS->>DB: batchInsert 100 RL_WNDW_CT rows
-                SAS->>DB: INSERT RL_WNDW_FRONTIER_TRK (catch DUP)
+                SAS->>DB: INSERT RL_WNDW_FRONTIER_TRK (catch ORA-00001)
                 DB-->>SAS: windowEnd (provisioned atomically)
             end
         else iteration 1+ — provisionChunk
             SAS->>DB: ensureChunkProvisioned (batchInsert, guard on last window)
-            SAS->>DB: INSERT RL_WNDW_FRONTIER_TRK (catch DUP)
+            SAS->>DB: INSERT RL_WNDW_FRONTIER_TRK (catch ORA-00001)
         end
         SAS->>DB: COMMIT TXN_prov
 
@@ -413,7 +414,7 @@ sequenceDiagram
         SAS->>DB: BEGIN TXN_claim
         SAS->>DB: findAndLockFirstAvailableWindow:<br/>SELECT WNDW_STRT_TS FROM RL_WNDW_CT<br/>WHERE ... ORDER BY WNDW_STRT_TS ASC<br/>FOR UPDATE SKIP LOCKED<br/>(fetchSize=1, rowPrefetch=1 — cursor skips locked rows server-side)
         alt locked a window
-            SAS->>DB: INSERT RL_EVENT_SLOT_DTL (catch DUP)
+            SAS->>DB: INSERT RL_EVENT_SLOT_DTL (catch ORA-00001)
             SAS->>DB: UPDATE RL_WNDW_CT SET SLOT_CT = SLOT_CT + 1
             SAS->>DB: COMMIT TXN_claim
             SAS-->>Caller: AssignedSlot
@@ -447,7 +448,7 @@ flowchart TD
     CACHE_CHK -- "Yes (skip Phase 1)" --> FRONTIER
 
     subgraph TX1 ["TXN₁ — First Window"]
-        CACHE_CHK -- "No" --> EW[ensureWindowExists<br/>INSERT catch DUP]
+        CACHE_CHK -- "No" --> EW[ensureWindowExists<br/>INSERT catch ORA-00001]
         EW --> TLF[tryLockFirstWindow<br/>SELECT SLOT_CT<br/>FOR UPDATE SKIP LOCKED]
         TLF --> TLF_C{Result?}
         TLF_C -- "true<br/>(has capacity)" --> CLAIM1[claimSlot<br/>firstJitterMs]
@@ -503,12 +504,15 @@ flowchart TD
 |---|---|
 | **Epoch-aligned windows** | `windowStart = epochSec - (epochSec % windowSizeSecs)` — deterministic, no drift |
 | **Proportional first-window capacity** | `maxFirstWindow = floor(maxPerWindow × remainingMs / windowSizeMs)` — prevents overscheduling in a partially-elapsed window |
-| **Frontier-tracked search** | Append-only `RL_WNDW_FRONTIER_TRK` table tracks the provisioned boundary per `alignedStart`. `fetchOrProvisionInitialRange()` reads or provisions the frontier atomically in a single transaction. New requests jump directly to the frontier instead of scanning from chunk 0 |
+| **Frontier-tracked search** | Append-only `RL_WNDW_FRONTIER_TRK` table tracks the provisioned boundary per `alignedStart`. `fetchOrProvisionInitialRange()` reads or provisions the frontier atomically in a single transaction. A 5-second JVM cache on frontier reads avoids DB access on the hot path. New requests jump directly to the frontier instead of scanning from chunk 0 |
 | **Cursor-based find+lock** | Oracle JDBC cursor with `fetchSize=1` + `rowPrefetch=1` and `SELECT ... FOR UPDATE SKIP LOCKED` (no `FETCH FIRST`). Oracle scans the PK index lazily, skips locked rows server-side, and returns the first successfully locked row. Concurrent threads naturally lock different rows — no cascading fallbacks |
 | **Configurable chunk extensions** | `max-chunks-to-search` (default 2) controls how many additional chunks are provisioned and searched when the initial range is full |
-| **Idempotency** | Phase 0 pre-transaction check via `fetchAssignedSlot()` (own short-lived txn, ~1ms) + `UNIQUE(EVENT_ID)` constraint with `DUP_VAL_ON_INDEX` recovery — duplicate calls return the same slot without incrementing counters and without entering the heavier assignment phases |
+| **Idempotency** | Phase 0 pre-transaction check via `fetchAssignedSlot()` (own short-lived txn, ~1ms) + `UNIQUE(EVENT_ID)` constraint with `isDuplicateKeyViolation()` recovery (ORA-00001 only) — duplicate calls return the same slot without incrementing counters and without entering the heavier assignment phases |
 | **SKIP LOCKED concurrency** | Row-level locking skips contended rows instead of blocking — concurrent threads don't wait for each other |
 | **JVM-local first-window cache** | `ConcurrentHashMap<Instant, Boolean>` caches exhausted first windows to skip re-locking |
+| **JVM-local frontier cache** | `ConcurrentHashMap<Instant, CachedFrontier>` with 5-second TTL caches the provisioning frontier per `alignedStart`, avoiding a DB read on the hot path |
+| **Precise exception handling** | `SqlExceptionUtils.isDuplicateKeyViolation()` checks Oracle error code (ORA-00001) specifically — unexpected SQL exceptions are re-thrown instead of silently swallowed |
+| **Pre-filtered batch inserts** | `batchInsertWindows()` queries existing windows and inserts only new ones, reducing unnecessary duplicate key exceptions under concurrent provisioning |
 | **Config-agnostic counters** | `SLOT_CT` tracks total usage regardless of which config version assigned each slot — capacity changes take effect immediately on existing windows |
 | **Random jitter** | Events spread uniformly within windows via `ThreadLocalRandom`. First window: `[elapsedMs, windowSizeMs)`. Subsequent windows: `[0, windowSizeMs)` |
 
@@ -532,11 +536,13 @@ Each phase runs in its own short-lived transaction to minimize connection hold t
 
 #### 5. Frontier Read Overhead
 
-`fetchOrProvisionInitialRange()` reads `SELECT MAX(WNDW_END_TS) FROM RL_WNDW_FRONTIER_TRK WHERE REQ_TS = ?` and scans all frontier rows for a given `alignedStart`. The row count grows linearly with extension iterations across all clients — each extension appends a new row.
+`fetchOrProvisionInitialRange()` reads the frontier via `SELECT WNDW_END_TS ... ORDER BY DESC LIMIT 1` (replaced the `MAX()` aggregate for better index utilization). A 5-second JVM cache (`ConcurrentHashMap`) on `WindowEndTrackerRepository` avoids hitting the DB entirely on the hot path — most requests serve the frontier from memory. The cache is updated on both reads and writes, so freshly provisioned frontiers are immediately visible on the same pod. The row count still grows linearly with extension iterations across all clients, but the DB query is now infrequent.
 
-#### 6. JVM-Local First-Window Cache
+#### 6. JVM-Local Caches
 
-`firstWindowFull` is a `ConcurrentHashMap` — not shared across nodes. In a multi-node deployment, each node independently discovers full first-windows by attempting and failing the lock. There is no cross-node eviction.
+Two JVM-local `ConcurrentHashMap` caches are used — neither is shared across nodes:
+- **`firstWindowFull`** (`SlotAssignmentServiceV3`): Caches exhausted first windows. No TTL eviction — each node independently discovers full first-windows by attempting and failing the lock.
+- **Frontier cache** (`WindowEndTrackerRepository`): Caches the provisioning frontier per `alignedStart` with a 5-second TTL. Updated on both reads and writes. Reduces DB round-trips for `fetchMaxWindowEnd()` on the hot path.
 
 ### Functional Limitations
 
@@ -554,11 +560,11 @@ See [Known Limitations](#known-limitations) for: shared windows across `requeste
 
 3. **Append-only frontier tracking**: The `RL_WNDW_FRONTIER_TRK` table uses INSERT-only writes with a composite PK `(REQ_TS, WNDW_END_TS)`. No `UPDATE` contention — concurrent threads inserting the same frontier row deduplicate via the PK constraint. This eliminates the need for pessimistic locking on frontier rows.
 
-4. **Existence-check guard on chunk provisioning**: `ensureChunkProvisioned()` checks if the last window in a chunk exists before batch-inserting. This single-row existence check (PK lookup, O(1)) prevents thundering herd: the first thread provisions, all others skip. Combined with `batchInsert` catching `ExposedSQLException`, this is safe under concurrent access.
+4. **Existence-check guard on chunk provisioning**: `ensureChunkProvisioned()` checks if the last window in a chunk exists before batch-inserting. This single-row existence check (PK lookup, O(1)) prevents thundering herd: the first thread provisions, all others skip. `batchInsertWindows()` also pre-filters existing windows (SELECT + filter) before inserting, and catches only ORA-00001 duplicate key violations via `isDuplicateKeyViolation()` — unexpected SQL exceptions are re-thrown.
 
 5. **JVM-local first-window cache**: `ConcurrentHashMap<Instant, Boolean>` caches exhausted first windows. Once a first window is known to be full, subsequent requests skip the Phase 1 lock attempt entirely, avoiding a DB round-trip. This is a simple but effective optimization for steady-state load where the first window fills quickly.
 
-6. **Idempotency without distributed state**: The unique constraint on `EVENT_ID` in `RL_EVENT_SLOT_DTL` plus the Phase 0 `fetchAssignedSlot()` pre-transaction check provides strong idempotency guarantees without needing Redis or any external coordination. Phase 0 runs in its own short-lived transaction (~1ms), so duplicate/retry requests release their connection immediately without entering the heavier assignment phases. The `claimSlot()` function also handles the rare case where a concurrent thread inserts the same `EVENT_ID` between the Phase 0 check and the INSERT — it catches the duplicate key and re-reads the existing slot without incrementing the counter.
+6. **Idempotency without distributed state**: The unique constraint on `EVENT_ID` in `RL_EVENT_SLOT_DTL` plus the Phase 0 `fetchAssignedSlot()` pre-transaction check provides strong idempotency guarantees without needing Redis or any external coordination. Phase 0 runs in its own short-lived transaction (~1ms), so duplicate/retry requests release their connection immediately without entering the heavier assignment phases. The `claimSlot()` function also handles the rare case where a concurrent thread inserts the same `EVENT_ID` between the Phase 0 check and the INSERT — it detects the duplicate via `isDuplicateKeyViolation()` (ORA-00001 only) and re-reads the existing slot without incrementing the counter. Unexpected SQL exceptions are re-thrown.
 
 7. **Config-agnostic counters**: By tracking `SLOT_CT` independently of config versions, the system handles dynamic config changes gracefully. Increasing capacity takes effect immediately on partially-filled windows. Decreasing capacity treats over-filled windows as full without modifying existing assignments.
 
@@ -567,9 +573,9 @@ See [Known Limitations](#known-limitations) for: shared windows across `requeste
 | Decision | Benefit | Cost |
 |---|---|---|
 | **Split short-lived transactions** | Short connection hold times — each transaction releases its connection quickly, reducing pool contention under high TPS. Phase 2's `fetchOrProvisionInitialRange()` combines the frontier read and initial provisioning atomically in one transaction (fast read on the common path, provision on first request). Extension loop provisioning (batch INSERTs) doesn't block the lock-holding transaction. | More connection checkouts per request. A crash between provisioning and claiming leaves provisioned-but-unclaimed rows (harmless — provisioning is idempotent). Find+lock+claim still runs atomically in one transaction. |
-| **Append-only `RL_WNDW_FRONTIER_TRK`** | No UPDATE contention on frontier rows. Concurrent threads safely deduplicate. | Row count grows linearly with extension iterations. `SELECT MAX(WNDW_END_TS)` scans more rows over time. Could be mitigated with a covering index or periodic cleanup. |
+| **Append-only `RL_WNDW_FRONTIER_TRK`** | No UPDATE contention on frontier rows. Concurrent threads safely deduplicate. A 5-second JVM cache avoids DB reads on the hot path. | Row count grows linearly with extension iterations. `SELECT ... ORDER BY DESC LIMIT 1` replaced `MAX()` for better index utilization. The JVM cache is pod-local (not shared across nodes). |
 | **Batch provisioning (100 rows per chunk)** | Amortizes the cost of provisioning — one thread pays upfront, all others benefit. Larger chunks mean less frequent provisioning. | First thread to hit an unprovisioned chunk pays O(W) INSERTs while holding the transaction open. With W=100 and 4s windows, this provisions 400 seconds into the future. |
-| **JVM-local `firstWindowFull` cache** | Avoids a DB round-trip for a known-full first window. Simple `ConcurrentHashMap`, no external dependencies. | Not shared across nodes — each node independently discovers full first-windows. No TTL eviction — entries accumulate for past windows (memory leak in long-running instances). |
+| **JVM-local caches (`firstWindowFull` + frontier)** | `firstWindowFull` avoids a DB round-trip for known-full first windows. Frontier cache (5-second TTL) avoids `SELECT` for the provisioning frontier. Both use `ConcurrentHashMap`, no external dependencies. | Not shared across nodes — each node independently discovers full first-windows and caches its own frontier. `firstWindowFull` has no TTL eviction — entries accumulate for past windows (memory leak in long-running instances). Frontier cache has 5-second TTL so stale entries are short-lived. |
 | **Random jitter (not deterministic grid)** | Safe under dynamic config changes — new events don't cluster on grid points left by previously assigned events under a different `maxPerWindow`. | Instantaneous TPS guarantee is statistical, not absolute. Sub-second bursts can theoretically exceed the per-window limit. |
 | **JDBC cursor control (`fetchSize=1`) instead of `FETCH FIRST`** | Oracle's cursor scans lazily, skipping locked rows server-side. Concurrent threads naturally lock different rows — no cascading fallbacks, no scout queries, no retry loops. Single round-trip on success. | Couples the find+lock method to Oracle's JDBC driver (`OracleConnection`, `OraclePreparedStatement`). The cursor holds the connection during the scan, though with short transactions this is negligible. |
 
