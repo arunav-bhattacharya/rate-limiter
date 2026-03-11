@@ -97,7 +97,7 @@ class SlotAssignmentServiceV3 @Inject constructor(
         val windowSize = config.windowSize
         var searchFrom = alignedStart.plus(windowSize)
 
-        for (iteration in 0..maxChunksToSearch) {
+        for (iteration in 0..<maxChunksToSearch) {
             val searchTo = if (iteration == 0) {
                 fetchOrProvisionInitialRange(alignedStart, windowSize)
             } else {
@@ -117,9 +117,9 @@ class SlotAssignmentServiceV3 @Inject constructor(
 
         throw SlotAssignmentException(
             eventId = eventId,
-            windowsSearched = maxWindowsInChunk + (maxChunksToSearch * maxWindowsInChunk),
+            windowsSearched = maxWindowsInChunk + ((maxChunksToSearch - 1) * maxWindowsInChunk),
             message = "Could not assign slot for event $eventId after searching " +
-                    "initial range + $maxChunksToSearch extension chunks"
+                    "initial range + ${maxChunksToSearch - 1} extension chunks"
         )
     }
 

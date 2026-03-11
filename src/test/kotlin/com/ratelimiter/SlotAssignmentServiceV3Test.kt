@@ -57,6 +57,7 @@ class SlotAssignmentServiceV3Test {
         }
         configRepository.evictCache()
         service.evictFirstWindowCache()
+        windowEndTrackerRepository.evictFrontierCache()
     }
 
     // ==================== Basic assignment ====================
@@ -395,13 +396,13 @@ class SlotAssignmentServiceV3Test {
 
     @Test
     fun `throws SlotAssignmentException when all chunks exhausted`() {
-        // Build a service with maxChunksToSearch=0 so the extension loop never runs.
+        // Build a service with maxChunksToSearch=1 so only the initial range runs (no extensions).
         // Capacity = 1 (first window) + 100 (initial chunk) = 101 windows.
         // With max_per_window=1, event 102 should fail.
         val noExtensionService = SlotAssignmentServiceV3(
             configRepository, eventSlotRepository,
             windowSlotCounterRepository, windowEndTrackerRepository,
-            maxWindowsInChunk = 100, maxChunksToSearch = 0
+            maxWindowsInChunk = 100, maxChunksToSearch = 1
         )
         configRepository.createConfig("v3-exhaust", 1, Duration.ofSeconds(4))
         val requestedTime = Instant.parse("2025-06-01T12:00:00Z")

@@ -26,6 +26,8 @@ class WindowEndTrackerRepository {
         private const val CACHE_TTL_SECONDS = 5L
     }
 
+    fun evictFrontierCache() = frontierCache.clear()
+
     /**
      * Standalone convenience — reads the provisioning frontier outside a transaction.
      * Used by V2 for backward compatibility.

@@ -72,7 +72,8 @@ class WindowSlotCounterRepository {
         to: Instant,
         maxSlots: Int
     ): Instant? {
-        val conn = TransactionManager.current().connection.connection as OracleConnection
+        val rawConn = TransactionManager.current().connection.connection as java.sql.Connection
+        val conn = rawConn.unwrap(OracleConnection::class.java)
 
         val stmt = conn.prepareStatement(
             """

@@ -56,6 +56,7 @@ class SlotAssignmentServiceV3PerfTest {
         }
         configRepository.evictCache()
         service.evictFirstWindowCache()
+        windowEndTrackerRepository.evictFrontierCache()
     }
 
     // ==================== Perf: Concurrent burst ====================
