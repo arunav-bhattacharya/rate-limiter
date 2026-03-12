@@ -11,6 +11,8 @@ import org.jetbrains.exposed.sql.Transaction
 import org.jetbrains.exposed.sql.transactions.transaction
 import java.time.Duration
 import java.time.Instant
+import java.util.concurrent.CompletableFuture
+import java.util.concurrent.CompletionException
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ThreadLocalRandom
 
@@ -48,8 +50,12 @@ class SlotAssignmentServiceV3 @Inject constructor(
     private val maxChunksToSearch: Int
 ) {
     private val firstWindowFull = ConcurrentHashMap<Instant, Boolean>()
+    private val provisionedChunks = ConcurrentHashMap<Instant, CompletableFuture<Unit>>()
 
-    fun evictFirstWindowCache() = firstWindowFull.clear()
+    fun evictFirstWindowCache() {
+        firstWindowFull.clear()
+        provisionedChunks.clear()
+    }
 
     fun assignSlot(eventId: String, configName: String, requestedTime: Instant): AssignedSlot {
 
@@ -130,26 +136,27 @@ class SlotAssignmentServiceV3 @Inject constructor(
 
     /**
      * Fetch the provisioning frontier for this alignedStart, or provision the initial range
-     * if none exists. Runs in a single transaction — the common case (already provisioned)
-     * is a fast read; the rare case (first request for this alignedStart) provisions and
-     * records the frontier atomically.
+     * if none exists. The common case (already provisioned) is a fast JVM-cached read.
+     * Provisioning uses singleflight coalescing to avoid thundering herd.
      */
     private fun fetchOrProvisionInitialRange(alignedStart: Instant, windowSize: Duration): Instant {
-        return transaction {
+        val existingFrontier = transaction {
             with(windowEndTrackerRepository) { fetchMaxWindowEnd(alignedStart) }
-                ?: run {
-                    val chunkStart = alignedStart.plus(windowSize)
-                    val windowEnd = chunkStart.plus(windowSize.multipliedBy(maxWindowsInChunk.toLong()))
-                    ensureChunkProvisioned(chunkStart, maxWindowsInChunk, windowSize)
-                    with(windowEndTrackerRepository) { insertWindowEnd(alignedStart, windowEnd) }
-                    windowEnd
-                }
         }
+        if (existingFrontier != null) return existingFrontier
+
+        val chunkStart = alignedStart.plus(windowSize)
+        val windowEnd = chunkStart.plus(windowSize.multipliedBy(maxWindowsInChunk.toLong()))
+        ensureChunkProvisionedCoalesced(chunkStart, maxWindowsInChunk, windowSize)
+        transaction {
+            with(windowEndTrackerRepository) { insertWindowEnd(alignedStart, windowEnd) }
+        }
+        return windowEnd
     }
 
     /**
      * Provision a chunk of windows and record the frontier.
-     * Runs in its own transaction (idempotent batch inserts + frontier insert).
+     * Provisioning uses singleflight coalescing; frontier insert is idempotent.
      */
     private fun provisionChunk(
         from: Instant,
@@ -158,8 +165,8 @@ class SlotAssignmentServiceV3 @Inject constructor(
         alignedStart: Instant,
         chunkEnd: Instant
     ) {
+        ensureChunkProvisionedCoalesced(from, windowCount, windowSize)
         transaction {
-            ensureChunkProvisioned(from, windowCount, windowSize)
             with(windowEndTrackerRepository) {
                 insertWindowEnd(alignedStart, chunkEnd)
             }
@@ -186,6 +193,50 @@ class SlotAssignmentServiceV3 @Inject constructor(
 
             val jitterMs = computeFullWindowJitterMs(windowSize.toMillis())
             claimSlot(eventId, found, jitterMs, requestedTime, configId)
+        }
+    }
+
+    /**
+     * Singleflight provisioning: coalesces concurrent requests for the same chunk
+     * so only one thread performs the batch insert. Other threads wait on the
+     * CompletableFuture, avoiding redundant DB round-trips and exception handling.
+     * Completed futures remain in the map as a permanent JVM-level cache
+     * (chunks are immutable once provisioned).
+     */
+    private fun ensureChunkProvisionedCoalesced(
+        from: Instant,
+        windowCount: Int,
+        windowSize: Duration
+    ) {
+        // Fast path: chunk already provisioned in this JVM's lifetime
+        provisionedChunks[from]?.let { awaitProvisioningFuture(it); return }
+
+        val future = CompletableFuture<Unit>()
+        val existing = provisionedChunks.putIfAbsent(from, future)
+        if (existing != null) {
+            // Another thread is provisioning this chunk — wait for it
+            awaitProvisioningFuture(existing)
+            return
+        }
+
+        // We won the race — provision the chunk
+        try {
+            transaction {
+                ensureChunkProvisioned(from, windowCount, windowSize)
+            }
+            future.complete(Unit)
+        } catch (e: Exception) {
+            provisionedChunks.remove(from, future) // CAS remove only our future, allow retry
+            future.completeExceptionally(e)
+            throw e
+        }
+    }
+
+    private fun awaitProvisioningFuture(future: CompletableFuture<Unit>) {
+        try {
+            future.join()
+        } catch (e: CompletionException) {
+            throw e.cause ?: e
         }
     }
 
