@@ -4,17 +4,20 @@ import com.ratelimiter.repo.EventSlotRepository
 import com.ratelimiter.repo.RateLimitConfigRepository
 import com.ratelimiter.repo.WindowEndTrackerRepository
 import com.ratelimiter.repo.WindowSlotCounterRepository
+import jakarta.annotation.PreDestroy
 import jakarta.enterprise.context.ApplicationScoped
 import jakarta.inject.Inject
 import org.eclipse.microprofile.config.inject.ConfigProperty
 import org.jetbrains.exposed.sql.Transaction
 import org.jetbrains.exposed.sql.transactions.transaction
+import org.slf4j.LoggerFactory
 import java.time.Duration
 import java.time.Instant
-import java.util.concurrent.CompletableFuture
-import java.util.concurrent.CompletionException
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.ExecutorService
+import java.util.concurrent.Executors
 import java.util.concurrent.ThreadLocalRandom
+import java.util.concurrent.TimeUnit
 
 /**
  * V3 slot assignment — Kotlin/Exposed implementation.
@@ -35,6 +38,10 @@ import java.util.concurrent.ThreadLocalRandom
  * - Chunk provisioning runs in a separate transaction (idempotent batch inserts)
  * - Find+lock+claim runs in a focused transaction (holds row lock briefly)
  *
+ * Background pre-provisioning ensures request threads never pay provisioning cost
+ * after cold start. Pre-provisions both the next chunk for the current alignedStart
+ * and the first window + initial chunk for the next alignedStart boundary.
+ *
  * Uses raw SQL for lock queries (Exposed DSL doesn't support FOR UPDATE
  * SKIP LOCKED) and Exposed DSL for inserts and updates.
  */
@@ -47,14 +54,24 @@ class SlotAssignmentServiceV3 @Inject constructor(
     @param:ConfigProperty(name = "rate-limiter.max-windows-in-chunk", defaultValue = "100")
     private val maxWindowsInChunk: Int,
     @param:ConfigProperty(name = "rate-limiter.max-chunks-to-search", defaultValue = "2")
-    private val maxChunksToSearch: Int
+    private val maxChunksToSearch: Int,
+    @param:ConfigProperty(name = "rate-limiter.pre-provision-enabled", defaultValue = "true")
+    private val preProvisionEnabled: Boolean = true
 ) {
+    private val logger = LoggerFactory.getLogger(SlotAssignmentServiceV3::class.java)
     private val firstWindowFull = ConcurrentHashMap<Instant, Boolean>()
-    private val provisionedChunks = ConcurrentHashMap<Instant, CompletableFuture<Unit>>()
+    private val preProvisionSubmitted = ConcurrentHashMap.newKeySet<Instant>()
+    private val preProvisionExecutor: ExecutorService = Executors.newVirtualThreadPerTaskExecutor()
+
+    @PreDestroy
+    fun shutdown() {
+        preProvisionExecutor.shutdown()
+        preProvisionExecutor.awaitTermination(5, TimeUnit.SECONDS)
+    }
 
     fun evictFirstWindowCache() {
         firstWindowFull.clear()
-        provisionedChunks.clear()
+        preProvisionSubmitted.clear()
     }
 
     fun assignSlot(eventId: String, configName: String, requestedTime: Instant): AssignedSlot {
@@ -95,7 +112,10 @@ class SlotAssignmentServiceV3 @Inject constructor(
                     null -> null // SKIP LOCKED — contended, try again next request
                 }
             }
-            if (firstWindowSlot != null) return firstWindowSlot
+            if (firstWindowSlot != null) {
+                maybePreProvisionNextAlignedStart(alignedStart, config.windowSize)
+                return firstWindowSlot
+            }
         }
 
         // Phase 2: Frontier-tracked find+lock with extension
@@ -116,7 +136,11 @@ class SlotAssignmentServiceV3 @Inject constructor(
                 eventId, searchFrom, searchTo,
                 config.maxPerWindow, windowSize, requestedTime, config.configId
             )
-            if (found != null) return found
+            if (found != null) {
+                maybePreProvisionNextChunk(searchTo, windowSize, alignedStart)
+                maybePreProvisionNextAlignedStart(alignedStart, windowSize)
+                return found
+            }
 
             searchFrom = searchTo
         }
@@ -129,15 +153,12 @@ class SlotAssignmentServiceV3 @Inject constructor(
         )
     }
 
-    private fun nanosToMs(nanos: Long): String = "%.3f".format(nanos / 1_000_000.0)
-
     // ---- Split-transaction helpers ----
     // Each helper runs its own short-lived transaction to minimize connection hold time.
 
     /**
      * Fetch the provisioning frontier for this alignedStart, or provision the initial range
-     * if none exists. The common case (already provisioned) is a fast JVM-cached read.
-     * Provisioning uses singleflight coalescing to avoid thundering herd.
+     * if none exists.
      */
     private fun fetchOrProvisionInitialRange(alignedStart: Instant, windowSize: Duration): Instant {
         val existingFrontier = transaction {
@@ -147,8 +168,8 @@ class SlotAssignmentServiceV3 @Inject constructor(
 
         val chunkStart = alignedStart.plus(windowSize)
         val windowEnd = chunkStart.plus(windowSize.multipliedBy(maxWindowsInChunk.toLong()))
-        ensureChunkProvisionedCoalesced(chunkStart, maxWindowsInChunk, windowSize)
         transaction {
+            ensureChunkProvisioned(chunkStart, maxWindowsInChunk, windowSize)
             with(windowEndTrackerRepository) { insertWindowEnd(alignedStart, windowEnd) }
         }
         return windowEnd
@@ -156,7 +177,7 @@ class SlotAssignmentServiceV3 @Inject constructor(
 
     /**
      * Provision a chunk of windows and record the frontier.
-     * Provisioning uses singleflight coalescing; frontier insert is idempotent.
+     * Frontier insert is idempotent.
      */
     private fun provisionChunk(
         from: Instant,
@@ -165,8 +186,8 @@ class SlotAssignmentServiceV3 @Inject constructor(
         alignedStart: Instant,
         chunkEnd: Instant
     ) {
-        ensureChunkProvisionedCoalesced(from, windowCount, windowSize)
         transaction {
+            ensureChunkProvisioned(from, windowCount, windowSize)
             with(windowEndTrackerRepository) {
                 insertWindowEnd(alignedStart, chunkEnd)
             }
@@ -196,47 +217,59 @@ class SlotAssignmentServiceV3 @Inject constructor(
         }
     }
 
+    // ---- Background pre-provisioning ----
+
     /**
-     * Singleflight provisioning: coalesces concurrent requests for the same chunk
-     * so only one thread performs the batch insert. Other threads wait on the
-     * CompletableFuture, avoiding redundant DB round-trips and exception handling.
-     * Completed futures remain in the map as a permanent JVM-level cache
-     * (chunks are immutable once provisioned).
+     * Pre-provision the next chunk beyond the current frontier for this alignedStart.
+     * Triggered after a successful Phase 2 slot claim. Each trigger provisions exactly
+     * one chunk ahead — no chain reaction. Growth is bounded by actual consumption.
      */
-    private fun ensureChunkProvisionedCoalesced(
-        from: Instant,
-        windowCount: Int,
-        windowSize: Duration
-    ) {
-        // Fast path: chunk already provisioned in this JVM's lifetime
-        provisionedChunks[from]?.let { awaitProvisioningFuture(it); return }
+    private fun maybePreProvisionNextChunk(currentFrontier: Instant, windowSize: Duration, alignedStart: Instant) {
+        if (!preProvisionEnabled) return
+        if (!preProvisionSubmitted.add(currentFrontier)) return  // atomic CAS gate
 
-        val future = CompletableFuture<Unit>()
-        val existing = provisionedChunks.putIfAbsent(from, future)
-        if (existing != null) {
-            // Another thread is provisioning this chunk — wait for it
-            awaitProvisioningFuture(existing)
-            return
-        }
-
-        // We won the race — provision the chunk
-        try {
-            transaction {
-                ensureChunkProvisioned(from, windowCount, windowSize)
+        preProvisionExecutor.execute {
+            try {
+                val chunkEnd = currentFrontier.plus(windowSize.multipliedBy(maxWindowsInChunk.toLong()))
+                transaction {
+                    ensureChunkProvisioned(currentFrontier, maxWindowsInChunk, windowSize)
+                    with(windowEndTrackerRepository) { insertWindowEnd(alignedStart, chunkEnd) }
+                }
+            } catch (e: Exception) {
+                preProvisionSubmitted.remove(currentFrontier)
+                logger.warn("Pre-provision next chunk failed at {}: {}", currentFrontier, e.message)
             }
-            future.complete(Unit)
-        } catch (e: Exception) {
-            provisionedChunks.remove(from, future) // CAS remove only our future, allow retry
-            future.completeExceptionally(e)
-            throw e
         }
     }
 
-    private fun awaitProvisioningFuture(future: CompletableFuture<Unit>) {
-        try {
-            future.join()
-        } catch (e: CompletionException) {
-            throw e.cause ?: e
+    /**
+     * Pre-provision the first window and initial chunk for the next alignedStart boundary.
+     * Triggered after any successful slot claim (Phase 1 or Phase 2). Ensures the next
+     * alignedStart boundary has everything ready so requests never pay provisioning cost.
+     */
+    private fun maybePreProvisionNextAlignedStart(alignedStart: Instant, windowSize: Duration) {
+        if (!preProvisionEnabled) return
+
+        val nextAlignedStart = alignedStart.plus(windowSize)
+        val nextChunkStart = nextAlignedStart.plus(windowSize)
+        if (!preProvisionSubmitted.add(nextChunkStart)) return  // atomic CAS gate
+
+        preProvisionExecutor.execute {
+            try {
+                // First window for next alignedStart
+                transaction {
+                    with(windowSlotCounterRepository) { ensureWindowExists(nextAlignedStart) }
+                }
+                // Initial chunk + frontier for next alignedStart
+                val chunkEnd = nextChunkStart.plus(windowSize.multipliedBy(maxWindowsInChunk.toLong()))
+                transaction {
+                    ensureChunkProvisioned(nextChunkStart, maxWindowsInChunk, windowSize)
+                    with(windowEndTrackerRepository) { insertWindowEnd(nextAlignedStart, chunkEnd) }
+                }
+            } catch (e: Exception) {
+                preProvisionSubmitted.remove(nextChunkStart)
+                logger.warn("Pre-provision next alignedStart failed at {}: {}", nextAlignedStart, e.message)
+            }
         }
     }
 

@@ -7,8 +7,10 @@ import oracle.jdbc.OracleConnection
 import oracle.jdbc.OraclePreparedStatement
 import org.jetbrains.exposed.exceptions.ExposedSQLException
 import org.jetbrains.exposed.sql.IntegerColumnType
+import java.sql.BatchUpdateException
 import org.jetbrains.exposed.sql.SqlExpressionBuilder
 import org.jetbrains.exposed.sql.Transaction
+import org.jetbrains.exposed.sql.batchInsert
 import org.jetbrains.exposed.sql.insert
 import org.jetbrains.exposed.sql.javatime.JavaInstantColumnType
 import org.jetbrains.exposed.sql.selectAll
@@ -153,25 +155,17 @@ class WindowSlotCounterRepository {
         val newWindows = windows.filterNot { it in existing }
         if (newWindows.isEmpty()) return
 
-        val now = Timestamp.from(Instant.now())
-        val conn = TransactionManager.current().connection.connection as java.sql.Connection
-
-        conn.prepareStatement(
-            """
-            MERGE INTO RL_WNDW_CT target
-            USING (SELECT ? AS WNDW_STRT_TS FROM DUAL) source
-            ON (target.WNDW_STRT_TS = source.WNDW_STRT_TS)
-            WHEN NOT MATCHED THEN
-                INSERT (WNDW_STRT_TS, SLOT_CT, CREAT_TS)
-                VALUES (source.WNDW_STRT_TS, 0, ?)
-            """
-        ).use { stmt ->
-            for (window in newWindows) {
-                stmt.setTimestamp(1, Timestamp.from(window))
-                stmt.setTimestamp(2, now)
-                stmt.addBatch()
+        val now = Instant.now()
+        try {
+            WindowCounterTable.batchInsert(newWindows, shouldReturnGeneratedValues = false) { window ->
+                this[WindowCounterTable.windowStart] = window
+                this[WindowCounterTable.slotCount] = 0
+                this[WindowCounterTable.createdAt] = now
             }
-            stmt.executeBatch()
+        } catch (e: BatchUpdateException) {
+            if (!e.isDuplicateKeyViolation()) throw e
+        } catch (e: ExposedSQLException) {
+            if (!e.isDuplicateKeyViolation()) throw e
         }
     }
 
