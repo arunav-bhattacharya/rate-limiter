@@ -402,8 +402,7 @@ class SlotAssignmentServiceV3Test {
         val noExtensionService = SlotAssignmentServiceV3(
             configRepository, eventSlotRepository,
             windowSlotCounterRepository, windowEndTrackerRepository,
-            maxWindowsInChunk = 100, maxChunksToSearch = 1,
-            preProvisionEnabled = false
+            maxWindowsInChunk = 100, maxChunksToSearch = 1
         )
         configRepository.createConfig("v3-exhaust", 1, Duration.ofSeconds(4))
         val requestedTime = Instant.parse("2025-06-01T12:00:00Z")
