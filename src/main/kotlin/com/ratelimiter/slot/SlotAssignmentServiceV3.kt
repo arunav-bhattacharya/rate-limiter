@@ -1,57 +1,47 @@
 package com.ratelimiter.slot
 
+import com.ratelimiter.config.RateLimitConfig
 import com.ratelimiter.repo.EventSlotRepository
 import com.ratelimiter.repo.RateLimitConfigRepository
 import com.ratelimiter.repo.WindowEndTrackerRepository
 import com.ratelimiter.repo.WindowSlotCounterRepository
 import jakarta.enterprise.context.ApplicationScoped
-import jakarta.inject.Inject
 import org.eclipse.microprofile.config.inject.ConfigProperty
 import org.jetbrains.exposed.sql.Transaction
 import org.jetbrains.exposed.sql.transactions.transaction
 import java.time.Duration
 import java.time.Instant
-import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ThreadLocalRandom
 
 /**
  * V3 slot assignment — Kotlin/Exposed implementation.
  *
- * Combines V2's combined find+lock pattern with V1's correctness guarantees:
- * epoch-aligned windows, proportional first-window capacity, dynamic config,
- * and frontier-tracked search with configurable extension.
- *
- * Phase 2 uses `track_window_end` (append-only) to track the provisioning frontier
- * per alignedStart. A single find+lock over the entire provisioned range replaces
- * scanning chunk-by-chunk from chunk 0. When the range is full, a configurable
- * extension loop (`max-chunks-to-search`, default 2) provisions new chunks from
- * the frontier. Client retries naturally extend further.
+ * Uses a unified loop: iteration 0 reads the provisioning frontier (or provisions
+ * the initial chunk if none exists), subsequent iterations extend by provisioning
+ * new chunks. Each iteration searches with a CASE-based SQL query that applies
+ * proportional capacity to the first window (alignedStart) and full capacity to
+ * all others.
  *
  * DB work is split across multiple short-lived transactions to minimize
  * connection hold time and reduce pool contention under high TPS:
  * - Phase 0 (idempotency check) runs in its own transaction
- * - Chunk provisioning runs in a separate transaction (idempotent batch inserts)
+ * - Frontier read + chunk provisioning runs in a single transaction
  * - Find+lock+claim runs in a focused transaction (holds row lock briefly)
  *
  * Uses raw SQL for lock queries (Exposed DSL doesn't support FOR UPDATE
  * SKIP LOCKED) and Exposed DSL for inserts and updates.
  */
 @ApplicationScoped
-class SlotAssignmentServiceV3 @Inject constructor(
+class SlotAssignmentServiceV3(
     private val configRepository: RateLimitConfigRepository,
     private val eventSlotRepository: EventSlotRepository,
     private val windowSlotCounterRepository: WindowSlotCounterRepository,
     private val windowEndTrackerRepository: WindowEndTrackerRepository,
     @param:ConfigProperty(name = "rate-limiter.max-windows-in-chunk", defaultValue = "100")
-    private val maxWindowsInChunk: Int,
+    private val maxWindowsInChunk: Long,
     @param:ConfigProperty(name = "rate-limiter.max-chunks-to-search", defaultValue = "2")
     private val maxChunksToSearch: Int
 ) {
-    private val firstWindowFull = ConcurrentHashMap<Instant, Boolean>()
-
-    fun evictFirstWindowCache() {
-        firstWindowFull.clear()
-    }
 
     fun assignSlot(eventId: String, configName: String, requestedTime: Instant): AssignedSlot {
 
@@ -59,69 +49,43 @@ class SlotAssignmentServiceV3 @Inject constructor(
             ?: throw ConfigLoadException(configName, "No active rate limit config found for: $configName")
 
         val alignedStart = alignToWindowBoundary(requestedTime, config.windowSizeSecs)
-        val elapsedMs = Duration.between(alignedStart, requestedTime).toMillis()
-        val maxFirstWindow = computeEffectiveMax(config.maxPerWindow, elapsedMs, config.windowSizeMs)
-        val firstJitterMs = computeFirstWindowJitterMs(elapsedMs, config.windowSizeMs)
+        val windowSize = config.windowSize
 
         // Phase 0: Pre-transaction idempotency check (own short-lived transaction).
-        // Releases connection in ~1ms, avoids holding a connection through Phases 1-2
-        // for duplicate/retry requests.
+        // Releases connection in ~1ms, avoids holding a connection through the main
+        // loop for duplicate/retry requests.
         val existing = eventSlotRepository.fetchAssignedSlot(eventId)
         if (existing != null) {
             return existing
         }
 
-        // Phase 1: First window (proportional capacity)
-        if (!firstWindowFull.containsKey(alignedStart)) {
-            val firstWindowSlot = transaction {
-                with(windowSlotCounterRepository) { ensureWindowExists(alignedStart) }
-
-                val lockResult = with(windowSlotCounterRepository) { tryLockFirstWindow(alignedStart, maxFirstWindow) }
-
-                when (lockResult) {
-                    true -> {
-                        val slot = claimSlot(eventId, alignedStart, firstJitterMs, requestedTime, config.configId)
-                        slot
-                    }
-
-                    false -> {
-                        firstWindowFull[alignedStart] = true; null
-                    }
-
-                    null -> null // SKIP LOCKED — contended, try again next request
-                }
-            }
-            if (firstWindowSlot != null) return firstWindowSlot
-        }
-
-        // Phase 2: Frontier-tracked find+lock with extension
-        // Iteration 0 searches the initial provisioned range; iterations 1..maxChunksToSearch extend beyond.
-        val windowSize = config.windowSize
-        var searchFrom = alignedStart.plus(windowSize)
-
-        for (iteration in 0..<maxChunksToSearch) {
-            val searchTo = if (iteration == 0) {
-                fetchOrProvisionInitialRange(alignedStart, windowSize)
+        // Unified loop: iteration 0 reads frontier (or provisions initial chunk),
+        // subsequent iterations extend by provisioning new chunks. Each iteration
+        // searches the full range [alignedStart, chunkEnd) — re-scanning earlier
+        // windows picks up rows that were SKIP LOCKED in previous passes.
+        var provisionFrom = alignedStart
+        for (iteration in 0 until maxChunksToSearch) {
+            val chunkEnd = if (iteration == 0) {
+                fetchOrProvisionChunk(alignedStart, windowSize)
             } else {
-                val chunkEnd = searchFrom.plus(windowSize.multipliedBy(maxWindowsInChunk.toLong()))
-                provisionChunk(searchFrom, maxWindowsInChunk, windowSize, alignedStart, chunkEnd)
-                chunkEnd
+                val extensionEnd = provisionFrom.plus(windowSize.multipliedBy(maxWindowsInChunk))
+                provisionChunk(provisionFrom, maxWindowsInChunk, windowSize, alignedStart, extensionEnd)
+                extensionEnd
             }
 
-            val found = findLockAndClaim(
-                eventId, searchFrom, searchTo,
-                config.maxPerWindow, windowSize, requestedTime, config.configId
+            val found = findLockWindowAndClaimSlot(
+                eventId, alignedStart, chunkEnd, requestedTime, config
             )
             if (found != null) return found
 
-            searchFrom = searchTo
+            provisionFrom = chunkEnd
         }
 
         throw SlotAssignmentException(
             eventId = eventId,
-            windowsSearched = maxWindowsInChunk + ((maxChunksToSearch - 1) * maxWindowsInChunk),
+            windowsSearched = maxChunksToSearch * maxWindowsInChunk,
             message = "Could not assign slot for event $eventId after searching " +
-                    "initial range + ${maxChunksToSearch - 1} extension chunks"
+                    "$maxChunksToSearch chunks"
         )
     }
 
@@ -129,31 +93,28 @@ class SlotAssignmentServiceV3 @Inject constructor(
     // Each helper runs its own short-lived transaction to minimize connection hold time.
 
     /**
-     * Fetch the provisioning frontier for this alignedStart, or provision the initial range
-     * if none exists.
+     * Fetch the provisioning frontier for this alignedStart, or provision the initial
+     * chunk if none exists. Returns the upper bound of the provisioned range.
      */
-    private fun fetchOrProvisionInitialRange(alignedStart: Instant, windowSize: Duration): Instant {
+    private fun fetchOrProvisionChunk(alignedStart: Instant, windowSize: Duration): Instant {
         val existingFrontier = transaction {
             with(windowEndTrackerRepository) { fetchMaxWindowEnd(alignedStart) }
         }
         if (existingFrontier != null) return existingFrontier
 
-        val chunkStart = alignedStart.plus(windowSize)
-        val windowEnd = chunkStart.plus(windowSize.multipliedBy(maxWindowsInChunk.toLong()))
-        transaction {
-            ensureChunkProvisioned(chunkStart, maxWindowsInChunk, windowSize)
-            with(windowEndTrackerRepository) { insertWindowEnd(alignedStart, windowEnd) }
-        }
-        return windowEnd
+        val chunkEnd = alignedStart.plus(windowSize.multipliedBy(maxWindowsInChunk))
+        provisionChunk(alignedStart, maxWindowsInChunk, windowSize, alignedStart, chunkEnd)
+        return chunkEnd
     }
 
     /**
      * Provision a chunk of windows and record the frontier.
-     * Frontier insert is idempotent.
+     * Both operations are idempotent: ensureChunkProvisioned checks windowExists,
+     * and insertWindowEnd catches duplicate keys.
      */
     private fun provisionChunk(
         from: Instant,
-        windowCount: Int,
+        windowCount: Long,
         windowSize: Duration,
         alignedStart: Instant,
         chunkEnd: Instant
@@ -168,24 +129,30 @@ class SlotAssignmentServiceV3 @Inject constructor(
 
     /**
      * Find an available window, lock it, and claim the slot — all in one short transaction.
-     * Returns null if no available window found in [from, to).
+     * Uses a CASE expression to apply proportional capacity to alignedStart and full
+     * capacity to all other windows. Returns null if no available window found in [alignedStart, to).
      */
-    private fun findLockAndClaim(
+    private fun findLockWindowAndClaimSlot(
         eventId: String,
-        from: Instant,
-        to: Instant,
-        maxSlots: Int,
-        windowSize: Duration,
+        alignedStart: Instant,
+        lastWindow: Instant,
         requestedTime: Instant,
-        configId: String
+        config: RateLimitConfig
     ): AssignedSlot? {
+        val elapsedMs = Duration.between(alignedStart, requestedTime).toMillis()
+        val maxFirstWindow = computeMaxSlotsInFirstWindow(config.maxPerWindow, elapsedMs, config.windowSizeMs)
+
         return transaction {
-            val found = with(windowSlotCounterRepository) {
-                findAndLockFirstAvailableWindow(from, to, maxSlots)
+            val lockedWindow = with(windowSlotCounterRepository) {
+                findAndLockFirstAvailableWindow(alignedStart, lastWindow, maxFirstWindow, config.maxPerWindow)
             } ?: return@transaction null
 
-            val jitterMs = computeFullWindowJitterMs(windowSize.toMillis())
-            claimSlot(eventId, found, jitterMs, requestedTime, configId)
+            val jitterMs = if (lockedWindow == alignedStart) {
+                computeJitterMs(maxOf(elapsedMs, 0), config.windowSizeMs)
+            } else {
+                computeJitterMs(0, config.windowSizeMs)
+            }
+            claimSlot(eventId, lockedWindow, jitterMs, requestedTime, config.configId)
         }
     }
 
@@ -196,15 +163,15 @@ class SlotAssignmentServiceV3 @Inject constructor(
      */
     private fun Transaction.ensureChunkProvisioned(
         from: Instant,
-        windowCount: Int,
+        windowCount: Long,
         windowSize: Duration
     ) {
-        val lastWindow = from.plus(windowSize.multipliedBy((windowCount - 1).toLong()))
+        val lastWindow = from.plus(windowSize.multipliedBy((windowCount - 1)))
         val exists = with(windowSlotCounterRepository) { windowExists(lastWindow) }
         if (exists) return
 
         val windows = (0 until windowCount).map { i ->
-            from.plus(windowSize.multipliedBy(i.toLong()))
+            from.plus(windowSize.multipliedBy(i))
         }
         with(windowSlotCounterRepository) { batchInsertWindows(windows) }
     }
@@ -247,18 +214,13 @@ class SlotAssignmentServiceV3 @Inject constructor(
         return Instant.ofEpochSecond(alignedEpoch)
     }
 
-    private fun computeEffectiveMax(maxPerWindow: Int, elapsedMs: Long, windowSizeMs: Long): Int {
+    private fun computeMaxSlotsInFirstWindow(maxPerWindow: Int, elapsedMs: Long, windowSizeMs: Long): Int {
         if (elapsedMs <= 0) return maxPerWindow
         val remainingMs = windowSizeMs - elapsedMs
         return Math.floorDiv(maxPerWindow.toLong() * remainingMs, windowSizeMs).toInt()
     }
 
-    private fun computeFirstWindowJitterMs(elapsedMs: Long, windowSizeMs: Long): Long {
-        val lowerBound = if (elapsedMs > 0) elapsedMs else 0L
-        return ThreadLocalRandom.current().nextLong(lowerBound, windowSizeMs)
-    }
-
-    private fun computeFullWindowJitterMs(windowSizeMs: Long): Long {
-        return ThreadLocalRandom.current().nextLong(0, windowSizeMs)
+    private fun computeJitterMs(lowerBoundMs: Long, upperBoundMs: Long): Long {
+        return ThreadLocalRandom.current().nextLong(lowerBoundMs, upperBoundMs)
     }
 }

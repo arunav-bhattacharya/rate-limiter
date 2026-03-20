@@ -73,7 +73,7 @@ class SlotAssignmentServiceV3Sql @Inject constructor(
                 logger.warn("eventId={} | totalTime={}ms (exhausted, windowsSearched={})", eventId, nanosToMs(System.nanoTime() - totalStart), result.windowsSearched)
                 throw SlotAssignmentException(
                     eventId = eventId,
-                    windowsSearched = result.windowsSearched,
+                    windowsSearched = result.windowsSearched.toLong(),
                     message = "Could not assign slot for event $eventId after searching " +
                             "${result.windowsSearched} windows"
                 )

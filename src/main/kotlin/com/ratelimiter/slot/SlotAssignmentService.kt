@@ -100,7 +100,7 @@ class SlotAssignmentService @Inject constructor(
             SlotAssignmentSql.STATUS_EXHAUSTED -> {
                 throw SlotAssignmentException(
                     eventId = eventId,
-                    windowsSearched = result.windowsSearched,
+                    windowsSearched = result.windowsSearched.toLong(),
                     message = "Could not assign slot for event $eventId after searching " +
                             "${result.windowsSearched} windows"
                 )

@@ -56,7 +56,6 @@ class SlotAssignmentServiceV3Test {
             WindowEndTrackerTable.deleteAll()
         }
         configRepository.evictCache()
-        service.evictFirstWindowCache()
         windowEndTrackerRepository.evictFrontierCache()
     }
 
@@ -309,15 +308,6 @@ class SlotAssignmentServiceV3Test {
         val requestedTime = Instant.parse("2025-06-01T12:00:00Z")
 
         service.assignSlot("evt-f1", "v3-frontier", requestedTime)
-
-        val frontierRows = transaction {
-            WindowEndTrackerTable.selectAll().toList()
-        }
-        // First window assignment doesn't need frontier (Phase 1 succeeds).
-        // Fill the first window to force Phase 2 which initializes the frontier.
-        // But with maxPerWindow=100 the first call won't exhaust Phase 1.
-        // So let's verify no frontier row was needed for a single event.
-        // The frontier is only created when Phase 1 fails and Phase 2 runs.
     }
 
     @Test
@@ -396,9 +386,8 @@ class SlotAssignmentServiceV3Test {
 
     @Test
     fun `throws SlotAssignmentException when all chunks exhausted`() {
-        // Build a service with maxChunksToSearch=1 so only the initial range runs (no extensions).
-        // Capacity = 1 (first window) + 100 (initial chunk) = 101 windows.
-        // With max_per_window=1, event 102 should fail.
+        // Build a service with maxChunksToSearch=1 so only one chunk runs (no extensions).
+        // Capacity = 100 windows (1 chunk). With max_per_window=1, event 101 should fail.
         val noExtensionService = SlotAssignmentServiceV3(
             configRepository, eventSlotRepository,
             windowSlotCounterRepository, windowEndTrackerRepository,
@@ -408,12 +397,12 @@ class SlotAssignmentServiceV3Test {
         val requestedTime = Instant.parse("2025-06-01T12:00:00Z")
 
         // Fill all available capacity
-        (1..101).forEach { i ->
+        (1..100).forEach { i ->
             noExtensionService.assignSlot("evt-ex$i", "v3-exhaust", requestedTime)
         }
 
         assertThrows(SlotAssignmentException::class.java) {
-            noExtensionService.assignSlot("evt-ex102", "v3-exhaust", requestedTime)
+            noExtensionService.assignSlot("evt-ex101", "v3-exhaust", requestedTime)
         }
     }
 

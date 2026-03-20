@@ -6,7 +6,7 @@ package com.ratelimiter.slot
  */
 class SlotAssignmentException(
     val eventId: String,
-    val windowsSearched: Int,
+    val windowsSearched: Long,
     message: String
 ) : RuntimeException(message)
 

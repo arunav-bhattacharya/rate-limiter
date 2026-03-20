@@ -856,22 +856,6 @@
                 </div>
             </div>
             <div class="param-row" id="param-5">
-                <div class="param-name" style="color: var(--primary);">firstJitterMs</div>
-                <div class="param-value" style="color: #c3e88d;">random(1500, 4000)</div>
-                <div class="param-desc">
-                    Jitter for the first window, constrained to <code style="color:var(--primary);">[elapsedMs, windowSizeMs)</code> so scheduled time is never in the past.
-                    <div class="param-formula"><span class="kw">ThreadLocalRandom</span>.nextLong(elapsedMs, windowSizeMs)</div>
-                </div>
-            </div>
-            <div class="param-row" id="param-6">
-                <div class="param-name" style="color: var(--primary);">fullJitterMs</div>
-                <div class="param-value" style="color: #c3e88d;">random(0, 4000)</div>
-                <div class="param-desc">
-                    Jitter for subsequent full windows. Spans the entire window range.
-                    <div class="param-formula"><span class="kw">ThreadLocalRandom</span>.nextLong(0, windowSizeMs)</div>
-                </div>
-            </div>
-            <div class="param-row" id="param-7">
                 <div class="param-name" style="color: var(--warning);">maxWindowsInChunk</div>
                 <div class="param-value" style="color: #c3e88d;">100</div>
                 <div class="param-desc">
@@ -879,7 +863,7 @@
                     <div class="param-formula"><span class="kw">config</span>.maxWindowsInChunk = 100</div>
                 </div>
             </div>
-            <div class="param-row" id="param-8">
+            <div class="param-row" id="param-6">
                 <div class="param-name" style="color: var(--warning);">maxChunksToSearch</div>
                 <div class="param-value" style="color: #c3e88d;">10</div>
                 <div class="param-desc">
@@ -894,7 +878,7 @@
     <!-- ===== SCENE 7: PHASE OVERVIEW ===== -->
     <section class="scene" id="scene-7">
         <div class="scene-title anim-item">Step 3: Core Process</div>
-        <div class="scene-subtitle anim-item">4 phases &mdash; each runs only if the previous phase couldn't assign a slot</div>
+        <div class="scene-subtitle anim-item">3 phases &mdash; Phase 0 checks idempotency, then a unified loop provisions and searches</div>
         <div class="phases-container">
             <div class="phase-card" id="phase-card-0">
                 <div class="phase-num phase-num-0">P0</div>
@@ -911,33 +895,21 @@
             <div class="phase-card" id="phase-card-1">
                 <div class="phase-num phase-num-1">P1</div>
                 <div class="phase-info">
-                    <h3>First Window Lock</h3>
-                    <div class="phase-fn">tryLockFirstWindow(alignedStart)</div>
-                    <p>Attempt to lock the aligned window directly. Fast path &mdash; succeeds when traffic is low.</p>
+                    <h3>Provision + Find+Lock+Claim</h3>
+                    <div class="phase-fn">fetchOrProvisionChunk() + findLockWindowAndClaimSlot()</div>
+                    <p>Provision initial chunk (or read frontier), then search [alignedStart, chunkEnd) with CASE-based SQL applying proportional capacity to first window.</p>
                 </div>
             </div>
             <div class="phase-connector" id="phase-conn-1">
                 <div class="phase-connector-line"></div>
-                <div class="phase-connector-label">window full or locked &darr;</div>
-            </div>
-            <div class="phase-card" id="phase-card-2">
-                <div class="phase-num phase-num-2">P2</div>
-                <div class="phase-info">
-                    <h3>Find + Lock Available Window</h3>
-                    <div class="phase-fn">findAndLockFirstAvailableWindow() + claimSlot()</div>
-                    <p>Walk provisioned range with FOR UPDATE SKIP LOCKED. Lock first available window and claim the slot.</p>
-                </div>
-            </div>
-            <div class="phase-connector" id="phase-conn-2">
-                <div class="phase-connector-line"></div>
                 <div class="phase-connector-label">all windows in range full &darr;</div>
             </div>
-            <div class="phase-card" id="phase-card-3">
-                <div class="phase-num phase-num-3">P2<sup>+</sup></div>
+            <div class="phase-card" id="phase-card-2">
+                <div class="phase-num phase-num-2">P1<sup>+</sup></div>
                 <div class="phase-info">
                     <h3>Extension Loop</h3>
-                    <div class="phase-fn">provisionChunk() + findLockAndClaim()</div>
-                    <p>Provision new chunks of windows beyond the initial range and retry find+lock+claim. Up to maxChunksToSearch iterations.</p>
+                    <div class="phase-fn">provisionChunk() + findLockWindowAndClaimSlot()</div>
+                    <p>Provision new chunks beyond the frontier and re-scan from alignedStart. Picks up previously SKIP LOCKED windows. Up to maxChunksToSearch iterations.</p>
                 </div>
             </div>
         </div>
@@ -951,7 +923,6 @@
             <div class="txn-banner"><strong>TXN<sub>0</sub></strong> &mdash; <i>fetchAssignedSlot() (~1ms, releases connection immediately)</i></div>
             <div class="func-bar">
                 <div class="func-item active">fetchAssignedSlot</div>
-                <div class="func-item">tryLockFirstWindow</div>
                 <div class="func-item">findAndLockFirstAvailableWindow</div>
                 <div class="func-item">claimSlot</div>
             </div>
@@ -964,7 +935,7 @@
                         <span style="display: block; color: var(--error);">&#10007; Not in DB yet</span>
                     </div>
                     <div class="idem-step" id="idem-s3" style="border-left-color: var(--primary);">
-                        &#8594; Proceed to tryLockFirstWindow()...
+                        &#8594; Proceed to unified loop (provision + findLockWindowAndClaimSlot)...
                     </div>
                 </div>
                 <div class="idem-path" id="idem-second-call">
@@ -984,70 +955,69 @@
         <div class="db-tables-panel" id="db-tables-8"></div>
     </section>
 
-    <!-- ===== SCENE 9: PHASE 1 — FIRST WINDOW ===== -->
+    <!-- ===== SCENE 9: CASE-BASED UNIFIED SEARCH ===== -->
     <section class="scene" id="scene-9">
         <div class="scene-title">Step 3: Core Process</div>
-        <div class="scene-subtitle">Phase 1 &mdash; First Window (Proportional Capacity)</div>
+        <div class="scene-subtitle">CASE-Based SQL &mdash; Proportional capacity for first window, full capacity for all others</div>
         <div class="skip-container">
-            <div class="txn-banner"><strong>TXN<sub>1</sub></strong> &mdash; <i>First window lock + claim (own transaction)</i></div>
+            <div class="txn-banner"><strong>Unified Loop</strong> &mdash; <i>Single SQL handles first window + all other windows</i></div>
             <div class="func-bar">
                 <div class="func-item done">fetchAssignedSlot</div>
-                <div class="func-item active">tryLockFirstWindow</div>
-                <div class="func-item">findAndLockFirstAvailableWindow</div>
+                <div class="func-item active">findAndLockFirstAvailableWindow</div>
                 <div class="func-item">claimSlot</div>
             </div>
             <div class="skip-sql" id="skip-sql-9">
-                <span style="color: #c792ea;">INSERT INTO</span> RL_WNDW_CT(WNDW_STRT_TS, SLOT_CT) <span style="color: #c792ea;">VALUES</span>(alignedStart, 0) <span style="color: var(--text-muted);">&mdash; catch DUP</span><br>
-                <span style="color: #c792ea;">SELECT</span> SLOT_CT <span style="color: #c792ea;">FROM</span> RL_WNDW_CT
-                <span style="color: #c792ea;">WHERE</span> WNDW_STRT_TS = alignedStart
+                <span style="color: #c792ea;">SELECT</span> WNDW_STRT_TS <span style="color: #c792ea;">FROM</span> RL_WNDW_CT<br>
+                <span style="color: #c792ea;">WHERE</span> WNDW_STRT_TS &gt;= alignedStart <span style="color: #c792ea;">AND</span> WNDW_STRT_TS &lt; chunkEnd<br>
+                <span style="color: #c792ea;">AND</span> SLOT_CT &lt; <span style="color: var(--warning); font-weight: 600;">CASE WHEN</span> WNDW_STRT_TS = alignedStart <span style="color: var(--warning); font-weight: 600;">THEN</span> maxFirstWindow <span style="color: var(--warning); font-weight: 600;">ELSE</span> maxPerWindow <span style="color: var(--warning); font-weight: 600;">END</span><br>
+                <span style="color: #c792ea;">ORDER BY</span> WNDW_STRT_TS ASC
                 <span style="color: var(--warning); font-weight: 600;">FOR UPDATE SKIP LOCKED</span>
             </div>
             <div class="skip-paths" id="skip-paths-9">
                 <div class="skip-path" id="skip-case-1">
-                    <h4 style="color: var(--success);">ensureWindowExists(alignedStart)</h4>
-                    <div class="skip-step" id="skip-s1a">INSERT RL_WNDW_CT (catch DUP_VAL_ON_INDEX)<br>Guarantees the first window row exists</div>
+                    <h4 style="color: var(--success);">First window (alignedStart = 12:00:00)</h4>
+                    <div class="skip-step" id="skip-s1a">CASE evaluates to maxFirstWindow (proportional capacity)<br>maxFirstWindow = floor(100 &times; 2500 / 4000) = 62</div>
                     <div class="skip-step" id="skip-s1b" style="border-left-color: var(--success);">
-                        &#10003; First thread inserts, others catch DUP<br>
-                        <span style="color: var(--success);">No thundering herd on initial window</span>
+                        If SLOT_CT &lt; 62 &rarr; window qualifies for locking<br>
+                        <span style="color: var(--success);">Jitter constrained to [elapsedMs, windowSizeMs) so scheduledTime &ge; requestedTime</span>
                     </div>
                 </div>
                 <div class="skip-path" id="skip-case-2">
-                    <h4 style="color: var(--warning);">tryLockFirstWindow()</h4>
-                    <div class="skip-step" id="skip-s2a">SELECT SLOT_CT FOR UPDATE SKIP LOCKED<br>Lock the first window if not contended</div>
+                    <h4 style="color: var(--warning);">Subsequent windows (12:00:04, 12:00:08, ...)</h4>
+                    <div class="skip-step" id="skip-s2a">CASE evaluates to maxPerWindow (full capacity)<br>maxPerWindow = 100</div>
                     <div class="skip-step" id="skip-s2b" style="border-left-color: var(--warning);">
-                        Check: count &lt; maxFirstWindow?<br>
-                        <span style="color: var(--warning);">maxFirstWindow = floor(maxPerWindow &times; remainingMs / windowSizeMs)</span>
+                        If SLOT_CT &lt; 100 &rarr; window qualifies for locking<br>
+                        <span style="color: var(--warning);">Jitter spans full window: [0, windowSizeMs)</span>
                     </div>
                     <div class="skip-step" id="skip-s2c" style="border-left-color: var(--warning);">
-                        If yes &rarr; claimSlot with constrained jitter<br>
-                        <span style="color: var(--success);">jitter in [elapsedMs, windowSizeMs)</span>
+                        Cursor advances through windows in order<br>
+                        <span style="color: var(--success);">SKIP LOCKED skips contended windows server-side</span>
                     </div>
                 </div>
                 <div class="skip-path" id="skip-case-3">
-                    <h4 style="color: var(--primary);">First window full or locked?</h4>
-                    <div class="skip-step" id="skip-s3a">SKIP LOCKED &rarr; no row returned (contended)<br>OR count &ge; maxFirstWindow (full)</div>
+                    <h4 style="color: var(--primary);">All windows full or locked?</h4>
+                    <div class="skip-step" id="skip-s3a">Cursor exhausts range [alignedStart, chunkEnd) &rarr; returns null</div>
                     <div class="skip-step" id="skip-s3b" style="border-left-color: var(--primary);">
-                        Fall through to Phase 2<br>
-                        <span style="color: var(--primary);">findAndLockFirstAvailableWindow()</span>
+                        Extend frontier &rarr; provision new chunk &rarr; re-scan from alignedStart<br>
+                        <span style="color: var(--primary);">Re-scanning picks up previously SKIP LOCKED windows</span>
                     </div>
                 </div>
             </div>
             <div class="skip-result" id="skip-result-9">
-                <span style="color: var(--text-muted);">Result:</span> Either slot claimed in first window, or proceed to frontier-tracked find+lock
+                <span style="color: var(--text-muted);">Result:</span> One query handles proportional + full capacity &mdash; cursor naturally finds the first available window
             </div>
         </div>
         <div class="db-tables-panel" id="db-tables-9"></div>
     </section>
 
-    <!-- ===== SCENE 10: PHASE 2 — FRONTIER-TRACKED FIND+LOCK (INITIAL RANGE) ===== -->
+    <!-- ===== SCENE 10: UNIFIED LOOP — FIND+LOCK WITH CASE SQL ===== -->
     <section class="scene" id="scene-10">
         <div class="scene-title">Step 3: Core Process</div>
-        <div class="scene-subtitle">Phase 2 &mdash; Frontier-Tracked Find+Lock (Initial Range)</div>
+        <div class="scene-subtitle">Unified Loop &mdash; Provision + CASE-based Find+Lock (Iteration 0)</div>
         <div class="walk-container">
-            <div class="txn-banner"><strong>TXN<sub>2a</sub></strong> &mdash; <i>fetchOrProvisionInitialRange &rarr;</i> <strong>TXN<sub>2b</sub></strong> &mdash; <i>findLockAndClaim</i></div>
+            <div class="txn-banner"><strong>TXN<sub>1a</sub></strong> &mdash; <i>fetchOrProvisionChunk &rarr;</i> <strong>TXN<sub>1b</sub></strong> &mdash; <i>findLockWindowAndClaimSlot</i></div>
             <div class="func-bar">
                 <div class="func-item done">fetchAssignedSlot</div>
-                <div class="func-item done">tryLockFirstWindow</div>
                 <div class="func-item active">findAndLockFirstAvailableWindow</div>
                 <div class="func-item">claimSlot</div>
             </div>
@@ -1068,7 +1038,7 @@
                 <div class="walk-window" id="ww-3"><div class="win-time">12:00:12</div><div class="win-lock" id="lock-3">&#128274;</div><div class="win-status" id="status-3"></div></div>
             </div>
             <div class="sql-caption" id="sql-caption-10">
-                <span style="color: #c792ea;">SELECT</span> WNDW_STRT_TS <span style="color: #c792ea;">FROM</span> RL_WNDW_CT <span style="color: #c792ea;">WHERE</span> WNDW_STRT_TS &gt;= ? <span style="color: #c792ea;">AND</span> SLOT_CT &lt; ? <span style="color: #c792ea;">ORDER BY</span> WNDW_STRT_TS ASC <span style="color: var(--warning); font-weight: 600;">FOR UPDATE SKIP LOCKED</span> <span style="color: var(--text-muted);">&mdash; fetchSize=1, rowPrefetch=1</span>
+                <span style="color: #c792ea;">SELECT</span> WNDW_STRT_TS <span style="color: #c792ea;">FROM</span> RL_WNDW_CT <span style="color: #c792ea;">WHERE</span> WNDW_STRT_TS &gt;= ? <span style="color: #c792ea;">AND</span> SLOT_CT &lt; <span style="color: var(--warning); font-weight: 600;">CASE WHEN</span> WNDW_STRT_TS = ? <span style="color: var(--warning); font-weight: 600;">THEN</span> ? <span style="color: var(--warning); font-weight: 600;">ELSE</span> ? <span style="color: var(--warning); font-weight: 600;">END</span> <span style="color: #c792ea;">ORDER BY</span> WNDW_STRT_TS ASC <span style="color: var(--warning); font-weight: 600;">FOR UPDATE SKIP LOCKED</span> <span style="color: var(--text-muted);">&mdash; fetchSize=1, rowPrefetch=1</span>
             </div>
             <div class="nowait-label" id="nowait-label-10">SKIP LOCKED + fetchSize=1 &mdash; cursor skips locked rows server-side, each thread locks a different row!</div>
         </div>
@@ -1078,18 +1048,17 @@
     <!-- ===== SCENE 11: CLAIM SLOT ===== -->
     <section class="scene" id="scene-11">
         <div class="scene-title">Step 3: Core Process</div>
-        <div class="scene-subtitle">Phase 2 &mdash; claimSlot() &mdash; insertEventSlot + incrementSlotCount</div>
+        <div class="scene-subtitle">claimSlot() &mdash; insertEventSlot + incrementSlotCount (within find+lock+claim transaction)</div>
         <div class="claim-container">
-            <div class="txn-banner"><strong>TXN<sub>2b</sub></strong> &mdash; <i>Within the find+lock+claim transaction &mdash; atomic with the row lock</i></div>
+            <div class="txn-banner"><strong>TXN<sub>1b</sub></strong> &mdash; <i>Within the find+lock+claim transaction &mdash; atomic with the row lock</i></div>
             <div class="func-bar">
                 <div class="func-item done">fetchAssignedSlot</div>
-                <div class="func-item done">tryLockFirstWindow</div>
                 <div class="func-item done">findAndLockFirstAvailableWindow</div>
                 <div class="func-item active">claimSlot</div>
             </div>
             <!-- App Server note (outside jitter box) -->
             <div id="app-server-note-11" style="text-align: center; margin-bottom: 5px; padding: 5px 12px; border-radius: 8px; background: rgba(46,204,113,0.08); border: 1px dashed var(--success); font-size: 11px; color: var(--success); opacity: 0; transition: opacity 0.5s;">
-                <strong>App Server (Kotlin)</strong> &mdash; Jitter pre-computed: ThreadLocalRandom.nextLong(elapsedMs, windowSizeMs)
+                <strong>App Server (Kotlin)</strong> &mdash; Jitter: computeJitterMs(lowerBoundMs, upperBoundMs) &mdash; based on lockedWindow == alignedStart
             </div>
             <!-- Three jitter boxes -->
             <div style="display: flex; gap: 8px; justify-content: center; width: 100%;" id="jitter-row-11">
@@ -1167,42 +1136,41 @@
         <div class="db-tables-panel" id="db-tables-11"></div>
     </section>
 
-    <!-- ===== SCENE 12: PHASE 2 — EXTENSION LOOP ===== -->
+    <!-- ===== SCENE 12: EXTENSION LOOP ===== -->
     <section class="scene" id="scene-12">
         <div class="scene-title">Step 3: Core Process</div>
-        <div class="scene-subtitle">Phase 2 &mdash; Extension Loop &mdash; provisionChunk() + findLockAndClaim() in separate transactions</div>
+        <div class="scene-subtitle">Extension Loop &mdash; provisionChunk() + findLockWindowAndClaimSlot() &mdash; re-scans from alignedStart</div>
         <div class="ext-container">
-            <div class="txn-banner" id="ext-txn-banner-12">TXN<sub>2</sub> &mdash; Extension loop: two transactions per chunk iteration</div>
+            <div class="txn-banner" id="ext-txn-banner-12">Extension loop: provision + find+lock+claim per iteration (re-scans from alignedStart)</div>
             <div class="func-bar">
                 <div class="func-item done">fetchAssignedSlot</div>
-                <div class="func-item done">tryLockFirstWindow</div>
                 <div class="func-item done">findAndLockFirstAvailableWindow</div>
                 <div class="func-item done">claimSlot</div>
             </div>
 
             <!-- Exhausted banner -->
             <div class="ext-exhausted" id="ext-exhausted-12">
-                <span style="color: var(--error); font-weight: 600;">&#10007; Initial range returned null</span> &mdash;
-                Range [12:00:04, 12:06:44) exhausted. All 100 windows full.
+                <span style="color: var(--error); font-weight: 600;">&#10007; Initial chunk returned null</span> &mdash;
+                Range [12:00:00, 12:06:40) exhausted. All 100 windows full.
             </div>
 
             <!-- Loop visualization: chunk timeline -->
             <div class="ext-loop-area" id="ext-loop-area-12">
                 <div class="ext-range ext-range-initial" id="ext-range-initial">
-                    <div class="ext-range-label">Initial Range</div>
-                    <div class="ext-range-bar">12:00:04 &ndash; 12:06:44</div>
+                    <div class="ext-range-label">Initial Chunk</div>
+                    <div class="ext-range-bar">12:00:00 &ndash; 12:06:40</div>
                     <div class="ext-range-status" id="ext-initial-status"></div>
                 </div>
                 <div class="ext-arrow" id="ext-arrow-1">&rarr;</div>
                 <div class="ext-range ext-range-chunk" id="ext-chunk-0">
-                    <div class="ext-range-label">Chunk 0</div>
-                    <div class="ext-range-bar">12:06:44 &ndash; 12:13:24</div>
+                    <div class="ext-range-label">Extension 1</div>
+                    <div class="ext-range-bar">12:06:40 &ndash; 12:13:20</div>
                     <div class="ext-range-status" id="ext-chunk-0-status"></div>
                 </div>
                 <div class="ext-arrow" id="ext-arrow-2">&rarr;</div>
                 <div class="ext-range ext-range-chunk" id="ext-chunk-1">
-                    <div class="ext-range-label">Chunk 1</div>
-                    <div class="ext-range-bar">12:13:24 &ndash; 12:20:04</div>
+                    <div class="ext-range-label">Extension 2</div>
+                    <div class="ext-range-bar">12:13:20 &ndash; 12:20:00</div>
                     <div class="ext-range-status" id="ext-chunk-1-status"></div>
                 </div>
             </div>
@@ -1228,10 +1196,10 @@
 
             <!-- Find+Lock+Claim retry box -->
             <div class="ext-findlock-detail" id="ext-findlock-detail-12">
-                <div class="ext-findlock-header" id="ext-findlock-header-12">findLockAndClaim(searchFrom, chunkEnd)</div>
+                <div class="ext-findlock-header" id="ext-findlock-header-12">findLockWindowAndClaimSlot(alignedStart, chunkEnd)</div>
                 <div class="ext-findlock-body">
-                    Reuses same cursor-based <span style="color: var(--warning); font-weight: 600;">FOR UPDATE SKIP LOCKED</span> + fetchSize=1
-                    pattern as initial range, but searches only the newly provisioned [searchFrom, chunkEnd) range.
+                    Reuses same CASE-based <span style="color: var(--warning); font-weight: 600;">FOR UPDATE SKIP LOCKED</span> + fetchSize=1
+                    pattern, re-scanning from alignedStart to pick up previously SKIP LOCKED windows.
                 </div>
                 <div class="ext-findlock-result" id="ext-findlock-result-12"></div>
             </div>
@@ -1637,16 +1605,14 @@
 
         // Scene 6: Compute Search Params (step controls, card per variable)
         5: (() => {
-            const paramIds = ['param-1','param-2','param-3','param-4','param-5','param-6','param-7','param-8'];
+            const paramIds = ['param-1','param-2','param-3','param-4','param-5','param-6'];
             const descriptions = [
                 'requestedTime: the timestamp from the incoming API call',
                 'windowStart: snap to the nearest window boundary (floor alignment)',
                 'elapsedMs: how far into the current window the request lands',
-                'maxFirstWindow: proportional capacity for the partial first window',
-                'firstJitterMs: constrained jitter so scheduledTime \u2265 requestedTime',
-                'fullJitterMs: unconstrained jitter for subsequent full windows',
+                'maxFirstWindow: proportional capacity for the partial first window. Used in the CASE expression to limit the first window.',
                 'maxWindowsInChunk: how many windows to provision per chunk',
-                'maxChunksToSearch: how many chunks to search before giving up. All 8 values are now ready for the transaction.'
+                'maxChunksToSearch: how many chunks to search before giving up. All 6 values are now ready for the unified loop.'
             ];
             function applyStep(step) {
                 paramIds.forEach((id, i) => {
@@ -1656,7 +1622,7 @@
                 });
                 document.getElementById('s6-desc').textContent = descriptions[step] || '';
             }
-            const ctrl = makeStepController(6, 8, applyStep);
+            const ctrl = makeStepController(6, 6, applyStep);
             return {
                 enter() { ctrl.enter(); },
                 exit() {
@@ -1672,11 +1638,11 @@
         6: {
             enter() {
                 scenes[6].querySelectorAll('.anim-item').forEach((el, i) => schedule(() => el.classList.add('show'), i * 150));
-                for (let i = 0; i <= 3; i++) {
+                for (let i = 0; i <= 2; i++) {
                     showElement('phase-card-' + i, 400 + i * 350);
-                    if (i < 3) showElement('phase-conn-' + i, 400 + i * 350 + 200);
+                    if (i < 2) showElement('phase-conn-' + i, 400 + i * 350 + 200);
                 }
-                schedule(() => document.getElementById('phase-card-0').classList.add('highlight'), 2200);
+                schedule(() => document.getElementById('phase-card-0').classList.add('highlight'), 1800);
             },
             exit() { resetScene('scene-7'); }
         },
@@ -1736,7 +1702,7 @@
             };
         })(),
 
-        // Scene 9: Phase 1 — First Window (step controls + DB tables)
+        // Scene 9: CASE-Based Unified Search (step controls + DB tables)
         8: (() => {
             function applyStep(step) {
                 const sql = document.getElementById('skip-sql-9');
@@ -1751,54 +1717,62 @@
 
                 resetDbState();
 
-                // Step 0: Show SQL + initial state
-                dbState.label = 'Phase 1: ensureWindowExists(alignedStart) + tryLockFirstWindow()';
-                dbState.sqlHint = 'INSERT RL_WNDW_CT ... ON DUP catch; SELECT SLOT_CT FOR UPDATE SKIP LOCKED';
+                // Step 0: Show CASE SQL
+                dbState.label = 'CASE-based SQL: single query applies proportional capacity to first window, full capacity to others';
+                dbState.sqlHint = 'SLOT_CT < CASE WHEN WNDW_STRT_TS = alignedStart THEN maxFirstWindow ELSE maxPerWindow END';
 
                 if (step >= 0) {
                     sql.classList.add('visible');
                 }
                 if (step >= 1) {
-                    // ensureWindowExists
+                    // First window with proportional capacity
                     document.getElementById('skip-case-1').style.display = '';
                     document.getElementById('skip-case-1').classList.add('visible');
                     ['skip-s1a','skip-s1b'].forEach(id => document.getElementById(id).classList.add('visible'));
                     dbState.windowCounter = [
-                        { windowStart: '12:00:00', slotCount: 0, cssClass: 'row-insert' }
+                        { windowStart: '12:00:00', slotCount: 42, cssClass: 'row-locked' },
+                        { windowStart: '12:00:04', slotCount: 0, cssClass: '' },
+                        { windowStart: '12:00:08', slotCount: 0, cssClass: '' }
                     ];
-                    dbState.label = 'ensureWindowExists: INSERT RL_WNDW_CT for 12:00:00 (catch DUP if exists)';
-                    dbState.sqlHint = 'INSERT INTO RL_WNDW_CT(WNDW_STRT_TS, SLOT_CT) VALUES(12:00:00, 0)';
+                    dbState.label = 'First window (12:00:00): CASE \u2192 maxFirstWindow=62. SLOT_CT(42) < 62 \u2192 qualifies!';
+                    dbState.sqlHint = 'CASE WHEN WNDW_STRT_TS = 12:00:00 THEN 62 ELSE 100 END';
                 }
                 if (step >= 2) {
-                    // tryLockFirstWindow
+                    // Subsequent windows with full capacity
                     document.getElementById('skip-case-2').style.display = '';
                     document.getElementById('skip-case-2').classList.add('visible');
                     ['skip-s2a','skip-s2b','skip-s2c'].forEach(id => document.getElementById(id).classList.add('visible'));
                     dbState.windowCounter = [
-                        { windowStart: '12:00:00', slotCount: 42, cssClass: 'row-locked' }
+                        { windowStart: '12:00:00', slotCount: 62, cssClass: 'row-full' },
+                        { windowStart: '12:00:04', slotCount: 50, cssClass: 'row-highlight' },
+                        { windowStart: '12:00:08', slotCount: 0, cssClass: '' }
                     ];
-                    dbState.label = 'tryLockFirstWindow: SELECT SLOT_CT FOR UPDATE SKIP LOCKED. count(42) < maxFirstWindow(62) \u2192 has capacity!';
-                    dbState.sqlHint = 'SELECT SLOT_CT FROM RL_WNDW_CT WHERE WNDW_STRT_TS = 12:00:00 FOR UPDATE SKIP LOCKED';
+                    dbState.label = 'Subsequent windows: CASE \u2192 maxPerWindow=100. Cursor advances past full first window to 12:00:04.';
+                    dbState.sqlHint = 'CASE WHEN WNDW_STRT_TS = 12:00:00 THEN 62 (full!) ELSE 100 END \u2192 cursor skips to 12:00:04';
                 }
                 if (step >= 3) {
-                    // First window full or locked fallthrough
+                    // All exhausted — extend
                     document.getElementById('skip-case-3').style.display = '';
                     document.getElementById('skip-case-3').classList.add('visible');
                     ['skip-s3a','skip-s3b'].forEach(id => document.getElementById(id).classList.add('visible'));
                     dbState.windowCounter = [
-                        { windowStart: '12:00:00', slotCount: 62, cssClass: 'row-full' }
+                        { windowStart: '12:00:00', slotCount: 62, cssClass: 'row-full' },
+                        { windowStart: '12:00:04', slotCount: 100, cssClass: 'row-full' },
+                        { windowStart: '12:00:08', slotCount: 100, cssClass: 'row-full' }
                     ];
-                    dbState.label = 'First window full (count \u2265 maxFirstWindow) or SKIP LOCKED returned no row \u2192 fall through to Phase 2.';
-                    dbState.sqlHint = 'count(62) \u2265 maxFirstWindow(62) \u2192 full; proceed to findAndLockFirstAvailableWindow()';
+                    dbState.label = 'All windows full or locked \u2192 extend frontier, provision new chunk, re-scan from alignedStart.';
+                    dbState.sqlHint = 'cursor exhausted [alignedStart, chunkEnd) \u2192 null \u2192 next iteration re-scans from alignedStart';
                 }
                 if (step >= 4) {
-                    // Summary result
+                    // Summary
                     result.classList.add('visible');
                     dbState.windowCounter = [
-                        { windowStart: '12:00:00', slotCount: 42, cssClass: 'row-highlight' }
+                        { windowStart: '12:00:00', slotCount: 42, cssClass: 'row-highlight' },
+                        { windowStart: '12:00:04', slotCount: 0, cssClass: '' },
+                        { windowStart: '12:00:08', slotCount: 0, cssClass: '' }
                     ];
-                    dbState.label = 'In our example: first window has capacity \u2192 claimSlot with constrained jitter [elapsedMs, windowSizeMs).';
-                    dbState.sqlHint = 'If capacity: claimSlot(); otherwise: findAndLockFirstAvailableWindow()';
+                    dbState.label = 'In our example: first window has capacity \u2192 cursor locks it, claimSlot with jitter [elapsedMs, windowSizeMs).';
+                    dbState.sqlHint = 'One query, one cursor scan \u2192 proportional + full capacity handled together';
                 }
                 renderDbTables(9);
             }
@@ -1816,7 +1790,7 @@
             };
         })(),
 
-        // Scene 10: Phase 2 — Frontier-Tracked Find+Lock (step controls + DB tables)
+        // Scene 10: Unified Loop — CASE-based Find+Lock (step controls + DB tables)
         9: (() => {
             // Compute center-X of a window box relative to the thread-anim-area
             function getWinX(idx) {
@@ -1860,9 +1834,9 @@
 
                 resetDbState();
                 dbState.windowCounter = [
-                    { windowStart: '12:00:00', slotCount: 100, cssClass: 'row-full' }
+                    { windowStart: '12:00:00', slotCount: 62, cssClass: 'row-full' }
                 ];
-                dbState.label = 'Phase 2 begins: fetchOrProvisionInitialRange(alignedStart) \u2014 single txn: reads frontier, provisions if NULL.';
+                dbState.label = 'Unified loop begins: fetchOrProvisionChunk(alignedStart) \u2014 reads frontier, provisions if NULL.';
 
                 // Compute window center positions dynamically
                 const w0 = getWinX(0), w1 = getWinX(1), w2 = getWinX(2), w3 = getWinX(3);
@@ -1873,57 +1847,55 @@
                 }
 
                 if (step >= 1) {
-                    // Batch provisioning: ensureChunkProvisioned() + INSERT track_window_end
+                    // Batch provisioning: ensureChunkProvisioned() from alignedStart
                     resetThreads();
                     dbState.windowCounter = [
-                        { windowStart: '12:00:00', slotCount: 100, cssClass: 'row-full' },
+                        { windowStart: '12:00:00', slotCount: 62, cssClass: 'row-full' },
                         { windowStart: '12:00:04', slotCount: 0, cssClass: 'row-insert' },
                         { windowStart: '12:00:08', slotCount: 0, cssClass: 'row-insert' },
                         { windowStart: '12:00:12', slotCount: 0, cssClass: 'row-insert' },
-                        { windowStart: '12:00:16', slotCount: 0, cssClass: 'row-insert' },
                         { windowStart: '\u22EE', slotCount: '\u22EE', cssClass: 'row-bulk' },
-                        { windowStart: '12:06:40', slotCount: 0, cssClass: 'row-insert' }
+                        { windowStart: '12:06:36', slotCount: 0, cssClass: 'row-insert' }
                     ];
                     dbState.trackWindowEnd = [
-                        { requestedTime: '12:00:00', windowEnd: '12:06:44', cssClass: 'row-insert' }
+                        { requestedTime: '12:00:00', windowEnd: '12:06:40', cssClass: 'row-insert' }
                     ];
-                    dbState.label = 'fetchOrProvisionInitialRange() \u2192 ensureChunkProvisioned(): batchInsertWindows(100 rows) + INSERT RL_WNDW_FRONTIER_TRK frontier';
-                    dbState.sqlHint = 'batchInsert INTO RL_WNDW_CT (WNDW_STRT_TS, SLOT_CT) VALUES (12:00:04,0),(12:00:08,0),...,(12:06:40,0)';
-                    dbState.tweSqlHint = 'INSERT INTO RL_WNDW_FRONTIER_TRK (aligned_start=12:00:00, WNDW_END_TS=12:06:44)';
-                    dbState.wcBulkNote = '100 rows batch-inserted (12:00:04 \u2192 12:06:40, every 4s)';
+                    dbState.label = 'fetchOrProvisionChunk() \u2192 ensureChunkProvisioned(): batchInsertWindows(100 rows from alignedStart) + INSERT frontier';
+                    dbState.sqlHint = 'batchInsert INTO RL_WNDW_CT (WNDW_STRT_TS, SLOT_CT) VALUES (12:00:00,0),(12:00:04,0),...,(12:06:36,0)';
+                    dbState.tweSqlHint = 'INSERT INTO RL_WNDW_FRONTIER_TRK (aligned_start=12:00:00, WNDW_END_TS=12:06:40)';
+                    dbState.wcBulkNote = '100 rows batch-inserted (12:00:00 \u2192 12:06:36, every 4s)';
                 }
                 if (step >= 2) {
-                    // All threads scan provisioned range with cursor-based findAndLockFirstAvailableWindow (fetchSize=1)
-                    // Note: code searches from alignedStart+windowSize (12:00:04), not from 12:00:00
+                    // All threads scan from alignedStart with CASE-based SQL
                     dbState.windowCounter = [
-                        { windowStart: '12:00:00', slotCount: 100, cssClass: 'row-full' },
+                        { windowStart: '12:00:00', slotCount: 62, cssClass: 'row-full' },
                         { windowStart: '12:00:04', slotCount: 0, cssClass: '' },
                         { windowStart: '12:00:08', slotCount: 0, cssClass: '' },
                         { windowStart: '12:00:12', slotCount: 0, cssClass: '' }
                     ];
-                    dbState.trackWindowEnd = [{ requestedTime: '12:00:00', windowEnd: '12:06:44', cssClass: '' }];
+                    dbState.trackWindowEnd = [{ requestedTime: '12:00:00', windowEnd: '12:06:40', cssClass: '' }];
                     dbState.tweSqlHint = '';
                     dbState.wcBulkNote = '(showing 4 of 100 provisioned rows)';
                     t1.style.transition = 'all 0.6s ease';
                     t2.style.transition = 'all 0.6s ease';
                     t3.style.transition = 'all 0.6s ease';
-                    // Threads approach the scan range starting from 12:00:04
-                    t1.style.left = w1 + 'px'; t1.style.top = '15px';
-                    t2.style.left = (w1 - 18) + 'px'; t2.style.top = '42px';
-                    t3.style.left = (w1 + 18) + 'px'; t3.style.top = '42px';
+                    // Threads approach from alignedStart (12:00:00) — CASE filters first window
+                    t1.style.left = w0 + 'px'; t1.style.top = '15px';
+                    t2.style.left = (w0 - 18) + 'px'; t2.style.top = '42px';
+                    t3.style.left = (w0 + 18) + 'px'; t3.style.top = '42px';
                     t1.classList.remove('bounce'); t2.classList.remove('bounce'); t3.classList.remove('bounce');
-                    // Show 12:00:00 as full (handled by Phase 1)
+                    // Show 12:00:00 as full (CASE: SLOT_CT(62) >= maxFirstWindow(62))
                     document.getElementById('lock-0').classList.add('visible');
                     document.getElementById('lock-0').style.color = 'var(--error)';
-                    document.getElementById('status-0').textContent = 'FULL (Phase 1)';
+                    document.getElementById('status-0').textContent = 'FULL (CASE: 62/62)';
                     document.getElementById('status-0').style.color = 'var(--error)';
                     document.getElementById('status-0').classList.add('visible');
                     document.getElementById('sql-caption-10').classList.add('visible');
-                    dbState.label = 'findAndLockFirstAvailableWindow(from=12:00:04, to=12:06:44): cursor scans PK index, skips locked rows, locks first available.';
-                    dbState.sqlHint = 'SELECT ... ORDER BY WNDW_STRT_TS ASC FOR UPDATE SKIP LOCKED (fetchSize=1, rowPrefetch=1)';
+                    dbState.label = 'findAndLockFirstAvailableWindow(alignedStart=12:00:00, chunkEnd=12:06:40): CASE filters first window, cursor advances to 12:00:04.';
+                    dbState.sqlHint = 'SLOT_CT < CASE WHEN WNDW_STRT_TS = 12:00:00 THEN 62 ELSE 100 END \u2192 first window filtered out';
                 }
                 if (step >= 3) {
-                    // T1 locks first available, T2/T3 cursor skips locked row and locks next
+                    // T1 locks first available (12:00:04), T2/T3 cursor skips locked row
                     t1.style.transition = 'all 0.8s cubic-bezier(0.25, -0.3, 0.25, 1.3)';
                     t2.style.transition = 'all 0.8s cubic-bezier(0.25, -0.3, 0.25, 1.3)';
                     t3.style.transition = 'all 0.8s cubic-bezier(0.25, -0.3, 0.25, 1.3)';
@@ -1936,7 +1908,7 @@
                     document.getElementById('status-1').style.color = '#4a9eff';
                     document.getElementById('status-1').classList.add('visible');
                     dbState.windowCounter = [
-                        { windowStart: '12:00:00', slotCount: 100, cssClass: 'row-full' },
+                        { windowStart: '12:00:00', slotCount: 62, cssClass: 'row-full' },
                         { windowStart: '12:00:04', slotCount: 0, cssClass: 'row-locked' },
                         { windowStart: '12:00:08', slotCount: 0, cssClass: '' },
                         { windowStart: '12:00:12', slotCount: 0, cssClass: '' }
@@ -1957,13 +1929,13 @@
                     document.getElementById('status-2').style.color = '#f39c12';
                     document.getElementById('status-2').classList.add('visible');
                     dbState.windowCounter = [
-                        { windowStart: '12:00:00', slotCount: 100, cssClass: 'row-full' },
+                        { windowStart: '12:00:00', slotCount: 62, cssClass: 'row-full' },
                         { windowStart: '12:00:04', slotCount: 0, cssClass: 'row-locked' },
                         { windowStart: '12:00:08', slotCount: 0, cssClass: 'row-locked' },
                         { windowStart: '12:00:12', slotCount: 0, cssClass: '' }
                     ];
                     dbState.wcBulkNote = '(showing 4 of 100 provisioned rows)';
-                    dbState.label = 'T2 locks 12:00:08. T3 hits SKIP LOCKED again \u2192 advance searchFrom to 12:00:12.';
+                    dbState.label = 'T2 locks 12:00:08. T3 cursor skips both locked rows \u2192 advance to 12:00:12.';
                     dbState.sqlHint = 'T2 cursor locks 12:00:08. T3 cursor skips both locked rows server-side \u2192 locks 12:00:12';
                 }
                 if (step >= 5) {
@@ -1978,14 +1950,14 @@
                     document.getElementById('status-3').classList.add('visible');
                     document.getElementById('nowait-label-10').classList.add('visible');
                     dbState.windowCounter = [
-                        { windowStart: '12:00:00', slotCount: 100, cssClass: 'row-full' },
+                        { windowStart: '12:00:00', slotCount: 62, cssClass: 'row-full' },
                         { windowStart: '12:00:04', slotCount: 0, cssClass: 'row-pulse' },
                         { windowStart: '12:00:08', slotCount: 0, cssClass: 'row-pulse' },
                         { windowStart: '12:00:12', slotCount: 0, cssClass: 'row-pulse' }
                     ];
                     dbState.wcBulkNote = '(showing 4 of 100 provisioned rows)';
                     dbState.label = 'All threads locked their own windows! T1\u219212:00:04, T2\u219212:00:08, T3\u219212:00:12. Each proceeds to claimSlot().';
-                    dbState.sqlHint = 'Nested subquery + FOR UPDATE SKIP LOCKED \u2014 zero-wait contention resolution!';
+                    dbState.sqlHint = 'CASE SQL + FOR UPDATE SKIP LOCKED \u2014 zero-wait contention resolution!';
                 }
                 renderDbTables(10);
             }
@@ -2046,16 +2018,16 @@
                 document.getElementById('sched-row-11').style.opacity = '0';
                 document.getElementById('jitter-row-11').style.opacity = '0';
 
-                // Carry over from scenes 8/9
+                // Carry over from scenes 9/10
                 resetDbState();
                 dbState.windowCounter = [
-                    { windowStart: '12:00:00', slotCount: 100, cssClass: 'row-full' },
+                    { windowStart: '12:00:00', slotCount: 62, cssClass: 'row-full' },
                     { windowStart: '12:00:04', slotCount: 0, cssClass: 'row-locked' },
                     { windowStart: '12:00:08', slotCount: 0, cssClass: 'row-locked' },
                     { windowStart: '12:00:12', slotCount: 0, cssClass: 'row-locked' }
                 ];
                 dbState.trackWindowEnd = [
-                    { requestedTime: '12:00:00', windowEnd: '12:06:44', cssClass: '' }
+                    { requestedTime: '12:00:00', windowEnd: '12:06:40', cssClass: '' }
                 ];
                 dbState.wcBulkNote = '(showing 4 of 100 provisioned rows)';
                 dbState.label = 'claimSlot() \u2014 All 3 threads compute jitter in parallel on the app server';
@@ -2114,7 +2086,7 @@
                         }, 200);
                     });
                     dbState.windowCounter = [
-                        { windowStart: '12:00:00', slotCount: 100, cssClass: 'row-full' },
+                        { windowStart: '12:00:00', slotCount: 62, cssClass: 'row-full' },
                         { windowStart: '12:00:04', slotCount: 1, cssClass: 'row-update' },
                         { windowStart: '12:00:08', slotCount: 1, cssClass: 'row-update' },
                         { windowStart: '12:00:12', slotCount: 1, cssClass: 'row-update' }
@@ -2186,18 +2158,18 @@
 
                 resetDbState();
 
-                // Carry forward: all initial windows full, frontier at 12:06:44
+                // Carry forward: all initial windows full, frontier at 12:06:40
                 dbState.windowCounter = [
-                    { windowStart: '12:00:00', slotCount: 100, cssClass: 'row-full' },
+                    { windowStart: '12:00:00', slotCount: 62, cssClass: 'row-full' },
                     { windowStart: '12:00:04', slotCount: 100, cssClass: 'row-full' },
                     { windowStart: '\u22EE', slotCount: '\u22EE', cssClass: 'row-bulk' },
-                    { windowStart: '12:06:40', slotCount: 100, cssClass: 'row-full' }
+                    { windowStart: '12:06:36', slotCount: 100, cssClass: 'row-full' }
                 ];
                 dbState.trackWindowEnd = [
-                    { requestedTime: '12:00:00', windowEnd: '12:06:44', cssClass: '' }
+                    { requestedTime: '12:00:00', windowEnd: '12:06:40', cssClass: '' }
                 ];
-                dbState.wcBulkNote = '100 initial windows all full (12:00:04 \u2192 12:06:40)';
-                dbState.label = 'Initial range returned null \u2014 range exhausted. Entering extension loop.';
+                dbState.wcBulkNote = '100 initial windows all full (12:00:00 \u2192 12:06:36)';
+                dbState.label = 'Initial chunk returned null \u2014 range exhausted. Entering extension loop.';
 
                 // Step 0: Range exhausted
                 if (step >= 0) {
@@ -2207,97 +2179,97 @@
                     document.getElementById('ext-initial-status').style.color = 'var(--error)';
                 }
 
-                // Step 1: Chunk 0 provisioning
+                // Step 1: Extension 1 provisioning
                 if (step >= 1) {
                     arrow1.style.opacity = '1';
                     chunk0.style.opacity = '1';
                     chunk0.classList.add('active-chunk');
                     provDetail.style.opacity = '1';
-                    provHeader.textContent = 'provisionChunk(12:06:44, 100 windows, 4s)';
+                    provHeader.textContent = 'provisionChunk(12:06:40, 100 windows, 4s)';
                     ['ext-prov-guard','ext-prov-batch','ext-prov-frontier']
                         .forEach(id => { document.getElementById(id).style.opacity = '1'; });
 
-                    txnBanner.innerHTML = '<b>TXN\u2084</b> \u2014 provisionChunk(12:06:44, 100, 4s) <span style="color: var(--text-muted);">(own transaction)</span>';
+                    txnBanner.innerHTML = '<b>TXN\u2082a</b> \u2014 provisionChunk(12:06:40, 100, 4s) <span style="color: var(--text-muted);">(own transaction)</span>';
 
                     dbState.windowCounter = [
-                        { windowStart: '12:06:40', slotCount: 100, cssClass: 'row-full' },
+                        { windowStart: '12:06:36', slotCount: 100, cssClass: 'row-full' },
+                        { windowStart: '12:06:40', slotCount: 0, cssClass: 'row-insert' },
                         { windowStart: '12:06:44', slotCount: 0, cssClass: 'row-insert' },
-                        { windowStart: '12:06:48', slotCount: 0, cssClass: 'row-insert' },
                         { windowStart: '\u22EE', slotCount: '\u22EE', cssClass: 'row-bulk' },
-                        { windowStart: '12:13:20', slotCount: 0, cssClass: 'row-insert' }
+                        { windowStart: '12:13:16', slotCount: 0, cssClass: 'row-insert' }
                     ];
                     dbState.trackWindowEnd = [
-                        { requestedTime: '12:00:00', windowEnd: '12:06:44', cssClass: '' },
-                        { requestedTime: '12:00:00', windowEnd: '12:13:24', cssClass: 'row-insert' }
+                        { requestedTime: '12:00:00', windowEnd: '12:06:40', cssClass: '' },
+                        { requestedTime: '12:00:00', windowEnd: '12:13:20', cssClass: 'row-insert' }
                     ];
                     dbState.label = 'provisionChunk(): existence guard O(1) \u2192 batchInsert 100 rows \u2192 INSERT frontier';
-                    dbState.sqlHint = 'SELECT EXISTS(WNDW_STRT_TS=12:13:20) \u2192 false \u2192 batchInsert(100 rows)';
-                    dbState.tweSqlHint = 'INSERT RL_WNDW_FRONTIER_TRK(12:00:00, 12:13:24) \u2014 catch DUP';
-                    dbState.wcBulkNote = '100 new rows batch-inserted (12:06:44 \u2192 12:13:20)';
+                    dbState.sqlHint = 'SELECT EXISTS(WNDW_STRT_TS=12:13:16) \u2192 false \u2192 batchInsert(100 rows)';
+                    dbState.tweSqlHint = 'INSERT RL_WNDW_FRONTIER_TRK(12:00:00, 12:13:20) \u2014 catch DUP';
+                    dbState.wcBulkNote = '100 new rows batch-inserted (12:06:40 \u2192 12:13:16)';
                 }
 
-                // Step 2: findLockAndClaim in chunk 0 — returns null (worst case)
+                // Step 2: findLockWindowAndClaimSlot re-scans from alignedStart — returns null (worst case)
                 if (step >= 2) {
                     chunk0.classList.remove('active-chunk');
                     chunk0.classList.add('searched');
                     findDetail.style.opacity = '1';
-                    findHeader.textContent = 'findLockAndClaim(12:06:44, 12:13:24)';
+                    findHeader.textContent = 'findLockWindowAndClaimSlot(12:00:00, 12:13:20)';
 
-                    txnBanner.innerHTML = '<b>TXN\u2085</b> \u2014 findLockAndClaim(12:06:44, 12:13:24) <span style="color: var(--text-muted);">(own transaction)</span>';
+                    txnBanner.innerHTML = '<b>TXN\u2082b</b> \u2014 findLockWindowAndClaimSlot(alignedStart=12:00:00, chunkEnd=12:13:20) <span style="color: var(--text-muted);">(re-scans from alignedStart)</span>';
 
-                    findResult.textContent = '\u2192 null (all 100 windows in chunk 0 also full)';
+                    findResult.textContent = '\u2192 null (all 200 windows from 12:00:00 to 12:13:16 full)';
                     findResult.style.color = 'var(--error)';
-                    document.getElementById('ext-chunk-0-status').textContent = '100/100 full';
+                    document.getElementById('ext-chunk-0-status').textContent = '200 windows full';
                     document.getElementById('ext-chunk-0-status').style.color = 'var(--error)';
 
                     dbState.windowCounter = [
+                        { windowStart: '12:06:36', slotCount: 100, cssClass: 'row-full' },
                         { windowStart: '12:06:40', slotCount: 100, cssClass: 'row-full' },
-                        { windowStart: '12:06:44', slotCount: 100, cssClass: 'row-full' },
                         { windowStart: '\u22EE', slotCount: '\u22EE', cssClass: 'row-bulk' },
-                        { windowStart: '12:13:20', slotCount: 100, cssClass: 'row-full' }
+                        { windowStart: '12:13:16', slotCount: 100, cssClass: 'row-full' }
                     ];
-                    dbState.label = 'findLockAndClaim(12:06:44, 12:13:24) \u2192 null. Chunk 0 exhausted. searchFrom advances to 12:13:24.';
-                    dbState.sqlHint = 'Nested subquery: no row with SLOT_CT < 100 in [12:06:44, 12:13:24) \u2192 null';
+                    dbState.label = 'findLockWindowAndClaimSlot(12:00:00, 12:13:20) \u2192 null. Re-scanned all 200 windows from alignedStart. All full.';
+                    dbState.sqlHint = 'CASE SQL: no row with available capacity in [12:00:00, 12:13:20) \u2192 null';
                     dbState.tweSqlHint = '';
-                    dbState.wcBulkNote = 'Chunk 0: all 100 windows full';
+                    dbState.wcBulkNote = 'Extension 1: all 200 windows full (re-scanned from alignedStart)';
                 }
 
-                // Step 3: Chunk 1 provision + search — slot found
+                // Step 3: Extension 2 provision + search — slot found
                 if (step >= 3) {
                     arrow2.style.opacity = '1';
                     chunk1.style.opacity = '1';
                     chunk1.classList.add('found');
                     provDetail.style.opacity = '1';
-                    provHeader.textContent = 'provisionChunk(12:13:24, 100 windows, 4s)';
+                    provHeader.textContent = 'provisionChunk(12:13:20, 100 windows, 4s)';
                     findDetail.style.opacity = '1';
-                    findHeader.textContent = 'findLockAndClaim(12:13:24, 12:20:04)';
+                    findHeader.textContent = 'findLockWindowAndClaimSlot(12:00:00, 12:20:00)';
                     document.getElementById('ext-chunk-1-status').textContent = 'SLOT FOUND \u2713';
                     document.getElementById('ext-chunk-1-status').style.color = 'var(--success)';
 
-                    txnBanner.innerHTML = '<b>TXN\u2086</b> provisionChunk \u2192 <b>TXN\u2087</b> findLockAndClaim(12:13:24, 12:20:04)';
+                    txnBanner.innerHTML = '<b>TXN\u2083a</b> provisionChunk \u2192 <b>TXN\u2083b</b> findLockWindowAndClaimSlot(12:00:00, 12:20:00)';
 
-                    findResult.textContent = '\u2192 Window 12:13:24 locked + claimed! (slotCount: 42 \u2192 43)';
+                    findResult.textContent = '\u2192 Window 12:13:20 locked + claimed! (slotCount: 42 \u2192 43)';
                     findResult.style.color = 'var(--success)';
 
                     dbState.windowCounter = [
-                        { windowStart: '12:13:20', slotCount: 100, cssClass: 'row-full' },
-                        { windowStart: '12:13:24', slotCount: 43, cssClass: 'row-update' },
-                        { windowStart: '12:13:28', slotCount: 0, cssClass: '' },
+                        { windowStart: '12:13:16', slotCount: 100, cssClass: 'row-full' },
+                        { windowStart: '12:13:20', slotCount: 43, cssClass: 'row-update' },
+                        { windowStart: '12:13:24', slotCount: 0, cssClass: '' },
                         { windowStart: '\u22EE', slotCount: '\u22EE', cssClass: 'row-bulk' },
-                        { windowStart: '12:20:00', slotCount: 0, cssClass: '' }
+                        { windowStart: '12:19:56', slotCount: 0, cssClass: '' }
                     ];
                     dbState.trackWindowEnd = [
-                        { requestedTime: '12:00:00', windowEnd: '12:13:24', cssClass: '' },
-                        { requestedTime: '12:00:00', windowEnd: '12:20:04', cssClass: 'row-insert' }
+                        { requestedTime: '12:00:00', windowEnd: '12:13:20', cssClass: '' },
+                        { requestedTime: '12:00:00', windowEnd: '12:20:00', cssClass: 'row-insert' }
                     ];
                     dbState.eventSlot = [
-                        { eventId: 'pay-456', windowStart: '12:13:24', scheduledTime: '12:13:26.831', cssClass: 'row-insert' }
+                        { eventId: 'pay-456', windowStart: '12:13:20', scheduledTime: '12:13:22.831', cssClass: 'row-insert' }
                     ];
-                    dbState.label = 'Chunk 1: provisionChunk \u2192 findLockAndClaim \u2192 window 12:13:24 found and claimed!';
-                    dbState.sqlHint = 'UPDATE RL_WNDW_CT SET SLOT_CT = SLOT_CT + 1 WHERE WNDW_STRT_TS = 12:13:24';
+                    dbState.label = 'Extension 2: provisionChunk \u2192 findLockWindowAndClaimSlot \u2192 window 12:13:20 found and claimed!';
+                    dbState.sqlHint = 'UPDATE RL_WNDW_CT SET SLOT_CT = SLOT_CT + 1 WHERE WNDW_STRT_TS = 12:13:20';
                     dbState.esSqlHint = 'INSERT INTO RL_EVENT_SLOT_DTL (EVENT_ID, WNDW_STRT_TS, COMPUTED_SCHED_TS, ...)';
-                    dbState.tweSqlHint = 'INSERT RL_WNDW_FRONTIER_TRK(12:00:00, 12:20:04)';
-                    dbState.wcBulkNote = 'Chunk 1: 100 windows provisioned (12:13:24 \u2192 12:20:00)';
+                    dbState.tweSqlHint = 'INSERT RL_WNDW_FRONTIER_TRK(12:00:00, 12:20:00)';
+                    dbState.wcBulkNote = 'Extension 2: 100 windows provisioned (12:13:20 \u2192 12:19:56)';
                 }
 
                 // Step 4: Outcome
@@ -2305,9 +2277,9 @@
                     outcome.style.opacity = '1';
                     outcome.innerHTML =
                         '<span style="color: var(--success);">\u2713 return AssignedSlot</span>' +
-                        '<span style="color: var(--text-muted);"> \u2014 scheduledTime = 12:13:26.831, delay = 805.331s</span>' +
+                        '<span style="color: var(--text-muted);"> \u2014 scheduledTime = 12:13:22.831, delay = 802.831s</span>' +
                         '<br><span style="font-size: 10px; color: var(--text-muted); font-weight: 400;">' +
-                        'If both chunks exhausted \u2192 throw SlotAssignmentException("searched initial + 2 extension chunks")</span>';
+                        'If all chunks exhausted \u2192 throw SlotAssignmentException("searched N chunks")</span>';
                     outcome.style.borderColor = 'var(--success)';
 
                     dbState.label = 'Extension loop complete. AssignedSlot returned with scheduledTime from extended range.';

@@ -116,9 +116,8 @@ Two timestamps flow through the system:
 | Phase | Transaction | Operations | Hold Time |
 |-------|-------------|------------|-----------|
 | 0 | Own (~1ms) | Idempotency check | ~1ms |
-| 1 | Own (~5ms) | First window lock + claim | ~5ms |
-| 2a | Own (~10-50ms) | Provision initial range | ~10-50ms |
-| 2b | Own (~3-5ms) | Find + lock + claim | ~3-5ms |
+| Loop (provision) | Own (~10-50ms) | Fetch frontier or provision chunk | ~10-50ms |
+| Loop (find+lock) | Own (~3-5ms) | CASE-based find + lock + claim | ~3-5ms |
 
 ### Algorithm Flow
 
@@ -130,26 +129,18 @@ assignSlot(eventId, configName, requestedTime)
 ├── Phase 0: Idempotency Check (own transaction ~1ms)
 │   └── fetchAssignedSlot(eventId) → return if exists
 │
-├── Phase 1: First Window (own transaction)
-│   ├── alignedStart = alignToWindowBoundary(requestedTime)
-│   ├── maxFirstWindow = proportional capacity
-│   ├── Check firstWindowFull cache → skip if known full
-│   ├── tryLockFirstWindow(alignedStart, maxFirstWindow)
-│   │   ├── SUCCESS → claimSlot() → return
-│   │   ├── FULL → cache firstWindowFull[alignedStart] = true
-│   │   └── SKIP LOCKED → fall through to Phase 2
-│
-├── Phase 2: Frontier-Tracked Search
-│   ├── fetchOrProvisionInitialRange(alignedStart, windowSize)
+├── Unified Loop (0..maxChunksToSearch):
+│   ├── Iteration 0: fetchOrProvisionChunk(alignedStart)
 │   │   └── Read MAX frontier OR provision 100 windows + insert frontier
+│   ├── Iteration 1+: provisionChunk(provisionFrom, windowCount, windowSize)
+│   │   └── Batch-provision new chunk + insert frontier
 │   │
-│   ├── findLockAndClaim(from=alignedStart+windowSize, to=windowEnd)
-│   │   └── Nested subquery: find + lock + claim in one transaction
+│   ├── findLockWindowAndClaimSlot(alignedStart, chunkEnd)
+│   │   └── CASE-based SQL: proportional capacity for alignedStart,
+│   │       full capacity for all others. Cursor-based FOR UPDATE SKIP LOCKED.
+│   │       Re-scans from alignedStart each iteration.
 │   │
-│   └── Extension Loop (0..maxChunksToSearch):
-│       ├── provisionChunk(searchFrom, windowCount, windowSize)
-│       ├── findLockAndClaim(searchFrom, chunkEnd)
-│       └── searchFrom = chunkEnd (advance frontier)
+│   └── provisionFrom = chunkEnd (advance frontier)
 │
 └── Exhaustion: throw SlotAssignmentException
 ```
@@ -159,9 +150,10 @@ assignSlot(eventId, configName, requestedTime)
 | Pattern | Implementation | Benefit |
 |---------|----------------|---------|
 | Split transactions | Each phase in separate `transaction {}` | Minimal connection hold time (~3-10ms total) |
-| Nested find+lock | Inner SELECT + outer FOR UPDATE SKIP LOCKED | Atomic lock acquisition, one round-trip |
+| CASE-based find+lock | `SLOT_CT < CASE WHEN WNDW_STRT_TS = ? THEN ? ELSE ? END` | Single query handles proportional + full capacity |
+| Cursor control | `fetchSize=1`, `rowPrefetch=1`, FOR UPDATE SKIP LOCKED | Lazy cursor skips locked rows server-side |
+| Re-scan from alignedStart | Each iteration searches `[alignedStart, chunkEnd)` | Recovers previously SKIP LOCKED windows |
 | Append-only frontier | Composite PK, no UPDATE | No contention on frontier writes |
-| JVM cache | `ConcurrentHashMap<Instant, Boolean>` | Skip DB for known-full first windows |
 | Proportional capacity | `floor(max * remainingMs / windowSizeMs)` | Prevent first-window overscheduling |
 | Batch provisioning | 100 windows per chunk | Amortized provisioning cost |
 
@@ -169,36 +161,20 @@ assignSlot(eventId, configName, requestedTime)
 
 ## SQL Patterns
 
-### Nested Find+Lock
-
-```sql
-SELECT * FROM RL_WNDW_CT
-WHERE WNDW_STRT_TS = (
-    SELECT WNDW_STRT_TS FROM RL_WNDW_CT
-    WHERE WNDW_STRT_TS >= :from AND WNDW_STRT_TS < :to
-      AND SLOT_CT < :maxSlots
-    ORDER BY WNDW_STRT_TS
-    FETCH FIRST 1 ROW ONLY
-)
-FOR UPDATE SKIP LOCKED
-```
-
-- **Inner query**: Finds earliest candidate window (no lock)
-- **Outer query**: Locks by PK (atomic)
-- **SKIP LOCKED**: Returns NULL if another thread holds the lock
-
-### Scout Query (Disambiguation)
+### CASE-Based Find+Lock
 
 ```sql
 SELECT WNDW_STRT_TS FROM RL_WNDW_CT
-WHERE WNDW_STRT_TS >= :from AND WNDW_STRT_TS < :to
-  AND SLOT_CT < :maxSlots
-ORDER BY WNDW_STRT_TS
-FETCH FIRST 1 ROW ONLY
+WHERE WNDW_STRT_TS >= :alignedStart AND WNDW_STRT_TS < :chunkEnd
+  AND SLOT_CT < CASE WHEN WNDW_STRT_TS = :alignedStart
+                     THEN :maxFirstWindow ELSE :maxPerWindow END
+ORDER BY WNDW_STRT_TS ASC
+FOR UPDATE SKIP LOCKED
 ```
 
-- No lock, read-only
-- Distinguishes "no candidates exist" from "candidate locked by another thread"
+- **CASE**: Applies proportional capacity to first window, full capacity to others
+- **Cursor**: `fetchSize=1`, `rowPrefetch=1` — Oracle scans lazily, skips locked rows server-side
+- **SKIP LOCKED**: Concurrent threads lock different rows without blocking
 
 ---
 
@@ -288,9 +264,9 @@ rate-limiter:
 
 | Parameter | Default | Search Depth |
 |-----------|---------|--------------|
-| max-windows-in-chunk | 100 | Initial range |
-| max-chunks-to-search | 2 | Extension iterations |
-| **Total** | - | 300 windows = 1200s = 30,000 events |
+| max-windows-in-chunk | 100 | Windows per chunk |
+| max-chunks-to-search | 2 | Total iterations |
+| **Total** | - | 200 windows = 800s = 20,000 events |
 
 ### Connection Pool (Agroal)
 
@@ -311,12 +287,22 @@ jdbc:
 
 **POST** `/api/v1/slots`
 
+#### Request
 ```json
-// Request
-{ "eventId": "pay-123", "configName": "default", "requestedTime": "2025-06-01T12:00:00Z" }
+{
+  "eventId": "pay-123",
+  "configName": "default",
+  "requestedTime": "2025-06-01T12:00:00Z"
+}
+```
 
-// Response (200 OK)
-{ "eventId": "pay-123", "scheduledTime": "2025-06-01T12:00:02.371Z", "delayMs": 2371 }
+#### Response (200 OK)
+```json
+{
+  "eventId": "pay-123",
+  "scheduledTime": "2025-06-01T12:00:02.371Z",
+  "delayMs": 2371
+}
 ```
 
 | Status | Condition |
@@ -369,4 +355,3 @@ jdbc:
 1. **alignedStart vs requestedTime**: Frontier tracker is keyed by `alignedStart`, not raw `requestedTime`
 2. **Exposed DSL limitations**: Doesn't support `FOR UPDATE SKIP LOCKED` — use raw SQL via `exec()`
 3. **Connection pool**: Set `transactions: disabled` in Agroal to avoid double-wrapping with Exposed
-4. **First window cache**: `firstWindowFull` is JVM-local, not distributed — acceptable for distributed systems since it's an optimization, not correctness

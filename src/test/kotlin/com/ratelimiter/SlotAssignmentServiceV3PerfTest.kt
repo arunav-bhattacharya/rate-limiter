@@ -55,7 +55,6 @@ class SlotAssignmentServiceV3PerfTest {
             WindowEndTrackerTable.deleteAll()
         }
         configRepository.evictCache()
-        service.evictFirstWindowCache()
         windowEndTrackerRepository.evictFrontierCache()
     }
 
