@@ -131,9 +131,12 @@ rate-limiter:
   max-search-chunks: 10
   max-windows-in-chunk: 100
   max-chunks-to-search: 2
+  lock-query-timeout-seconds: 2
 
 # Test profile — longer timeouts for Oracle XE under ARM emulation
 "%test":
+  rate-limiter:
+    lock-query-timeout-seconds: 30
   quarkus:
     datasource:
       jdbc:

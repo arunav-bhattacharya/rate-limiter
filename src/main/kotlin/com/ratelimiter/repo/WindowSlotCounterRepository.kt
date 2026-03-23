@@ -16,11 +16,15 @@ import org.jetbrains.exposed.sql.selectAll
 import org.jetbrains.exposed.sql.statements.StatementType
 import org.jetbrains.exposed.sql.transactions.TransactionManager
 import org.jetbrains.exposed.sql.update
+import org.eclipse.microprofile.config.inject.ConfigProperty
 import java.sql.Timestamp
 import java.time.Instant
 
 @ApplicationScoped
-class WindowSlotCounterRepository {
+class WindowSlotCounterRepository(
+    @param:ConfigProperty(name = "rate-limiter.lock-query-timeout-seconds", defaultValue = "2")
+    private val lockQueryTimeoutSeconds: Int
+) {
 
     /**
      * V2-style inclusive-range find+lock: WHERE WNDW_STRT_TS >= ? AND WNDW_STRT_TS <= ?
@@ -53,43 +57,42 @@ class WindowSlotCounterRepository {
         }
     }
 
+
     /**
-     * Finds the earliest available window in [alignedStart, to) and locks exactly one row.
-     * Uses a CASE expression to apply proportional capacity to alignedStart
-     * and full capacity to all other windows in a single query.
+     * Finds the earliest available window in [from, to) and locks exactly one row.
+     * Simple range scan without CASE — `SLOT_CT < ?` is fully sargable against the
+     * composite index `(WNDW_STRT_TS, SLOT_CT)`.
      *
      * Uses Oracle JDBC fetchSize=1 + rowPrefetch=1 to control cursor advancement —
      * Oracle's FOR UPDATE SKIP LOCKED processes rows lazily through the cursor,
      * skipping locked rows server-side and returning the first successfully locked
      * row. Only that one row is locked.
      */
-    fun Transaction.findAndLockFirstAvailableWindow(
+    fun Transaction.lockFirstAvailableInRange(
         from: Instant,
         to: Instant,
-        maxFirstWindow: Int,
-        maxPerWindow: Int
+        maxSlots: Int
     ): Instant? {
         val rawConn = TransactionManager.current().connection.connection as java.sql.Connection
         val conn = rawConn.unwrap(OracleConnection::class.java)
 
         val stmt = conn.prepareStatement(
             """
-            SELECT WNDW_STRT_TS
+            SELECT /*+ FIRST_ROWS(1) */ WNDW_STRT_TS
             FROM   RL_WNDW_CT
             WHERE  WNDW_STRT_TS >= ?
             AND    WNDW_STRT_TS < ?
-            AND    SLOT_CT < CASE WHEN WNDW_STRT_TS = ? THEN ? ELSE ? END
+            AND    SLOT_CT < ?
             ORDER BY WNDW_STRT_TS ASC
             FOR UPDATE SKIP LOCKED
             """
         ).apply {
             fetchSize = 1
+            queryTimeout = lockQueryTimeoutSeconds
             (this as OraclePreparedStatement).rowPrefetch = 1
             setTimestamp(1, Timestamp.from(from))
             setTimestamp(2, Timestamp.from(to))
-            setTimestamp(3, Timestamp.from(from))
-            setInt(4, maxFirstWindow)
-            setInt(5, maxPerWindow)
+            setInt(3, maxSlots)
         }
 
         return stmt.use { s ->

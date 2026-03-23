@@ -182,61 +182,6 @@ class SlotAssignmentServiceV3Test {
         assertTrue(slot.delay < Duration.ofSeconds(4))
     }
 
-    @Test
-    fun `non-boundary requested time gets proportional max and constrained jitter`() {
-        configRepository.createConfig("v3-prop", 100, Duration.ofSeconds(4))
-        // 2s into a 4s window = 50% remaining = proportional max of 50
-        val requestedTime = Instant.parse("2025-06-01T12:00:02Z")
-
-        val slot = service.assignSlot("evt-p1", "v3-prop", requestedTime)
-
-        assertFalse(slot.scheduledTime.isBefore(requestedTime))
-        assertTrue(slot.scheduledTime.isBefore(Instant.parse("2025-06-01T12:00:04Z")))
-        assertTrue(slot.delay >= Duration.ZERO)
-        assertTrue(slot.delay < Duration.ofSeconds(2))
-
-        // Fill proportional max (50 total, already have 1)
-        (2..50).forEach { i ->
-            service.assignSlot("evt-p$i", "v3-prop", requestedTime)
-        }
-
-        // 51st should overflow to next window
-        val overflow = service.assignSlot("evt-p51", "v3-prop", requestedTime)
-        assertFalse(overflow.scheduledTime.isBefore(Instant.parse("2025-06-01T12:00:04Z")))
-    }
-
-    @Test
-    fun `25 percent remaining gives 25 percent capacity`() {
-        configRepository.createConfig("v3-quarter", 100, Duration.ofSeconds(4))
-        // 3s into 4s window = 25% remaining = proportional max of 25
-        val requestedTime = Instant.parse("2025-06-01T12:00:03Z")
-
-        (1..25).forEach { i ->
-            val slot = service.assignSlot("evt-q$i", "v3-quarter", requestedTime)
-            assertFalse(slot.scheduledTime.isBefore(requestedTime))
-            assertTrue(slot.scheduledTime.isBefore(Instant.parse("2025-06-01T12:00:04Z")))
-        }
-
-        val overflow = service.assignSlot("evt-q26", "v3-quarter", requestedTime)
-        assertFalse(overflow.scheduledTime.isBefore(Instant.parse("2025-06-01T12:00:04Z")))
-    }
-
-    @Test
-    fun `nearly-expired window gets very small capacity`() {
-        configRepository.createConfig("v3-tiny", 1000, Duration.ofSeconds(4))
-        // 3.9s into 4s window = 2.5% remaining = proportional max of 25
-        val requestedTime = Instant.parse("2025-06-01T12:00:03.900Z")
-
-        (1..25).forEach { i ->
-            val slot = service.assignSlot("evt-tiny-$i", "v3-tiny", requestedTime)
-            assertFalse(slot.scheduledTime.isBefore(requestedTime))
-            assertTrue(slot.scheduledTime.isBefore(Instant.parse("2025-06-01T12:00:04Z")))
-        }
-
-        val overflow = service.assignSlot("evt-tiny-26", "v3-tiny", requestedTime)
-        assertFalse(overflow.scheduledTime.isBefore(Instant.parse("2025-06-01T12:00:04Z")))
-    }
-
     // ==================== Jitter bounds ====================
 
     @Test

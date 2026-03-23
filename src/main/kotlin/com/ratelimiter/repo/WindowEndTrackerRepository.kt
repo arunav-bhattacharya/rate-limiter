@@ -39,17 +39,23 @@ class WindowEndTrackerRepository {
     }
 
     /**
-     * Reads the provisioning frontier for a given alignedStart.
-     * Returns the MAX(WNDW_END_TS) across all frontier rows, or null if none exist.
-     * Uses a 5-second JVM cache to avoid the MAX() aggregation on the hot path.
+     * Fast-path cache check — no transaction or connection needed.
+     * Returns the cached frontier if present and fresh, null otherwise.
      */
-    fun Transaction.fetchMaxWindowEnd(requestedTime: Instant): Instant? {
+    fun fetchMaxWindowEndCached(requestedTime: Instant): Instant? {
         val now = Instant.now()
         val cached = frontierCache[requestedTime]
         if (cached != null && Duration.between(cached.loadedAt, now).seconds < CACHE_TTL_SECONDS) {
             return cached.windowEnd
         }
+        return null
+    }
 
+    /**
+     * Reads the provisioning frontier for a given alignedStart from the database.
+     * Updates the JVM cache on hit so subsequent calls can use [fetchMaxWindowEndCached].
+     */
+    fun Transaction.fetchMaxWindowEndFromDb(requestedTime: Instant): Instant? {
         val maxWindowEnd: Instant? = WindowEndTrackerTable
             .select(WindowEndTrackerTable.windowEnd)
             .where { WindowEndTrackerTable.requestedTime eq requestedTime }
@@ -59,9 +65,19 @@ class WindowEndTrackerRepository {
             ?.get(WindowEndTrackerTable.windowEnd)
 
         if (maxWindowEnd != null) {
-            frontierCache[requestedTime] = CachedFrontier(maxWindowEnd, now)
+            frontierCache[requestedTime] = CachedFrontier(maxWindowEnd, Instant.now())
         }
         return maxWindowEnd
+    }
+
+    /**
+     * Reads the provisioning frontier for a given alignedStart.
+     * Returns the MAX(WNDW_END_TS) across all frontier rows, or null if none exist.
+     * Uses a 5-second JVM cache to avoid the MAX() aggregation on the hot path.
+     */
+    fun Transaction.fetchMaxWindowEnd(requestedTime: Instant): Instant? {
+        return fetchMaxWindowEndCached(requestedTime)
+            ?: fetchMaxWindowEndFromDb(requestedTime)
     }
 
     /**
