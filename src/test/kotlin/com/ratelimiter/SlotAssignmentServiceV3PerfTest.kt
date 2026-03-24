@@ -2,10 +2,7 @@ package com.ratelimiter
 
 import com.ratelimiter.db.RateLimitEventSlotTable
 import com.ratelimiter.db.WindowCounterTable
-import com.ratelimiter.db.WindowEndTrackerTable
 import com.ratelimiter.repo.EventSlotRepository
-import com.ratelimiter.repo.RateLimitConfigRepository
-import com.ratelimiter.repo.WindowEndTrackerRepository
 import com.ratelimiter.repo.WindowSlotCounterRepository
 import com.ratelimiter.slot.SlotAssignmentServiceV3
 import io.quarkus.test.common.QuarkusTestResource
@@ -27,6 +24,10 @@ import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 
+/**
+ * Perf tests for V3 slot assignment with pre-provisioned windows.
+ * Test profile: windowSize=4s, maxPerWindow=2.
+ */
 @QuarkusTest
 @QuarkusTestResource(OracleTestResource::class)
 @Tag("perf")
@@ -36,38 +37,36 @@ class SlotAssignmentServiceV3PerfTest {
     lateinit var service: SlotAssignmentServiceV3
 
     @Inject
-    lateinit var configRepository: RateLimitConfigRepository
-
-    @Inject
     lateinit var eventSlotRepository: EventSlotRepository
 
     @Inject
     lateinit var windowSlotCounterRepository: WindowSlotCounterRepository
-
-    @Inject
-    lateinit var windowEndTrackerRepository: WindowEndTrackerRepository
 
     @BeforeEach
     fun setup() {
         transaction {
             RateLimitEventSlotTable.deleteAll()
             WindowCounterTable.deleteAll()
-            WindowEndTrackerTable.deleteAll()
         }
-        configRepository.evictCache()
-        windowEndTrackerRepository.evictFrontierCache()
     }
 
-    // ==================== Perf: Concurrent burst ====================
+    private fun preProvisionWindows(from: Instant, windowCount: Long) {
+        val windowSize = Duration.ofSeconds(4)
+        val windows = (0 until windowCount).map { i ->
+            from.plus(windowSize.multipliedBy(i))
+        }
+        transaction {
+            with(windowSlotCounterRepository) { batchInsertWindows(windows) }
+        }
+    }
 
     @Test
-    fun `perf - 1000 concurrent events at same requestedTime`() {
-        val totalEvents = 1000
+    fun `perf - 500 concurrent events at same requestedTime`() {
+        val totalEvents = 500
         val threadCount = 50
-        val maxPerWindow = 100
-
-        configRepository.createConfig("perf-burst", maxPerWindow, Duration.ofSeconds(4))
         val requestedTime = Instant.parse("2025-06-01T12:00:00Z")
+        // maxPerWindow=2, 500 events → 250 windows needed
+        preProvisionWindows(requestedTime, 500)
 
         val results = ConcurrentHashMap<String, Any>()
         val errors = ConcurrentLinkedQueue<Throwable>()
@@ -81,8 +80,7 @@ class SlotAssignmentServiceV3PerfTest {
                 startGate.await()
                 val start = System.nanoTime()
                 try {
-                    val slot = service.assignSlot("evt-perf-$i", "perf-burst", requestedTime)
-                    results["evt-perf-$i"] = slot
+                    results["evt-perf-$i"] = service.assignSlot("evt-perf-$i", requestedTime)
                 } catch (e: Throwable) {
                     errors.add(e)
                 } finally {
@@ -98,7 +96,6 @@ class SlotAssignmentServiceV3PerfTest {
         val totalNs = System.nanoTime() - totalStart
         executor.shutdown()
 
-        // Correctness
         assertTrue(errors.isEmpty())
         assertEquals(totalEvents, results.size)
 
@@ -107,140 +104,41 @@ class SlotAssignmentServiceV3PerfTest {
                 .groupBy { it[RateLimitEventSlotTable.windowStart] }
         }
         for ((ws, slots) in slotsByWindow) {
-            assertTrue(
-                slots.size <= maxPerWindow,
-                "Window $ws should have at most $maxPerWindow slots"
-            )
+            assertTrue(slots.size <= 2, "Window $ws should have at most 2 slots")
         }
 
-        // Report
         println("  Windows used: ${slotsByWindow.size}")
-        reportLatency("1000 concurrent events (50 threads, maxPerWindow=$maxPerWindow)", latencies, totalNs, totalEvents)
+        reportLatency("500 concurrent events (50 threads, pre-provisioned)", latencies, totalNs, totalEvents)
     }
 
-    // ==================== Perf: Fill ratio impact ====================
-
     @Test
-    fun `perf - latency at increasing fill ratios`() {
-        val maxPerWindow = 10
-        val initialChunkCapacity = maxPerWindow * 100 // 100 = default maxWindowsInChunk
-        configRepository.createConfig("perf-fill", maxPerWindow, Duration.ofSeconds(4))
+    fun `perf - sequential assignment with maxPerWindow=2`() {
         val requestedTime = Instant.parse("2025-06-01T12:00:00Z")
+        preProvisionWindows(requestedTime, 500)
 
-        val fillPercents = listOf(0, 25, 50, 75, 90)
-        var eventCounter = 0
-
-        for (fillPercent in fillPercents) {
-            val targetTotal = (fillPercent.toLong() * initialChunkCapacity / 100).toInt()
-
-            // Pre-fill to target
-            while (eventCounter < targetTotal) {
-                eventCounter++
-                service.assignSlot("evt-fill-$eventCounter", "perf-fill", requestedTime)
-            }
-
-            // Measure a batch of 50 events from 10 threads
-            val batchSize = 50
-            val threadCount = 10
-            val batchIds = (1..batchSize).map { j -> "evt-fill-${eventCounter + j}" }
-            eventCounter += batchSize
-
-            val batchLatencies = CopyOnWriteArrayList<Long>()
-            val batchErrors = ConcurrentLinkedQueue<Throwable>()
-            val batchLatch = CountDownLatch(batchSize)
-            val batchStartGate = CountDownLatch(1)
-            val batchExecutor = Executors.newFixedThreadPool(threadCount)
-
-            repeat(batchSize) { j ->
-                batchExecutor.submit {
-                    batchStartGate.await()
-                    val s = System.nanoTime()
-                    try {
-                        service.assignSlot(batchIds[j], "perf-fill", requestedTime)
-                    } catch (e: Throwable) {
-                        batchErrors.add(e)
-                    } finally {
-                        batchLatencies.add(System.nanoTime() - s)
-                        batchLatch.countDown()
-                    }
-                }
-            }
-
-            val batchStart = System.nanoTime()
-            batchStartGate.countDown()
-            assertTrue(batchLatch.await(60, TimeUnit.SECONDS))
-            val batchTotal = System.nanoTime() - batchStart
-            batchExecutor.shutdown()
-
-            assertTrue(batchErrors.isEmpty())
-            reportLatency("Fill ratio ~${fillPercent}% ($targetTotal pre-filled of $initialChunkCapacity)", batchLatencies, batchTotal, batchSize)
-        }
-    }
-
-    // ==================== Perf: Chunk extension ====================
-
-    @Test
-    fun `perf - chunk extension overhead with maxPerWindow=1`() {
-        configRepository.createConfig("perf-chunk", 1, Duration.ofSeconds(4))
-        val requestedTime = Instant.parse("2025-06-01T12:00:00Z")
-
-        // Phase 1: First window (1 event)
-        val phase1Start = System.nanoTime()
-        service.assignSlot("evt-chunk-1", "perf-chunk", requestedTime)
-        val phase1Ns = System.nanoTime() - phase1Start
-
-        // Phase 2: Initial chunk (events 2..101 = 100 events, sequential)
-        val phase2Latencies = mutableListOf<Long>()
-        for (i in 2..101) {
+        val latencies = mutableListOf<Long>()
+        for (i in 1..200) {
             val s = System.nanoTime()
-            service.assignSlot("evt-chunk-$i", "perf-chunk", requestedTime)
-            phase2Latencies.add(System.nanoTime() - s)
+            service.assignSlot("evt-seq-$i", requestedTime)
+            latencies.add(System.nanoTime() - s)
         }
 
-        // Phase 3: Extension chunk (events 102..201 = 100 events, sequential)
-        val phase3Latencies = mutableListOf<Long>()
-        for (i in 102..201) {
-            val s = System.nanoTime()
-            service.assignSlot("evt-chunk-$i", "perf-chunk", requestedTime)
-            phase3Latencies.add(System.nanoTime() - s)
-        }
-
-        // Correctness
         val totalSlots = transaction {
             RateLimitEventSlotTable.selectAll().count()
         }
-        assertEquals(201L, totalSlots)
+        assertEquals(200L, totalSlots)
 
-        val frontierRows = transaction {
-            WindowEndTrackerTable.selectAll()
-                .where { WindowEndTrackerTable.requestedTime eq requestedTime }
-                .count()
-        }
-        assertTrue(frontierRows >= 2)
-
-        // Report
-        val p2Sorted = phase2Latencies.sorted()
-        val p3Sorted = phase3Latencies.sorted()
+        val sorted = latencies.sorted()
         println("""
-            |=== Chunk Extension Overhead (maxPerWindow=1) ===
-            |  Phase 1 (first window, 1 event):     ${phase1Ns / 1_000_000}ms
-            |  Phase 2 (initial chunk, 100 events):
-            |    Avg:   ${"%.2f".format(phase2Latencies.average() / 1_000_000)}ms
-            |    p50:   ${p2Sorted[(p2Sorted.size * 0.50).toInt()] / 1_000_000}ms
-            |    p99:   ${p2Sorted[(p2Sorted.size * 0.99).toInt()] / 1_000_000}ms
-            |    First (triggers provisioning): ${phase2Latencies.first() / 1_000_000}ms
-            |    Last:  ${phase2Latencies.last() / 1_000_000}ms
-            |  Phase 3 (extension chunk, 100 events):
-            |    Avg:   ${"%.2f".format(phase3Latencies.average() / 1_000_000)}ms
-            |    p50:   ${p3Sorted[(p3Sorted.size * 0.50).toInt()] / 1_000_000}ms
-            |    p99:   ${p3Sorted[(p3Sorted.size * 0.99).toInt()] / 1_000_000}ms
-            |    First (triggers provisioning): ${phase3Latencies.first() / 1_000_000}ms
-            |    Last:  ${phase3Latencies.last() / 1_000_000}ms
-            |  Frontier rows: $frontierRows
+            |=== Sequential Assignment (maxPerWindow=2, pre-provisioned) ===
+            |  Events: 200
+            |  Avg:   ${"%.2f".format(latencies.average() / 1_000_000)}ms
+            |  p50:   ${sorted[(sorted.size * 0.50).toInt()] / 1_000_000}ms
+            |  p99:   ${sorted[(sorted.size * 0.99).toInt()] / 1_000_000}ms
+            |  First: ${latencies.first() / 1_000_000}ms
+            |  Last:  ${latencies.last() / 1_000_000}ms
         """.trimMargin())
     }
-
-    // ==================== Helper ====================
 
     private fun reportLatency(testName: String, latenciesNs: List<Long>, totalNs: Long, eventCount: Int) {
         val sorted = latenciesNs.sorted()

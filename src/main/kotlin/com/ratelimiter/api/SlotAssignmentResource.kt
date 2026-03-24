@@ -1,9 +1,7 @@
 package com.ratelimiter.api
 
 import com.ratelimiter.slot.AssignedSlot
-import com.ratelimiter.slot.ConfigLoadException
 import com.ratelimiter.slot.SlotAssignmentException
-import com.ratelimiter.slot.SlotAssignmentService
 import com.ratelimiter.slot.SlotAssignmentServiceV3
 import jakarta.inject.Inject
 import jakarta.ws.rs.Consumes
@@ -18,7 +16,7 @@ import java.time.Instant
 /**
  * REST endpoint for slot assignment.
  *
- * Exposes the [SlotAssignmentService] as a synchronous HTTP API.
+ * Exposes the [SlotAssignmentServiceV3] as a synchronous HTTP API.
  * Callers POST a slot assignment request and receive the assigned
  * slot with event ID, scheduled time, and delay from requested time.
  */
@@ -34,8 +32,6 @@ class SlotAssignmentResource @Inject constructor(
     data class SlotAssignmentRequest(
         /** Unique event identifier (idempotency key). */
         val eventId: String,
-        /** Rate limit config name to use (e.g., "default"). */
-        val configName: String,
         /** Desired execution time as ISO-8601 string. */
         val requestedTime: String
     )
@@ -54,7 +50,6 @@ class SlotAssignmentResource @Inject constructor(
      * ```json
      * {
      *   "eventId": "pay-123",
-     *   "configName": "default",
      *   "requestedTime": "2025-06-01T12:00:00Z"
      * }
      * ```
@@ -68,16 +63,10 @@ class SlotAssignmentResource @Inject constructor(
             val requestedTime = Instant.parse(request.requestedTime)
             val slot = slotAssignmentService.assignSlot(
                 eventId = request.eventId,
-                configName = request.configName,
                 requestedTime = requestedTime
             )
 
             Response.ok(slot.toResponse()).build()
-        } catch (e: ConfigLoadException) {
-            logger.warn("Config not found: {}", e.configName)
-            Response.status(Response.Status.NOT_FOUND)
-                .entity(mapOf("error" to e.message))
-                .build()
         } catch (e: SlotAssignmentException) {
             logger.error("Slot assignment failed for event={}: {}", request.eventId, e.message)
             Response.status(Response.Status.SERVICE_UNAVAILABLE)

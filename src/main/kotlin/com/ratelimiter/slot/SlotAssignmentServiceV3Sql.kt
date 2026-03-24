@@ -1,7 +1,5 @@
 package com.ratelimiter.slot
 
-import com.ratelimiter.config.RateLimitConfig
-import com.ratelimiter.repo.RateLimitConfigRepository
 import jakarta.enterprise.context.ApplicationScoped
 import jakarta.inject.Inject
 import org.eclipse.microprofile.config.inject.ConfigProperty
@@ -21,36 +19,34 @@ import java.util.concurrent.ThreadLocalRandom
  * to track the provisioning frontier, then a single find+lock over the entire
  * provisioned range followed by a configurable extension loop from the frontier.
  *
- * Parameter 10 is `max_windows_in_chunk` (a count). Parameter 11 is
- * `max_chunks_to_search` (extension iterations, default 2).
+ * Uses static config from application.yaml (no config table).
  */
 @ApplicationScoped
 class SlotAssignmentServiceV3Sql @Inject constructor(
-    private val configRepository: RateLimitConfigRepository,
+    @param:ConfigProperty(name = "rate-limiter.max-per-window", defaultValue = "100")
+    private val maxPerWindow: Int,
+    @param:ConfigProperty(name = "rate-limiter.window-size-seconds", defaultValue = "30")
+    private val windowSizeSeconds: Long,
     @param:ConfigProperty(name = "rate-limiter.max-windows-in-chunk", defaultValue = "100")
     private val maxWindowsInChunk: Int,
     @param:ConfigProperty(name = "rate-limiter.max-chunks-to-search", defaultValue = "2")
     private val maxChunksToSearch: Int
 ) {
     private val logger = LoggerFactory.getLogger(SlotAssignmentServiceV3Sql::class.java)
+    private val windowSizeMs: Long = windowSizeSeconds * 1000
 
-    fun assignSlot(eventId: String, configName: String, requestedTime: Instant): AssignedSlot {
+    fun assignSlot(eventId: String, requestedTime: Instant): AssignedSlot {
         val totalStart = System.nanoTime()
 
-        var t0 = System.nanoTime()
-        val config = configRepository.loadActiveConfig(configName)
-            ?: throw ConfigLoadException(configName, "No active rate limit config found for: $configName")
-        logger.debug("eventId={} | loadConfig took {}ms", eventId, nanosToMs(System.nanoTime() - t0))
-
-        val windowStart = alignToWindowBoundary(requestedTime, config.windowSizeSecs)
+        val windowStart = alignToWindowBoundary(requestedTime, windowSizeSeconds)
         val elapsedMs = elapsedInWindowMs(windowStart, requestedTime)
-        val maxFirstWindow = computeEffectiveMax(config.maxPerWindow, elapsedMs, config.windowSizeMs)
-        val firstJitterMs = computeFirstWindowJitterMs(elapsedMs, config.windowSizeMs)
-        val fullJitterMs = computeFullWindowJitterMs(config.windowSizeMs)
+        val maxFirstWindow = computeEffectiveMax(maxPerWindow, elapsedMs, windowSizeMs)
+        val firstJitterMs = computeFirstWindowJitterMs(elapsedMs, windowSizeMs)
+        val fullJitterMs = computeFullWindowJitterMs(windowSizeMs)
 
-        t0 = System.nanoTime()
+        val t0 = System.nanoTime()
         val result = executeSlotAssignment(
-            eventId, windowStart, requestedTime, config,
+            eventId, windowStart, requestedTime,
             maxFirstWindow, firstJitterMs, fullJitterMs
         )
         logger.debug("eventId={} | executeSlotAssignment (PL/SQL) took {}ms", eventId, nanosToMs(System.nanoTime() - t0))
@@ -97,7 +93,6 @@ class SlotAssignmentServiceV3Sql @Inject constructor(
         eventId: String,
         windowStart: Instant,
         requestedTime: Instant,
-        config: RateLimitConfig,
         maxFirstWindow: Int,
         firstJitterMs: Long,
         fullJitterMs: Long
@@ -109,9 +104,9 @@ class SlotAssignmentServiceV3Sql @Inject constructor(
                 cs.setString(1, eventId)
                 cs.setTimestamp(2, Timestamp.from(windowStart))
                 cs.setTimestamp(3, Timestamp.from(requestedTime))
-                cs.setString(4, config.configId)
-                cs.setInt(5, config.maxPerWindow)
-                cs.setLong(6, config.windowSizeSecs)
+                cs.setString(4, SlotAssignmentServiceV3.STATIC_CONFIG_ID)
+                cs.setInt(5, maxPerWindow)
+                cs.setLong(6, windowSizeSeconds)
                 cs.setInt(7, maxFirstWindow)
                 cs.setLong(8, firstJitterMs)
                 cs.setLong(9, fullJitterMs)

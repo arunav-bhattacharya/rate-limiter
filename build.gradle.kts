@@ -21,6 +21,7 @@ dependencies {
     implementation("io.quarkus:quarkus-rest-jackson")
     implementation("io.quarkus:quarkus-config-yaml")
     implementation("io.quarkus:quarkus-jdbc-oracle")
+    implementation("io.quarkus:quarkus-scheduler")
 
     // Exposed 0.61.0
     implementation("org.jetbrains.exposed:exposed-core:0.61.0")

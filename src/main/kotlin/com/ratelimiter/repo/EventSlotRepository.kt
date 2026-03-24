@@ -10,10 +10,8 @@ import org.jetbrains.exposed.sql.insert
 import org.jetbrains.exposed.sql.javatime.JavaInstantColumnType
 import org.jetbrains.exposed.sql.selectAll
 import org.jetbrains.exposed.sql.statements.StatementType
-import org.jetbrains.exposed.sql.transactions.TransactionManager
 import org.jetbrains.exposed.sql.transactions.transaction
-import java.sql.SQLException
-import java.sql.Timestamp
+import org.jetbrains.exposed.sql.SortOrder.DESC
 import java.time.Duration
 import java.time.Instant
 import java.time.temporal.ChronoUnit
@@ -111,6 +109,22 @@ class EventSlotRepository {
         }
     }
 
+    /**
+     * Returns the furthest window that has actual slot assignments for a given requestedTime.
+     * Used by V3 and V4 to compute the scan upper bound (maxUsed + headroom).
+     */
+    fun fetchMaxWindowStartForRequestedTime(requestedTime: Instant): Instant? {
+        return transaction {
+            RateLimitEventSlotTable
+                .select(RateLimitEventSlotTable.windowStart)
+                .where { RateLimitEventSlotTable.requestedTime eq requestedTime }
+                .orderBy(RateLimitEventSlotTable.windowStart, DESC)
+                .limit(1)
+                .firstOrNull()
+                ?.get(RateLimitEventSlotTable.windowStart)
+        }
+    }
+
     // ==================== V4 methods ====================
 
     data class FrontierResult(val windowStart: Instant, val count: Int)
@@ -144,58 +158,33 @@ class EventSlotRepository {
     }
 
     /**
-     * Conditional INSERT: insert a slot only if the window has fewer than softMax slots.
-     * Returns AssignedSlot if inserted, null if window is at/above soft threshold.
-     * On duplicate EVENT_ID, returns the existing slot (idempotent).
+     * Count slots assigned in a specific window.
      */
-    private companion object {
-        const val ORACLE_UNIQUE_CONSTRAINT_ERROR_CODE = 1
+    fun Transaction.countSlotsInWindow(windowStart: Instant): Long {
+        return RateLimitEventSlotTable
+            .selectAll()
+            .where { RateLimitEventSlotTable.windowStart eq windowStart }
+            .count()
     }
 
     /**
-     * Conditional INSERT: insert a slot only if the window has fewer than softMax slots.
-     * Returns AssignedSlot if inserted, null if window is at/above soft threshold.
+     * Insert a slot and return AssignedSlot.
      * On duplicate EVENT_ID, returns the existing slot (idempotent).
+     * Returns null only if the insert fails for a non-duplicate reason (shouldn't happen).
      */
-    fun Transaction.conditionalInsertSlot(
+    fun Transaction.insertAndReturnSlot(
         eventId: String,
         windowStart: Instant,
         scheduledTime: Instant,
-        softMax: Int,
         configId: String,
         requestedTime: Instant
-    ): AssignedSlot? {
-        val slotId = UUID.randomUUID().toString()
-        val sql = """
-            INSERT INTO RL_EVENT_SLOT_DTL
-                (WNDW_SLOT_ID, EVENT_ID, REQ_TS, RL_WNDW_CONFIG_ID, WNDW_STRT_TS, COMPUTED_SCHED_TS, CREAT_TS)
-            SELECT ?, ?, ?, ?, ?, ?, SYSTIMESTAMP
-            FROM DUAL
-            WHERE (SELECT COUNT(*) FROM RL_EVENT_SLOT_DTL WHERE WNDW_STRT_TS = ?) < ?
-        """.trimIndent()
+    ): AssignedSlot {
+        val inserted = insertEventSlot(eventId, requestedTime, windowStart, scheduledTime, configId)
 
-        val conn = TransactionManager.current().connection.connection as java.sql.Connection
-
-        val rowsInserted = try {
-            conn.prepareStatement(sql).use { stmt ->
-                stmt.setString(1, slotId)
-                stmt.setString(2, eventId)
-                stmt.setTimestamp(3, Timestamp.from(requestedTime))
-                stmt.setString(4, configId)
-                stmt.setTimestamp(5, Timestamp.from(windowStart))
-                stmt.setTimestamp(6, Timestamp.from(scheduledTime))
-                stmt.setTimestamp(7, Timestamp.from(windowStart))
-                stmt.setInt(8, softMax)
-                stmt.executeUpdate()
-            }
-        } catch (e: SQLException) {
-            if (e.errorCode == ORACLE_UNIQUE_CONSTRAINT_ERROR_CODE) {
-                return queryAssignedSlot(eventId)
-            }
-            throw e
+        if (!inserted) {
+            return queryAssignedSlot(eventId)
+                ?: error("Failed to re-read slot for eventId=$eventId after duplicate key")
         }
-
-        if (rowsInserted == 0) return null
 
         val delay = Duration.between(requestedTime, scheduledTime).let { d ->
             if (d.isNegative) Duration.ZERO else d

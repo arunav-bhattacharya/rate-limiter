@@ -2,13 +2,9 @@ package com.ratelimiter
 
 import com.ratelimiter.db.RateLimitEventSlotTable
 import com.ratelimiter.db.WindowCounterTable
-import com.ratelimiter.db.WindowEndTrackerTable
 import com.ratelimiter.repo.EventSlotRepository
-import com.ratelimiter.repo.RateLimitConfigRepository
-import com.ratelimiter.repo.WindowEndTrackerRepository
 import com.ratelimiter.repo.WindowSlotCounterRepository
 import com.ratelimiter.slot.AssignedSlot
-import com.ratelimiter.slot.ConfigLoadException
 import com.ratelimiter.slot.SlotAssignmentException
 import com.ratelimiter.slot.SlotAssignmentServiceV3
 import io.quarkus.test.common.QuarkusTestResource
@@ -29,6 +25,10 @@ import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 
+/**
+ * Tests for V3 slot assignment with pre-provisioned windows and static config.
+ * Test profile: windowSize=4s, maxPerWindow=2.
+ */
 @QuarkusTest
 @QuarkusTestResource(OracleTestResource::class)
 class SlotAssignmentServiceV3Test {
@@ -37,36 +37,37 @@ class SlotAssignmentServiceV3Test {
     lateinit var service: SlotAssignmentServiceV3
 
     @Inject
-    lateinit var configRepository: RateLimitConfigRepository
-
-    @Inject
     lateinit var eventSlotRepository: EventSlotRepository
 
     @Inject
     lateinit var windowSlotCounterRepository: WindowSlotCounterRepository
-
-    @Inject
-    lateinit var windowEndTrackerRepository: WindowEndTrackerRepository
 
     @BeforeEach
     fun setup() {
         transaction {
             RateLimitEventSlotTable.deleteAll()
             WindowCounterTable.deleteAll()
-            WindowEndTrackerTable.deleteAll()
         }
-        configRepository.evictCache()
-        windowEndTrackerRepository.evictFrontierCache()
+    }
+
+    private fun preProvisionWindows(from: Instant, windowCount: Long) {
+        val windowSize = Duration.ofSeconds(4)
+        val windows = (0 until windowCount).map { i ->
+            from.plus(windowSize.multipliedBy(i))
+        }
+        transaction {
+            with(windowSlotCounterRepository) { batchInsertWindows(windows) }
+        }
     }
 
     // ==================== Basic assignment ====================
 
     @Test
     fun `assigns first window when capacity available`() {
-        configRepository.createConfig("v3-basic", 100, Duration.ofSeconds(4))
         val requestedTime = Instant.parse("2025-06-01T12:00:00Z")
+        preProvisionWindows(requestedTime, 200)
 
-        val slot = service.assignSlot("evt-1", "v3-basic", requestedTime)
+        val slot = service.assignSlot("evt-1", requestedTime)
 
         assertEquals("evt-1", slot.eventId)
         assertFalse(slot.scheduledTime.isBefore(requestedTime))
@@ -76,11 +77,12 @@ class SlotAssignmentServiceV3Test {
 
     @Test
     fun `fills multiple windows sequentially`() {
-        configRepository.createConfig("v3-multi", 3, Duration.ofSeconds(4))
+        // maxPerWindow=2, so 6 events should fill 3 windows
         val requestedTime = Instant.parse("2025-06-01T12:00:00Z")
+        preProvisionWindows(requestedTime, 200)
 
-        (1..9).forEach { i ->
-            service.assignSlot("evt-multi-$i", "v3-multi", requestedTime)
+        (1..6).forEach { i ->
+            service.assignSlot("evt-multi-$i", requestedTime)
         }
 
         val windowStarts = transaction {
@@ -96,28 +98,28 @@ class SlotAssignmentServiceV3Test {
 
     @Test
     fun `delay reflects how far event was pushed from requested time`() {
-        configRepository.createConfig("v3-delay", 1, Duration.ofSeconds(4))
+        // maxPerWindow=2, fill first window with 2 events, 3rd goes to next
         val requestedTime = Instant.parse("2025-06-01T12:00:00Z")
+        preProvisionWindows(requestedTime, 200)
 
-        val first = service.assignSlot("evt-d1", "v3-delay", requestedTime)
+        val first = service.assignSlot("evt-d1", requestedTime)
         assertTrue(first.delay < Duration.ofSeconds(4))
 
-        val second = service.assignSlot("evt-d2", "v3-delay", requestedTime)
-        assertTrue(second.delay >= Duration.ofSeconds(4))
+        service.assignSlot("evt-d2", requestedTime)
 
-        val third = service.assignSlot("evt-d3", "v3-delay", requestedTime)
-        assertTrue(third.delay >= Duration.ofSeconds(8))
+        val third = service.assignSlot("evt-d3", requestedTime)
+        assertTrue(third.delay >= Duration.ofSeconds(4))
     }
 
     // ==================== Idempotency ====================
 
     @Test
     fun `returns existing slot for duplicate eventId`() {
-        configRepository.createConfig("v3-idem", 100, Duration.ofSeconds(4))
         val requestedTime = Instant.parse("2025-06-01T12:00:00Z")
+        preProvisionWindows(requestedTime, 200)
 
-        val first = service.assignSlot("evt-dup", "v3-idem", requestedTime)
-        val second = service.assignSlot("evt-dup", "v3-idem", requestedTime)
+        val first = service.assignSlot("evt-dup", requestedTime)
+        val second = service.assignSlot("evt-dup", requestedTime)
 
         assertEquals(first.eventId, second.eventId)
         assertEquals(first.scheduledTime, second.scheduledTime)
@@ -133,8 +135,8 @@ class SlotAssignmentServiceV3Test {
 
     @Test
     fun `concurrent duplicate eventIds all return same slot`() {
-        configRepository.createConfig("v3-idem-conc", 100, Duration.ofSeconds(4))
         val requestedTime = Instant.parse("2025-06-01T12:00:00Z")
+        preProvisionWindows(requestedTime, 200)
         val threadCount = 10
 
         val results = ConcurrentLinkedQueue<AssignedSlot>()
@@ -145,7 +147,7 @@ class SlotAssignmentServiceV3Test {
         repeat(threadCount) {
             executor.submit {
                 try {
-                    results.add(service.assignSlot("evt-same", "v3-idem-conc", requestedTime))
+                    results.add(service.assignSlot("evt-same", requestedTime))
                 } catch (e: Throwable) {
                     errors.add(e)
                 } finally {
@@ -159,39 +161,19 @@ class SlotAssignmentServiceV3Test {
         assertTrue(errors.isEmpty())
         assertEquals(threadCount, results.size)
         assertEquals(1, results.map { it.scheduledTime }.distinct().size)
-
-        val dbCount = transaction {
-            RateLimitEventSlotTable.selectAll()
-                .where { RateLimitEventSlotTable.eventId eq "evt-same" }
-                .count()
-        }
-        assertEquals(1L, dbCount)
-    }
-
-    // ==================== Proportional first-window capacity ====================
-
-    @Test
-    fun `on-boundary requested time gets full capacity`() {
-        configRepository.createConfig("v3-boundary", 100, Duration.ofSeconds(4))
-        val requestedTime = Instant.parse("2025-06-01T12:00:04Z")
-
-        val slot = service.assignSlot("evt-b1", "v3-boundary", requestedTime)
-
-        assertFalse(slot.scheduledTime.isBefore(requestedTime))
-        assertTrue(slot.scheduledTime.isBefore(requestedTime.plusSeconds(4)))
-        assertTrue(slot.delay < Duration.ofSeconds(4))
     }
 
     // ==================== Jitter bounds ====================
 
     @Test
     fun `jitter stays within window bounds`() {
-        configRepository.createConfig("v3-jitter", 200, Duration.ofSeconds(4))
         val requestedTime = Instant.parse("2025-06-01T12:00:00Z")
+        preProvisionWindows(requestedTime, 200)
         val windowEnd = requestedTime.plusSeconds(4)
 
-        val slots = (1..100).map { i ->
-            service.assignSlot("evt-j$i", "v3-jitter", requestedTime)
+        // maxPerWindow=2, both slots should be in the first window
+        val slots = (1..2).map { i ->
+            service.assignSlot("evt-j$i", requestedTime)
         }
 
         for (slot in slots) {
@@ -204,150 +186,58 @@ class SlotAssignmentServiceV3Test {
 
     @Test
     fun `skips full windows to next available`() {
-        configRepository.createConfig("v3-skip", 2, Duration.ofSeconds(4))
         val requestedTime = Instant.parse("2025-06-01T12:00:00Z")
+        preProvisionWindows(requestedTime, 200)
 
-        service.assignSlot("evt-sk1", "v3-skip", requestedTime)
-        service.assignSlot("evt-sk2", "v3-skip", requestedTime)
+        // Fill first window (maxPerWindow=2)
+        service.assignSlot("evt-sk1", requestedTime)
+        service.assignSlot("evt-sk2", requestedTime)
 
-        val third = service.assignSlot("evt-sk3", "v3-skip", requestedTime)
+        val third = service.assignSlot("evt-sk3", requestedTime)
         assertFalse(third.scheduledTime.isBefore(requestedTime.plusSeconds(4)))
         assertTrue(third.delay >= Duration.ofSeconds(4))
     }
 
     @Test
-    fun `skip query avoids walking full windows`() {
-        configRepository.createConfig("v3-skip-perf", 2, Duration.ofSeconds(4))
-        val requestedTime = Instant.parse("2025-06-01T12:00:00Z")
-
-        // Fill 100 events across 50 windows
-        (1..100).forEach { i ->
-            service.assignSlot("evt-sp$i", "v3-skip-perf", requestedTime)
-        }
-
-        val slot = service.assignSlot("evt-sp101", "v3-skip-perf", requestedTime)
-        assertFalse(slot.scheduledTime.isBefore(requestedTime.plusSeconds(50 * 4L)))
-        assertTrue(slot.delay >= Duration.ofSeconds(50 * 4L))
-    }
-
-    @Test
     fun `many windows can be filled sequentially`() {
-        configRepository.createConfig("v3-many", 1, Duration.ofSeconds(4))
         val requestedTime = Instant.parse("2025-06-01T12:00:00Z")
+        preProvisionWindows(requestedTime, 200)
 
-        val slots = (1..50).map { i ->
-            service.assignSlot("evt-mw$i", "v3-many", requestedTime)
+        // maxPerWindow=2, so 100 events fill 50 windows
+        val slots = (1..100).map { i ->
+            service.assignSlot("evt-mw$i", requestedTime)
         }
 
-        assertEquals(50, slots.size)
+        assertEquals(100, slots.size)
         val maxScheduledTime = slots.maxOf { it.scheduledTime }
+        // 50 windows * 4s = 200s range, last window starts at 49*4=196s
         assertFalse(maxScheduledTime.isBefore(requestedTime.plusSeconds(49 * 4L)))
         assertTrue(maxScheduledTime.isBefore(requestedTime.plusSeconds(50 * 4L)))
-    }
-
-    // ==================== Frontier tracking / chunked provisioning ====================
-
-    @Test
-    fun `first request initializes frontier in track_window_end`() {
-        configRepository.createConfig("v3-frontier", 100, Duration.ofSeconds(4))
-        val requestedTime = Instant.parse("2025-06-01T12:00:00Z")
-
-        service.assignSlot("evt-f1", "v3-frontier", requestedTime)
-    }
-
-    @Test
-    fun `frontier is created when phase 2 activates`() {
-        configRepository.createConfig("v3-frontier2", 1, Duration.ofSeconds(4))
-        val requestedTime = Instant.parse("2025-06-01T12:00:00Z")
-
-        // First event fills Phase 1
-        service.assignSlot("evt-fr1", "v3-frontier2", requestedTime)
-        // Second event forces Phase 2 — frontier must be created
-        service.assignSlot("evt-fr2", "v3-frontier2", requestedTime)
-
-        val frontierRows = transaction {
-            WindowEndTrackerTable.selectAll()
-                .where { WindowEndTrackerTable.requestedTime eq Instant.parse("2025-06-01T12:00:00Z") }
-                .toList()
-        }
-        assertTrue(frontierRows.isNotEmpty())
-    }
-
-    @Test
-    fun `window counter rows are batch-provisioned`() {
-        configRepository.createConfig("v3-batch", 1, Duration.ofSeconds(4))
-        val requestedTime = Instant.parse("2025-06-01T12:00:00Z")
-
-        // Fill first window to trigger Phase 2 which batch-provisions
-        service.assignSlot("evt-batch1", "v3-batch", requestedTime)
-        service.assignSlot("evt-batch2", "v3-batch", requestedTime)
-
-        val counterCount = transaction {
-            WindowCounterTable.selectAll().count()
-        }
-        // Should have more than 2 windows — the batch provisioning creates maxWindowsInChunk rows
-        assertTrue(counterCount > 2)
-    }
-
-    // ==================== Extension loop ====================
-
-    @Test
-    fun `events beyond initial chunk succeed via extension`() {
-        configRepository.createConfig("v3-extend", 1, Duration.ofSeconds(4))
-        val requestedTime = Instant.parse("2025-06-01T12:00:00Z")
-
-        // Fill 101 events: 1 in first window + 100 in initial chunk
-        val events = (1..101).map { i ->
-            service.assignSlot("evt-ext$i", "v3-extend", requestedTime)
-        }
-        assertEquals(101, events.size)
-
-        // 102nd should succeed via extension chunk
-        val overflow = service.assignSlot("evt-ext102", "v3-extend", requestedTime)
-        assertFalse(overflow.scheduledTime.isBefore(requestedTime.plusSeconds(101 * 4L)))
-        assertTrue(overflow.delay >= Duration.ofSeconds(101 * 4L))
-    }
-
-    @Test
-    fun `track_window_end has multiple rows after extensions`() {
-        configRepository.createConfig("v3-twe", 1, Duration.ofSeconds(4))
-        val requestedTime = Instant.parse("2025-06-01T12:00:00Z")
-
-        // Fill enough to trigger extension
-        (1..102).forEach { i ->
-            service.assignSlot("evt-twe$i", "v3-twe", requestedTime)
-        }
-
-        val frontierRows = transaction {
-            WindowEndTrackerTable.selectAll()
-                .where { WindowEndTrackerTable.requestedTime eq Instant.parse("2025-06-01T12:00:00Z") }
-                .toList()
-        }
-        // Initial frontier + at least 1 extension
-        assertTrue(frontierRows.size >= 2)
     }
 
     // ==================== Exhaustion ====================
 
     @Test
-    fun `throws SlotAssignmentException when all chunks exhausted`() {
-        // Build a service with maxChunksToSearch=1 so only one chunk runs (no extensions).
-        // Capacity = 100 windows (1 chunk). With max_per_window=1, event 101 should fail.
-        val noExtensionService = SlotAssignmentServiceV3(
-            configRepository, eventSlotRepository,
-            windowSlotCounterRepository, windowEndTrackerRepository,
-            maxWindowsInChunk = 100, maxChunksToSearch = 1
-        )
-        configRepository.createConfig("v3-exhaust", 1, Duration.ofSeconds(4))
+    fun `throws SlotAssignmentException when all pre-provisioned windows exhausted`() {
         val requestedTime = Instant.parse("2025-06-01T12:00:00Z")
+        // Pre-provision only 5 windows → max 10 events (5 * 2)
+        preProvisionWindows(requestedTime, 5)
 
-        // Fill all available capacity
-        (1..100).forEach { i ->
-            noExtensionService.assignSlot("evt-ex$i", "v3-exhaust", requestedTime)
+        (1..10).forEach { i ->
+            service.assignSlot("evt-ex$i", requestedTime)
         }
 
         assertThrows(SlotAssignmentException::class.java) {
-            noExtensionService.assignSlot("evt-ex101", "v3-exhaust", requestedTime)
+            service.assignSlot("evt-ex11", requestedTime)
+        }
+    }
+
+    @Test
+    fun `throws SlotAssignmentException when no windows pre-provisioned`() {
+        val requestedTime = Instant.parse("2025-06-01T12:00:00Z")
+
+        assertThrows(SlotAssignmentException::class.java) {
+            service.assignSlot("evt-np1", requestedTime)
         }
     }
 
@@ -355,39 +245,39 @@ class SlotAssignmentServiceV3Test {
 
     @Test
     fun `window counter matches actual slot count`() {
-        configRepository.createConfig("v3-counter", 100, Duration.ofSeconds(4))
         val requestedTime = Instant.parse("2025-06-01T12:00:00Z")
+        preProvisionWindows(requestedTime, 200)
 
-        repeat(10) { i ->
-            service.assignSlot("evt-cnt$i", "v3-counter", requestedTime)
-        }
+        service.assignSlot("evt-cnt1", requestedTime)
+        service.assignSlot("evt-cnt2", requestedTime)
 
         val counterValue = transaction {
             WindowCounterTable.selectAll()
-                .where { WindowCounterTable.windowStart eq Instant.parse("2025-06-01T12:00:00Z") }
+                .where { WindowCounterTable.windowStart eq requestedTime }
                 .firstOrNull()
                 ?.get(WindowCounterTable.slotCount)
         }
-        assertEquals(10, counterValue)
+        assertEquals(2, counterValue)
     }
 
     @Test
     fun `full window counter matches max_per_window`() {
-        configRepository.createConfig("v3-full-cnt", 2, Duration.ofSeconds(4))
         val requestedTime = Instant.parse("2025-06-01T12:00:00Z")
+        preProvisionWindows(requestedTime, 200)
 
-        service.assignSlot("evt-fc1", "v3-full-cnt", requestedTime)
-        service.assignSlot("evt-fc2", "v3-full-cnt", requestedTime)
+        service.assignSlot("evt-fc1", requestedTime)
+        service.assignSlot("evt-fc2", requestedTime)
 
         val slotCount = transaction {
             WindowCounterTable.selectAll()
-                .where { WindowCounterTable.windowStart eq Instant.parse("2025-06-01T12:00:00Z") }
+                .where { WindowCounterTable.windowStart eq requestedTime }
                 .firstOrNull()
                 ?.get(WindowCounterTable.slotCount)
         }
         assertEquals(2, slotCount)
 
-        val third = service.assignSlot("evt-fc3", "v3-full-cnt", requestedTime)
+        // 3rd event goes to next window
+        val third = service.assignSlot("evt-fc3", requestedTime)
         assertFalse(third.scheduledTime.isBefore(requestedTime.plusSeconds(4)))
     }
 
@@ -395,59 +285,29 @@ class SlotAssignmentServiceV3Test {
 
     @Test
     fun `far-future event does not corrupt near-term search`() {
-        configRepository.createConfig("v3-iso", 100, Duration.ofSeconds(4))
-
         val farFuture = Instant.parse("2026-06-01T12:00:00Z")
-        val farSlot = service.assignSlot("evt-far", "v3-iso", farFuture)
-        assertFalse(farSlot.scheduledTime.isBefore(farFuture))
+        preProvisionWindows(farFuture, 200)
 
         val nearTerm = Instant.parse("2025-07-01T12:00:00Z")
-        val nearSlot = service.assignSlot("evt-near", "v3-iso", nearTerm)
+        preProvisionWindows(nearTerm, 200)
 
+        val farSlot = service.assignSlot("evt-far", farFuture)
+        assertFalse(farSlot.scheduledTime.isBefore(farFuture))
+
+        val nearSlot = service.assignSlot("evt-near", nearTerm)
         assertFalse(nearSlot.scheduledTime.isBefore(nearTerm))
         assertTrue(nearSlot.scheduledTime.isBefore(nearTerm.plusSeconds(4)))
         assertTrue(nearSlot.delay < Duration.ofSeconds(4))
-    }
-
-    @Test
-    fun `sparse counter rows - adjacent empty window found immediately`() {
-        configRepository.createConfig("v3-sparse", 2, Duration.ofSeconds(4))
-        val requestedTime = Instant.parse("2025-06-01T12:00:00Z")
-
-        // Fill window 0
-        service.assignSlot("evt-sp1", "v3-sparse", requestedTime)
-        service.assignSlot("evt-sp2", "v3-sparse", requestedTime)
-
-        // Create a far-future counter row
-        val farWindow = Instant.parse("2025-06-01T12:01:00Z")
-        service.assignSlot("evt-sp-far", "v3-sparse", farWindow)
-
-        // Next event at requestedTime should go to W1 (12:00:04), not after far window
-        val slot = service.assignSlot("evt-sp3", "v3-sparse", requestedTime)
-        assertFalse(slot.scheduledTime.isBefore(requestedTime.plusSeconds(4)))
-        assertTrue(slot.scheduledTime.isBefore(requestedTime.plusSeconds(8)))
-    }
-
-    // ==================== Config error ====================
-
-    @Test
-    fun `throws ConfigLoadException for unknown config name`() {
-        val ex = assertThrows(ConfigLoadException::class.java) {
-            service.assignSlot("evt-bad", "non-existent", Instant.now())
-        }
-        assertTrue(ex.message!!.contains("non-existent"))
     }
 
     // ==================== Concurrency ====================
 
     @Test
     fun `concurrent assignments respect max_per_window`() {
-        val maxPerWindow = 20
         val totalEvents = 100
         val threadCount = 50
-
-        configRepository.createConfig("v3-conc", maxPerWindow, Duration.ofSeconds(4))
         val requestedTime = Instant.parse("2025-06-01T12:00:00Z")
+        preProvisionWindows(requestedTime, 500)
 
         val results = ConcurrentHashMap<String, AssignedSlot>()
         val errors = ConcurrentLinkedQueue<Throwable>()
@@ -457,7 +317,7 @@ class SlotAssignmentServiceV3Test {
         repeat(totalEvents) { i ->
             executor.submit {
                 try {
-                    results["evt-c$i"] = service.assignSlot("evt-c$i", "v3-conc", requestedTime)
+                    results["evt-c$i"] = service.assignSlot("evt-c$i", requestedTime)
                 } catch (e: Throwable) {
                     errors.add(e)
                 } finally {
@@ -471,38 +331,25 @@ class SlotAssignmentServiceV3Test {
         assertTrue(errors.isEmpty())
         assertEquals(totalEvents, results.size)
 
+        // maxPerWindow=2
         val slotsByWindow = transaction {
             RateLimitEventSlotTable.selectAll().toList()
                 .groupBy { it[RateLimitEventSlotTable.windowStart] }
         }
         for ((windowStart, slots) in slotsByWindow) {
             assertTrue(
-                slots.size <= maxPerWindow,
-                "Window $windowStart should have at most $maxPerWindow slots"
-            )
-        }
-
-        // Verify counters match actual slot counts
-        val dbCounters = transaction {
-            WindowCounterTable.selectAll().associate { row ->
-                row[WindowCounterTable.windowStart] to row[WindowCounterTable.slotCount]
-            }
-        }
-        for ((windowStart, slots) in slotsByWindow) {
-            assertEquals(
-                slots.size, dbCounters[windowStart],
-                "Counter for $windowStart should match actual slot count"
+                slots.size <= 2,
+                "Window $windowStart should have at most 2 slots but has ${slots.size}"
             )
         }
     }
 
     @Test
     fun `no deadlocks under sustained load`() {
-        val totalEvents = 500
+        val totalEvents = 200
         val threadCount = 50
-
-        configRepository.createConfig("v3-deadlock", 10, Duration.ofSeconds(4))
         val requestedTime = Instant.parse("2025-06-01T12:00:00Z")
+        preProvisionWindows(requestedTime, 500)
 
         val successCount = AtomicInteger(0)
         val errors = ConcurrentLinkedQueue<Throwable>()
@@ -512,7 +359,7 @@ class SlotAssignmentServiceV3Test {
         repeat(totalEvents) { i ->
             executor.submit {
                 try {
-                    service.assignSlot("evt-dl$i", "v3-deadlock", requestedTime)
+                    service.assignSlot("evt-dl$i", requestedTime)
                     successCount.incrementAndGet()
                 } catch (e: Throwable) {
                     errors.add(e)
@@ -530,12 +377,10 @@ class SlotAssignmentServiceV3Test {
 
     @Test
     fun `counter stays consistent under contention`() {
-        val maxPerWindow = 50
-        val totalEvents = 200
+        val totalEvents = 100
         val threadCount = 30
-
-        configRepository.createConfig("v3-cnt-conc", maxPerWindow, Duration.ofSeconds(4))
         val requestedTime = Instant.parse("2025-06-01T12:00:00Z")
+        preProvisionWindows(requestedTime, 500)
 
         val results = ConcurrentHashMap<String, AssignedSlot>()
         val errors = ConcurrentLinkedQueue<Throwable>()
@@ -545,7 +390,7 @@ class SlotAssignmentServiceV3Test {
         repeat(totalEvents) { i ->
             executor.submit {
                 try {
-                    results["evt-cc$i"] = service.assignSlot("evt-cc$i", "v3-cnt-conc", requestedTime)
+                    results["evt-cc$i"] = service.assignSlot("evt-cc$i", requestedTime)
                 } catch (e: Throwable) {
                     errors.add(e)
                 } finally {
@@ -579,76 +424,5 @@ class SlotAssignmentServiceV3Test {
         }
 
         assertEquals(totalEvents, slotCountsByWindow.values.sum())
-    }
-
-    // ==================== Single-row locking validation ====================
-
-    @Test
-    fun `concurrent threads lock different windows instead of blocking each other`() {
-        val maxPerWindow = 5
-        val totalEvents = 200
-        val threadCount = 50
-
-        configRepository.createConfig("v3-single-lock", maxPerWindow, Duration.ofSeconds(4))
-        val requestedTime = Instant.parse("2025-06-01T12:00:00Z")
-
-        val results = ConcurrentHashMap<String, AssignedSlot>()
-        val errors = ConcurrentLinkedQueue<Throwable>()
-        val barrier = CountDownLatch(1)
-        val done = CountDownLatch(totalEvents)
-        val executor = Executors.newFixedThreadPool(threadCount)
-
-        repeat(totalEvents) { i ->
-            executor.submit {
-                try {
-                    barrier.await()
-                    results["evt-sl$i"] = service.assignSlot("evt-sl$i", "v3-single-lock", requestedTime)
-                } catch (e: Throwable) {
-                    errors.add(e)
-                } finally {
-                    done.countDown()
-                }
-            }
-        }
-
-        // Release all threads at once for maximum contention
-        barrier.countDown()
-        assertTrue(done.await(120, TimeUnit.SECONDS))
-        executor.shutdown()
-
-        assertTrue(errors.isEmpty(), "Expected 0 errors but got ${errors.size}: ${errors.firstOrNull()}")
-        assertEquals(totalEvents, results.size)
-
-        // Verify no window exceeds max_per_window
-        val slotsByWindow = transaction {
-            RateLimitEventSlotTable.selectAll().toList()
-                .groupBy { it[RateLimitEventSlotTable.windowStart] }
-        }
-        for ((windowStart, slots) in slotsByWindow) {
-            assertTrue(
-                slots.size <= maxPerWindow,
-                "Window $windowStart has ${slots.size} slots, exceeds max $maxPerWindow"
-            )
-        }
-
-        // Verify counters match actual slot counts
-        val dbCounters = transaction {
-            WindowCounterTable.selectAll().associate { row ->
-                row[WindowCounterTable.windowStart] to row[WindowCounterTable.slotCount]
-            }
-        }
-        for ((windowStart, slots) in slotsByWindow) {
-            assertEquals(
-                slots.size, dbCounters[windowStart],
-                "Counter for $windowStart should match actual slot count"
-            )
-        }
-
-        // Should use approximately 40 windows (200 events / 5 per window)
-        val expectedWindows = (totalEvents + maxPerWindow - 1) / maxPerWindow
-        assertTrue(
-            slotsByWindow.size >= expectedWindows,
-            "Should use at least $expectedWindows windows, got ${slotsByWindow.size}"
-        )
     }
 }

@@ -126,18 +126,18 @@ quarkus:
         level: INFO
 
 rate-limiter:
-  default-config-name: default
+  window-size-seconds: 30
+  max-per-window: 100
   headroom-windows: 100
-  max-search-chunks: 10
-  max-windows-in-chunk: 100
-  max-chunks-to-search: 2
   lock-query-timeout-seconds: 2
-  max-slot-attempts: 5
-  window-fill-threshold: 0.9
+  pre-provision-days: 30
+  pre-provision-batch-size: 5000
 
 # Test profile — longer timeouts for Oracle XE under ARM emulation
 "%test":
   rate-limiter:
+    window-size-seconds: 4
+    max-per-window: 2
     lock-query-timeout-seconds: 30
   quarkus:
     datasource:

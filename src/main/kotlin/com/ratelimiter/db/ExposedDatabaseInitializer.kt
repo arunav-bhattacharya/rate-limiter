@@ -47,10 +47,8 @@ class ExposedDatabaseInitializer @Inject constructor(
 
         transaction {
             SchemaUtils.create(
-                RateLimitConfigTable,
                 WindowCounterTable,
-                RateLimitEventSlotTable,
-                WindowEndTrackerTable
+                RateLimitEventSlotTable
             )
         }
         logger.info("Exposed database schema initialized")

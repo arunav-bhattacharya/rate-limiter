@@ -68,7 +68,7 @@ class WindowSlotCounterRepository(
      * skipping locked rows server-side and returning the first successfully locked
      * row. Only that one row is locked.
      */
-    fun Transaction.lockFirstAvailableInRange(
+    fun Transaction.lockFirstAvailableWindow(
         from: Instant,
         to: Instant,
         maxSlots: Int
@@ -131,6 +131,21 @@ class WindowSlotCounterRepository(
             if (!e.isDuplicateKeyViolation()) throw e
         } catch (e: ExposedSQLException) {
             if (!e.isDuplicateKeyViolation()) throw e
+        }
+    }
+
+    /**
+     * Returns the last provisioned window timestamp.
+     * Used by the pre-provisioner to determine where provisioning left off.
+     */
+    fun fetchMaxProvisionedWindow(): Instant? {
+        return org.jetbrains.exposed.sql.transactions.transaction {
+            WindowCounterTable
+                .select(WindowCounterTable.windowStart)
+                .orderBy(WindowCounterTable.windowStart, org.jetbrains.exposed.sql.SortOrder.DESC)
+                .limit(1)
+                .firstOrNull()
+                ?.get(WindowCounterTable.windowStart)
         }
     }
 
