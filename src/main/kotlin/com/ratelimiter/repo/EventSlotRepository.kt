@@ -6,6 +6,7 @@ import com.ratelimiter.slot.AssignedSlot
 import jakarta.enterprise.context.ApplicationScoped
 import org.jetbrains.exposed.exceptions.ExposedSQLException
 import org.jetbrains.exposed.sql.Transaction
+import org.jetbrains.exposed.sql.IntegerColumnType
 import org.jetbrains.exposed.sql.insert
 import org.jetbrains.exposed.sql.javatime.JavaInstantColumnType
 import org.jetbrains.exposed.sql.selectAll
@@ -127,33 +128,31 @@ class EventSlotRepository {
 
     // ==================== V4 methods ====================
 
-    data class FrontierResult(val windowStart: Instant, val count: Int)
-
     /**
-     * Find the last window with slots and its fill level for the given requestedTime.
-     * Used by V4 to jump past full windows in a single query.
+     * Find the earliest window with available capacity for the given requestedTime.
+     * Used by V4 to jump directly to the first window that can accept a slot.
      */
-    fun Transaction.findFrontierWindow(requestedTime: Instant): FrontierResult? {
+    fun Transaction.findFirstAvailableWindow(requestedTime: Instant, maxCapacity: Int): Instant? {
         val sql = """
-            SELECT WNDW_STRT_TS, COUNT(*) AS cnt
+            SELECT WNDW_STRT_TS
             FROM RL_EVENT_SLOT_DTL
-            WHERE WNDW_STRT_TS = (
-                SELECT MAX(WNDW_STRT_TS) FROM RL_EVENT_SLOT_DTL WHERE WNDW_STRT_TS >= ?
-            )
+            WHERE REQ_TS = ?
             GROUP BY WNDW_STRT_TS
+            HAVING COUNT(*) < ?
+            ORDER BY WNDW_STRT_TS ASC
+            FETCH FIRST 1 ROW ONLY
         """.trimIndent()
 
         return exec(
             sql,
-            listOf(Pair(JavaInstantColumnType(), requestedTime)),
+            listOf(
+                Pair(JavaInstantColumnType(), requestedTime),
+                Pair(IntegerColumnType(), maxCapacity)
+            ),
             StatementType.SELECT
         ) { rs ->
-            if (rs.next()) {
-                FrontierResult(
-                    windowStart = rs.getTimestamp("WNDW_STRT_TS").toInstant(),
-                    count = rs.getInt("cnt")
-                )
-            } else null
+            if (rs.next()) rs.getTimestamp("WNDW_STRT_TS").toInstant()
+            else null
         }
     }
 

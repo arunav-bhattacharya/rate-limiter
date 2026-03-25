@@ -52,25 +52,25 @@ class SlotAssignmentServiceV4(
         val startWindow = findStartWindow(requestedTime, softMax) ?: requestedTime
 
         // Number of windows to try within the bounded range
-        val windowsToTry = maxOf(1L, Duration.between(startWindow, upperBound).toSeconds() / windowSizeSeconds).toInt()
+        val windowsToTry = maxOf(1L, Duration.between(startWindow, upperBound).toSeconds() / windowSizeSeconds)
 
         // 1. Random pick within range — distributes concurrent threads
-        val randomOffset = ThreadLocalRandom.current().nextInt(windowsToTry)
-        val randomWindow = startWindow.plus(windowSize.multipliedBy(randomOffset.toLong()))
+        val randomOffset = ThreadLocalRandom.current().nextLong(windowsToTry)
+        val randomWindow = startWindow.plus(windowSize.multipliedBy(randomOffset))
         val randomResult = tryClaimSlot(eventId, randomWindow, softMax, requestedTime)
         if (randomResult != null) return randomResult
 
         // 2. Fallback: sequential scan through the range (skip the already-tried random window)
         for (attempt in 0 until windowsToTry) {
             if (attempt == randomOffset) continue
-            val windowStart = startWindow.plus(windowSize.multipliedBy(attempt.toLong()))
+            val windowStart = startWindow.plus(windowSize.multipliedBy(attempt))
             val result = tryClaimSlot(eventId, windowStart, softMax, requestedTime)
             if (result != null) return result
         }
 
         throw SlotAssignmentException(
             eventId = eventId,
-            windowsSearched = windowsToTry.toLong(),
+            windowsSearched = windowsToTry,
             message = "Could not assign slot for event $eventId after $windowsToTry attempts"
         )
     }
@@ -99,11 +99,8 @@ class SlotAssignmentServiceV4(
     }
 
     private fun findStartWindow(requestedTime: Instant, softMax: Int): Instant? {
-        val frontier = transaction {
-            with(eventSlotRepository) { findFrontierWindow(requestedTime) }
-        } ?: return null
-
-        return if (frontier.count < softMax) frontier.windowStart
-        else frontier.windowStart.plus(windowSize)
+        return transaction {
+            with(eventSlotRepository) { findFirstAvailableWindow(requestedTime, softMax) }
+        }
     }
 }
