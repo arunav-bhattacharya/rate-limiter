@@ -42,20 +42,20 @@ Request arrives: assignSlot(eventId, requestedTime, maxDuration)
 │
 ├─ Read skip pointer from DB (where did previous requests leave off?)
 │
-├─ PHASE A: Normal Allocation (softMax, chunked)
+├─ PHASE 1: Normal Allocation (softMax, chunked)
 │  ├─ Scan forward from skip pointer in 15-min chunks
 │  ├─ Within each chunk: read occupancy → proximity-weighted pick → claim
 │  ├─ If chunk exhausted: advance skip pointer, try next chunk
 │  └─ Continues until maxDuration boundary
 │      → Returns NORMAL status
 │
-├─ PHASE B: Overflow Allocation (hardMax, full rescan)
+├─ PHASE 2: Overflow Allocation (maxSlots, full rescan)
 │  ├─ Fresh occupancy read from requestedTime (ignores skip pointer)
-│  ├─ Looks for windows between softMax and hardMax
+│  ├─ Looks for windows between softMax and maxSlots
 │  └─ Proximity-weighted pick within maxDuration
 │      → Returns SOFT_MAX_EXCEEDED status
 │
-├─ PHASE C: Extension Allocation (softMax, beyond maxDuration)
+├─ PHASE 3: Extension Allocation (softMax, beyond maxDuration)
 │  ├─ Extends in chunks beyond maxDuration
 │  ├─ Fresh occupancy read per chunk
 │  └─ Advances skip pointer as each extension chunk is exhausted
@@ -67,18 +67,36 @@ Request arrives: assignSlot(eventId, requestedTime, maxDuration)
 ### Why Three Phases?
 
 ```
-                    softMax (870)         hardMax (990)        capacity (1000)
-                        │                     │                     │
-Window occupancy: ░░░░░░████████░░░░░░░░░░░░░░█████░░░░░░░░░░░░░░░░█
-                  ──────┼─────────────────────┼─────────────────────┼──
-                        │                     │                     │
-                  Phase A picks here     Phase B picks        Never used
-                  (normal operation)     here (overflow)      (safety margin)
+                    softMax (810)         maxSlots (900)
+                        │                     │
+Window occupancy: ░░░░░░████████░░░░░░░░░░░░░░█████
+                  ──────┼─────────────────────┼──
+                        │                     │
+                  Phase 1 picks here     Phase 2 picks
+                  (normal operation)     here (overflow)
 ```
 
-- **Phase A** keeps windows below `softMax` — normal operating range with headroom for concurrent writes
-- **Phase B** uses the gap between `softMax` and `hardMax` as overflow — only when all windows in `maxDuration` have reached `softMax`
-- **Phase C** extends beyond `maxDuration` — last resort, caller is notified via `AllocationStatus`
+- **Phase 1** keeps windows below `softMax` (90% of maxSlots) — normal operating range with headroom for concurrent writes
+- **Phase 2** uses the gap between `softMax` and `maxSlotsPerWindow` as overflow — only when all windows in `maxDuration` have reached `softMax`
+- **Phase 3** extends beyond `maxDuration` — last resort, caller is notified via `AllocationStatus`
+
+---
+
+## Capacity Model
+
+V5 uses a two-tier capacity model derived from a single `maxSlotsPerWindow` config:
+
+```
+softMax          = floor(maxSlotsPerWindow * softMaxPercent / 100)
+maxSlotsPerWindow = configured absolute ceiling
+```
+
+| Tier | Formula | Production (maxSlots=900, 90%) | Purpose |
+|------|---------|-------------------------------|---------|
+| **softMax** | `floor(maxSlots * softMaxPercent / 100)` | 810 | Phase 1 operating limit |
+| **maxSlotsPerWindow** | configured directly | 900 | Absolute ceiling — no window ever exceeds this |
+
+The 10% gap between softMax and maxSlots serves as a buffer for concurrent overbooking. When 20 pods read stale occupancy and simultaneously pick the same window, the actual fill may exceed softMax. The maxSlots limit enforced atomically via `RETURNING INTO` ensures no window ever goes above the configured maximum.
 
 ---
 
@@ -89,7 +107,7 @@ With an 8-hour `maxDuration` and 30-second windows, there are **960 windows** to
 1. **Large DB read** — occupancy read covers 960 rows instead of ~30
 2. **Weak proximity** — proximity weighting across 960 windows spreads probability too thin
 
-V5 chunks Phase A into configurable batches (default: 15 minutes = 30 windows):
+V5 chunks Phase 1 into configurable batches (default: 15 minutes = 30 windows):
 
 ```
 maxDuration = 8 hours
@@ -98,7 +116,7 @@ chunk size  = 15 minutes
             skipTo
               │
               ▼
-Phase A:  [chunk 1] → [chunk 2] → [chunk 3] → ... → [chunk 32]
+Phase 1:  [chunk 1] → [chunk 2] → [chunk 3] → ... → [chunk 32]
            15 min      15 min      15 min              15 min
               │
               └── Read occupancy for just this chunk (30 windows)
@@ -130,17 +148,23 @@ Timeline:
     │            │            │    here     │
 ```
 
-### Monotonic Advancement
+### Append-Only Design (Zero Write Contention)
 
-The skip pointer only moves forward, never backward:
+The skip pointer table uses an **append-only INSERT** pattern with a composite PK `(REQ_TS, SKIP_TO_TS)`:
 
 ```sql
-UPDATE RL_SKIP_PTR
-SET SKIP_TO_TS = :newSkipTo, UPD_TS = :now
-WHERE REQ_TS = :requestedTime AND SKIP_TO_TS < :newSkipTo
+-- Write: INSERT (no UPDATE, no row-level contention)
+INSERT INTO RL_SKIP_PTR (REQ_TS, SKIP_TO_TS, CREAT_TS) VALUES (:rt, :skipTo, :now)
+-- Duplicate (rt, skipTo) pair → caught by composite PK → no-op
+
+-- Read: index backward scan, stops after one row
+SELECT SKIP_TO_TS FROM RL_SKIP_PTR
+WHERE REQ_TS = :requestedTime
+ORDER BY SKIP_TO_TS DESC
+FETCH FIRST 1 ROW ONLY
 ```
 
-If two pods try to advance simultaneously, the highest value wins. A pod with a lower value simply no-ops.
+This mirrors the existing `RL_WNDW_FRONTIER_TRK` table pattern. Monotonicity is guaranteed by construction — `ORDER BY DESC LIMIT 1` always returns the highest value regardless of insert order. Two pods inserting different skip-to values simultaneously never block each other.
 
 ---
 
@@ -154,19 +178,19 @@ Weight(window) = capacityWeight * proximityWeight
   capacityWeight = max(0, threshold - currentOccupancy)
   proximityWeight = rangeSize - index     (linear decay from start)
 
-Example: 4 windows, softMax = 870
+Example: 4 windows, softMax = 810
 
   Window    Occupancy   capacityWeight   proximityWeight   totalWeight
   ──────    ─────────   ──────────────   ───────────────   ───────────
-  W+0       200         670              4                 2680  ████████████
-  W+1       500         370              3                 1110  █████
-  W+2       0           870              2                 1740  ████████
-  W+3       800         70               1                 70    ▏
+  W+0       200         610              4                 2440  ████████████
+  W+1       500         310              3                 930   █████
+  W+2       0           810              2                 1620  ████████
+  W+3       750         60               1                 60    ▏
 
   Selection probability:
   W+0: 48%  ████████████████████████
-  W+1: 20%  ██████████
-  W+2: 31%  ███████████████▌
+  W+1: 18%  █████████
+  W+2: 32%  ████████████████
   W+3:  1%  ▌
 ```
 
@@ -176,23 +200,9 @@ Example: 4 windows, softMax = 870
 
 ---
 
-## Hard Cap Enforcement
+## MaxSlots Enforcement
 
-V5 uses a **two-tier capacity model**:
-
-```
-  softMax (870)                    hardMax (990)
-      │                                │
-      ▼                                ▼
-  ┌───────────────────────────────────────────────┐
-  │░░░░░░░░░░░░░░░░░░░░│▓▓▓▓▓▓▓▓▓▓▓▓│           │
-  │  Phase A territory  │  Phase B    │  Reserved │
-  │  (normal)           │  (overflow) │  (safety) │
-  └───────────────────────────────────────────────┘
-  0                                           1000
-```
-
-The hard cap is enforced atomically using Oracle's `RETURNING INTO`:
+The `maxSlotsPerWindow` limit is enforced atomically using Oracle's `RETURNING INTO`:
 
 ```sql
 BEGIN
@@ -202,7 +212,19 @@ BEGIN
 END;
 ```
 
-If `newCount > hardMax`, the entire transaction (slot INSERT + counter UPDATE) is rolled back and a different window is tried. This ensures no window ever exceeds `hardMax`, even under high concurrency.
+If `newCount > maxSlotsPerWindow`, the entire transaction (slot INSERT + counter UPDATE) is rolled back and a different window is tried. This ensures no window ever exceeds `maxSlotsPerWindow`, even under high concurrency.
+
+```
+  softMax (810)                    maxSlots (900)
+      │                                │
+      ▼                                ▼
+  ┌───────────────────────────────────────┐
+  │░░░░░░░░░░░░░░░░░░░░│▓▓▓▓▓▓▓▓▓▓▓▓│
+  │  Phase 1 territory  │  Phase 2    │
+  │  (normal)           │  (overflow) │
+  └───────────────────────────────────────┘
+  0                                    900
+```
 
 ---
 
@@ -233,11 +255,11 @@ V5 uses three tables:
 │  RL_EVENT_SLOT_DTL  │     │     RL_WNDW_CT      │     │   RL_SKIP_PTR    │
 │─────────────────────│     │─────────────────────│     │──────────────────│
 │ WNDW_SLOT_ID    PK  │     │ WNDW_STRT_TS    PK  │     │ REQ_TS       PK  │
-│ EVENT_ID      UQ    │     │ SLOT_CT             │     │ SKIP_TO_TS       │
-│ REQ_TS              │     │ CREAT_TS            │     │ UPD_TS           │
+│ EVENT_ID      UQ    │     │ SLOT_CT             │     │ SKIP_TO_TS   PK  │
+│ REQ_TS              │     │ CREAT_TS            │     │ CREAT_TS         │
 │ WNDW_STRT_TS        │     └─────────────────────┘     └──────────────────┘
 │ COMPUTED_SCHED_TS   │       Advisory counter            Skip pointer
-│ RL_WNDW_CONFIG_ID   │       (created on demand)         (monotonic advance)
+│ RL_WNDW_CONFIG_ID   │       (created on demand)         (append-only, DESC read)
 │ CREAT_TS            │
 └─────────────────────┘
   Immutable slot record
@@ -248,16 +270,16 @@ V5 uses three tables:
 |-------|---------|---------------|
 | `RL_EVENT_SLOT_DTL` | Immutable slot assignments | INSERT only (never updated) |
 | `RL_WNDW_CT` | Per-window occupancy counter | Upsert (INSERT or UPDATE +1) |
-| `RL_SKIP_PTR` | Per-requestedTime skip pointer | Monotonic UPDATE (never decreases) |
+| `RL_SKIP_PTR` | Per-requestedTime skip pointer | Append-only INSERT (read via ORDER BY DESC) |
 
 ### DB Calls Per Request
 
 | Scenario | Calls | Operations |
 |----------|-------|------------|
-| Happy path (Phase A, 1st chunk) | 3 | skip pointer read + occupancy read + claim |
-| Phase A, 3rd chunk | 5 | skip pointer + 3 occupancy reads + claim |
-| Phase B | +2 | fresh occupancy read + claim |
-| Phase C (1st extension) | +2 | fresh occupancy read + claim |
+| Happy path (Phase 1, 1st chunk) | 3 | skip pointer read + occupancy read + claim |
+| Phase 1, 3rd chunk | 5 | skip pointer + 3 occupancy reads + claim |
+| Phase 2 | +2 | fresh occupancy read + claim |
+| Phase 3 (1st extension) | +2 | fresh occupancy read + claim |
 | Idempotent duplicate | 3 | skip pointer + occupancy + claim (catches UNIQUE, re-reads) |
 
 ---
@@ -270,27 +292,31 @@ V5 uses three tables:
 rate-limiter:
   window-size-seconds: 30
   v5:
-    soft-max-per-window: 870        # 30 TPS * 30s * 0.97 headroom
-    hard-max-per-window: 990        # 30 TPS * 30s * 1.10 burst
-    default-max-duration-hours: 8   # Default: slots can go up to 8h out
-    phase-a-chunk-seconds: 900      # 15-min chunks (30 windows each)
-    extension-windows: 40           # 20-min extension chunks
-    max-extensions-beyond: 5        # Up to 5 extensions beyond maxDuration
-    max-hard-cap-retries: 3         # Retries on hard-cap rollback
+    max-slots-per-window: 900        # 30 TPS * 30s = absolute ceiling per window
+    soft-max-percent: 90             # softMax = floor(900 * 90 / 100) = 810
+    default-max-duration-hours: 8    # Default: slots can go up to 8h out
+    phase1-chunk-seconds: 900        # 15-min chunks (30 windows each)
+    extension-windows: 40            # 20-min extension chunks
+    max-extensions-beyond: 5         # Up to 5 extensions beyond maxDuration
+    max-claim-retries: 3             # Retries when maxSlots exceeded on claim
 ```
 
 ### Capacity Math
 
 ```
 Window size:       30 seconds
-softMax:           870 slots/window
-Effective TPS:     870 / 30 = 29 TPS (sustained)
+maxSlotsPerWindow: 900
+softMaxPercent:    90%
 
-hardMax:           990 slots/window
-Burst TPS:         990 / 30 = 33 TPS (temporary overflow)
+softMax:           floor(900 * 90 / 100) = 810 slots/window
+Sustained TPS:     810 / 30 = 27 TPS (Phase 1)
+
+maxSlots:          900 slots/window (absolute ceiling)
+Burst TPS:         900 / 30 = 30 TPS (Phase 2 overflow)
 
 Default maxDuration: 8 hours
-Total capacity:      8h * 120 windows/hr * 870 slots = 835,200 events
+Phase 1 capacity:    8h * 120 windows/hr * 810 slots = 777,600 events
+Total capacity:      8h * 120 windows/hr * 900 slots = 864,000 events
 ```
 
 ### Recommended Configs by Traffic Pattern
@@ -301,13 +327,13 @@ Requests arrive at 100-400 TPS with `requestedTime = now + 1 minute`. Each reque
 
 ```yaml
 v5:
-  soft-max-per-window: 870
-  hard-max-per-window: 990
+  max-slots-per-window: 900
+  soft-max-percent: 90
   default-max-duration-hours: 8
-  phase-a-chunk-seconds: 900      # 15 min — tight proximity
+  phase1-chunk-seconds: 900      # 15 min — tight proximity
 ```
 
-**How it behaves**: At 400 TPS inbound / 30 TPS outbound, each second produces ~13 "excess" requests that spill forward. The skip pointer advances ~13 windows/second. An 8-hour maxDuration holds 835K events — sufficient for sustained bursts up to ~30 minutes (400 TPS * 1800s = 720K).
+**How it behaves**: At 400 TPS inbound / 30 TPS outbound, each second produces ~13 "excess" requests that spill forward. The skip pointer advances as chunks exhaust. An 8-hour maxDuration holds 864K events at maxSlots — sufficient for sustained bursts up to ~30 minutes (400 TPS * 1800s = 720K).
 
 #### Long-Horizon Batch (500K requests at 100 TPS, requestedTime days out)
 
@@ -315,14 +341,14 @@ A batch of 500K payment requests with `requestedTime = now + 7 days`. All slots 
 
 ```yaml
 v5:
-  soft-max-per-window: 870
-  hard-max-per-window: 990
+  max-slots-per-window: 900
+  soft-max-percent: 90
   default-max-duration-hours: 24    # Allow wider spread
-  phase-a-chunk-seconds: 1800       # 30-min chunks (less DB round-trips)
+  phase1-chunk-seconds: 1800        # 30-min chunks (less DB round-trips)
   max-extensions-beyond: 10         # More room to extend
 ```
 
-**How it behaves**: 500K events / 870 per window = 575 windows needed = ~4.8 hours of wall-clock time. With 24-hour maxDuration, Phase A alone handles it. The larger chunk size (30 min) reduces DB round-trips since proximity to the exact `requestedTime` matters less for batch jobs.
+**How it behaves**: 500K events / 810 per window = 618 windows needed = ~5.2 hours of wall-clock time. With 24-hour maxDuration, Phase 1 alone handles it. The larger chunk size (30 min) reduces DB round-trips since proximity to the exact `requestedTime` matters less for batch jobs.
 
 ---
 
@@ -362,7 +388,7 @@ POST /api/v2/slots
 | `allocationStatus` | Meaning | Caller Action |
 |--------------------|---------|---------------|
 | `NORMAL` | Slot within maxDuration, below softMax | None — optimal placement |
-| `SOFT_MAX_EXCEEDED` | Slot within maxDuration, window between softMax and hardMax | Monitor — nearing capacity |
+| `SOFT_MAX_EXCEEDED` | Slot within maxDuration, window between softMax and maxSlots | Monitor — nearing capacity |
 | `MAX_DURATION_EXCEEDED` | Slot placed beyond caller's maxDuration | Alert — may need to adjust processing timeline |
 
 ### Error Response (503)
@@ -384,10 +410,10 @@ All scenarios use the following config for readability:
 | Parameter | Value |
 |-----------|-------|
 | `windowSize` | 60 seconds (1 minute) |
-| `softMax` | 5 slots/window |
-| `hardMax` | 7 slots/window |
+| `maxSlotsPerWindow` | 7 |
+| `softMaxPercent` | 71% (softMax = floor(7 * 71 / 100) = 4) |
 | `maxDuration` | 10 minutes (default) |
-| `phaseAChunkSize` | 4 minutes (4 windows) |
+| `phase1ChunkSize` | 4 minutes (4 windows) |
 | `extensionWindows` | 3 |
 | `maxExtensionsBeyond` | 2 |
 
@@ -412,10 +438,10 @@ Window labels:
 | Step | Value | Reasoning |
 |------|-------|-----------|
 | Skip pointer | `null` → use `requestedTime` | No pointer for 14:00 |
-| Phase A, chunk 1 | `[W+0, W+1, W+2, W+3]` | `[14:00, 14:04)` |
+| Phase 1, chunk 1 | `[W+0, W+1, W+2, W+3]` | `[14:00, 14:04)` |
 | Occupancy read | `{}` (empty) | No counter rows exist |
-| Candidates | All 4 windows, weight > 0 | All have capacity = softMax (5) |
-| Proximity pick | W+0 (48%), W+1 (31%), W+2 (19%), W+3 (10%) | Closer windows favored |
+| Candidates | All 4 windows, weight > 0 | All have capacity = softMax (4) |
+| Proximity pick | W+0 (40%), W+1 (30%), W+2 (20%), W+3 (10%) | Closer windows favored |
 | Picked | W+0 *(example)* | |
 | Jitter | 23456ms | Random in `[0, 60000)` |
 | Claim | INSERT slot + upsert counter (count=1) | Counter row created on demand |
@@ -436,7 +462,7 @@ Window labels:
 
 ---
 
-### Scenario 2: Phase A Chunking — First Chunk Full, Second Has Capacity
+### Scenario 2: Phase 1 Chunking — First Chunk Full, Second Has Capacity
 
 **Request**: `assignSlot("evt-20", 14:00:00)`
 
@@ -444,10 +470,10 @@ Window labels:
 
 | Window | SLOT_CT | Status |
 |--------|---------|--------|
-| W+0 | 5 | Full (= softMax) |
-| W+1 | 5 | Full |
-| W+2 | 5 | Full |
-| W+3 | 5 | Full |
+| W+0 | 4 | Full (= softMax) |
+| W+1 | 4 | Full |
+| W+2 | 4 | Full |
+| W+3 | 4 | Full |
 | W+4 | 1 | Available |
 | W+5 | 0 | Available |
 | W+6 | 2 | Available |
@@ -459,13 +485,13 @@ No skip pointer.
 | Step | Value | Reasoning |
 |------|-------|-----------|
 | Skip pointer | `null` → start at 14:00 | |
-| Phase A, chunk 1 | `[W+0..W+3]` | Range `[14:00, 14:04)` |
-| Occupancy | `{W+0:5, W+1:5, W+2:5, W+3:5}` | |
+| Phase 1, chunk 1 | `[W+0..W+3]` | Range `[14:00, 14:04)` |
+| Occupancy | `{W+0:4, W+1:4, W+2:4, W+3:4}` | |
 | Candidates | None | All at softMax |
 | Advance skip pointer | `14:04:00` | Chunk 1 exhausted |
-| Phase A, chunk 2 | `[W+4..W+7]` | Range `[14:04, 14:08)` |
+| Phase 1, chunk 2 | `[W+4..W+7]` | Range `[14:04, 14:08)` |
 | Occupancy | `{W+4:1, W+6:2}` | W+5, W+7 absent → count=0 |
-| Candidates | W+4(weight=16), W+5(weight=15), W+6(weight=6), W+7(weight=5) | Proximity-weighted |
+| Candidates | W+4(weight=12), W+5(weight=12), W+6(weight=4), W+7(weight=4) | Proximity-weighted |
 | Picked | W+4 *(example — highest weight)* | |
 | Claim | INSERT + upsert counter (count=2) | |
 
@@ -481,18 +507,18 @@ No skip pointer.
 
 ---
 
-### Scenario 3: Phase B — Overflow Within maxDuration
+### Scenario 3: Phase 2 — Overflow Within maxDuration
 
 **Request**: `assignSlot("evt-50", 14:00:00, maxDuration=10min)`
 
-**State before**: All windows in maxDuration at softMax, but below hardMax.
+**State before**: All windows in maxDuration at softMax, but below maxSlots.
 
 | Window | SLOT_CT | Status |
 |--------|---------|--------|
-| W+0 | 5 | At softMax |
-| W+1 | 5 | At softMax |
-| ... | 5 | At softMax |
-| W+9 | 5 | At softMax |
+| W+0 | 4 | At softMax |
+| W+1 | 4 | At softMax |
+| ... | 4 | At softMax |
+| W+9 | 4 | At softMax |
 
 Skip pointer at `14:10` (past maxDurationEnd).
 
@@ -501,37 +527,37 @@ Skip pointer at `14:10` (past maxDurationEnd).
 | Step | Value | Reasoning |
 |------|-------|-----------|
 | Skip pointer | `14:10` | Past maxDurationEnd (14:10) |
-| Phase A start | `14:10` | `max(skipTo, requestedTime)` |
-| Phase A | No chunks to scan | `phaseAStart >= maxDurationEnd` |
-| Phase B | Fresh read `[14:00, 14:10)` | Ignores skip pointer |
-| Occupancy | `{W+0:5, ..., W+9:5}` | All at softMax (5), below hardMax (7) |
-| Candidates | All 10 windows | capacityWeight = 7 - 5 = 2 per window |
+| Phase 1 start | `14:10` | `max(skipTo, requestedTime)` |
+| Phase 1 | No chunks to scan | `phase1Start >= maxDurationEnd` |
+| Phase 2 | Fresh read `[14:00, 14:10)` | Ignores skip pointer |
+| Occupancy | `{W+0:4, ..., W+9:4}` | All at softMax (4), below maxSlots (7) |
+| Candidates | All 10 windows | capacityWeight = 7 - 4 = 3 per window |
 | Picked | W+1 *(example)* | Proximity-weighted among overflow candidates |
-| Claim | INSERT + upsert counter (count=6) | 6 <= hardMax (7) → success |
+| Claim | INSERT + upsert counter (count=5) | 5 <= maxSlots (7) → success |
 
 **Result**: `AssignedSlot(evt-50, 14:01:XX.XXX, SOFT_MAX_EXCEEDED)`
 
-**Key point**: Phase B scans from `requestedTime`, not from the skip pointer. This ensures windows between softMax and hardMax (which Phase A skipped) are found. The `SOFT_MAX_EXCEEDED` status tells the caller that capacity is tight.
+**Key point**: Phase 2 scans from `requestedTime`, not from the skip pointer. This ensures windows between softMax and maxSlots (which Phase 1 skipped) are found. The `SOFT_MAX_EXCEEDED` status tells the caller that capacity is tight.
 
 ---
 
-### Scenario 4: Phase C — Extension Beyond maxDuration
+### Scenario 4: Phase 3 — Extension Beyond maxDuration
 
 **Request**: `assignSlot("evt-80", 14:00:00, maxDuration=10min)`
 
-**State before**: All windows in maxDuration at hardMax.
+**State before**: All windows in maxDuration at maxSlots.
 
 | Window | SLOT_CT | Status |
 |--------|---------|--------|
-| W+0 to W+9 | 7 | At hardMax |
+| W+0 to W+9 | 7 | At maxSlots |
 
 **Walkthrough**:
 
 | Step | Value | Reasoning |
 |------|-------|-----------|
-| Phase A | Exhausted | All chunks at softMax or higher |
-| Phase B | Exhausted | All windows at hardMax |
-| Phase C, ext 1 | `[W+10, W+11, W+12]` | 3 extension windows beyond 14:10 |
+| Phase 1 | Exhausted | All chunks at softMax or higher |
+| Phase 2 | Exhausted | All windows at maxSlots |
+| Phase 3, ext 1 | `[W+10, W+11, W+12]` | 3 extension windows beyond 14:10 |
 | Occupancy | `{}` (empty) | Fresh read — no counter rows here |
 | Picked | W+10 *(example)* | Closest in extension range |
 | Claim | INSERT + upsert counter (count=1) | |
@@ -546,15 +572,15 @@ Skip pointer at `14:10` (past maxDurationEnd).
 
 Two requests for the same `requestedTime` with different `maxDuration` values:
 
-**State before**: Windows W+0 to W+3 at softMax (5). W+4 onwards empty.
+**State before**: Windows W+0 to W+3 at softMax (4). W+4 onwards empty.
 
 **Request A**: `assignSlot("evt-short", 14:00:00, maxDuration=4min)`
 
 | Step | Result |
 |------|--------|
 | maxDurationEnd | 14:04:00 |
-| Phase A | Scans `[W+0..W+3]` — all at softMax → exhausted |
-| Phase B | Fresh read `[W+0..W+3]` — room up to hardMax (7) → picks W+0 |
+| Phase 1 | Scans `[W+0..W+3]` — all at softMax → exhausted |
+| Phase 2 | Fresh read `[W+0..W+3]` — room up to maxSlots (7) → picks W+0 |
 | Status | **SOFT_MAX_EXCEEDED** |
 
 **Request B**: `assignSlot("evt-long", 14:00:00, maxDuration=8min)`
@@ -562,10 +588,10 @@ Two requests for the same `requestedTime` with different `maxDuration` values:
 | Step | Result |
 |------|--------|
 | maxDurationEnd | 14:08:00 |
-| Phase A | Scans chunk 1 `[W+0..W+3]` — exhausted. Chunk 2 `[W+4..W+7]` — empty → picks W+4 |
+| Phase 1 | Scans chunk 1 `[W+0..W+3]` — exhausted. Chunk 2 `[W+4..W+7]` — empty → picks W+4 |
 | Status | **NORMAL** |
 
-**Key point**: The same window state produces different outcomes based on `maxDuration`. Request A with a tight maxDuration falls into Phase B; request B with a wider maxDuration finds empty windows in Phase A.
+**Key point**: The same window state produces different outcomes based on `maxDuration`. Request A with a tight maxDuration falls into Phase 2; request B with a wider maxDuration finds empty windows in Phase 1.
 
 ---
 
@@ -575,7 +601,7 @@ Two requests for the same `requestedTime` with different `maxDuration` values:
 
 | Window | SLOT_CT | Who filled it |
 |--------|---------|---------------|
-| 14:02:00 | 5 | Requests with requestedTime=14:00 |
+| 14:02:00 | 4 | Requests with requestedTime=14:00 |
 
 **Request**: `assignSlot("evt-B1", 14:02:00)` — different requestedTime, same window.
 
@@ -583,8 +609,8 @@ Two requests for the same `requestedTime` with different `maxDuration` values:
 
 | Step | Value | Reasoning |
 |------|-------|-----------|
-| Phase A, chunk 1 | `[14:02, 14:03, 14:04, 14:05]` | |
-| Occupancy | `{14:02:00: 5}` | **Global** counter — sees all slots regardless of requestedTime |
+| Phase 1, chunk 1 | `[14:02, 14:03, 14:04, 14:05]` | |
+| Occupancy | `{14:02:00: 4}` | **Global** counter — sees all slots regardless of requestedTime |
 | Candidates | `[14:03, 14:04, 14:05]` | 14:02 filtered out (at softMax) |
 | Picked | 14:03 *(example)* | |
 
@@ -616,11 +642,11 @@ BEGIN transaction                     BEGIN transaction
 
 ---
 
-### Scenario 8: Hard Cap Rollback and Retry
+### Scenario 8: MaxSlots Rollback and Retry
 
-Multiple concurrent threads target the same window, pushing it past hardMax.
+Multiple concurrent threads target the same window, pushing it past maxSlots.
 
-**State before**: W+0 has SLOT_CT=6 (one below hardMax=7).
+**State before**: W+0 has SLOT_CT=6 (one below maxSlots=7).
 
 ```
 Thread A                              Thread B
@@ -631,14 +657,14 @@ Pick W+0                              Pick W+0
 BEGIN                                 BEGIN
   INSERT slot-A                         INSERT slot-B
   Upsert counter → returns 7             Upsert counter → returns 8
-  7 <= hardMax → COMMIT                   8 > hardMax → ROLLBACK!
+  7 <= maxSlots → COMMIT                  8 > maxSlots → ROLLBACK!
                                         Re-read occupancy → W+0: 7
                                         Pick W+1 (next best)
                                         INSERT slot-B, upsert counter → 1
                                         COMMIT
 ```
 
-**Result**: W+0 has exactly 7 slots (hardMax). Thread B's slot landed in W+1. The hard cap is enforced atomically — no window ever exceeds hardMax.
+**Result**: W+0 has exactly 7 slots (maxSlots). Thread B's slot landed in W+1. The maxSlots limit is enforced atomically — no window ever exceeds maxSlotsPerWindow.
 
 ---
 
@@ -649,14 +675,14 @@ Three pods process requests for the same `requestedTime=14:00` concurrently. Chu
 ```
 Timeline of skip pointer state (RL_SKIP_PTR for REQ_TS=14:00):
 
-  Pod 1: Exhausts chunk [14:00, 14:04) → UPDATE SKIP_TO = 14:04  ✓ (was null)
+  Pod 1: Exhausts chunk [14:00, 14:04) → INSERT SKIP_TO = 14:04
   Pod 2: Reads SKIP_TO = 14:04 → starts at chunk [14:04, 14:08) → finds slot → done
   Pod 3: Reads SKIP_TO = 14:04 → starts at chunk [14:04, 14:08) → exhausts it
-         → UPDATE SKIP_TO = 14:08 (14:08 > 14:04 ✓)
+         → INSERT SKIP_TO = 14:08 (read returns max: 14:08)
   Pod 1: New request → reads SKIP_TO = 14:08 → starts at chunk [14:08, 14:12)
 ```
 
-**Key point**: No pod re-scans already-exhausted chunks. The skip pointer is a lightweight coordination primitive — one PK row per requestedTime, updated only when chunks are exhausted.
+**Key point**: No pod re-scans already-exhausted chunks. The skip pointer is a lightweight coordination primitive — append-only rows per requestedTime, read via `ORDER BY DESC FETCH FIRST 1 ROW ONLY`.
 
 ---
 
@@ -664,22 +690,22 @@ Timeline of skip pointer state (RL_SKIP_PTR for REQ_TS=14:00):
 
 **Request**: `assignSlot("evt-fail", 14:00:00, maxDuration=10min)`
 
-**State**: All windows in maxDuration at hardMax, all extension windows also at hardMax.
+**State**: All windows in maxDuration at maxSlots, all extension windows also at maxSlots.
 
 | Range | Windows | Status |
 |-------|---------|--------|
-| maxDuration [W+0..W+9] | 10 | All at hardMax (7) |
-| Extension 1 [W+10..W+12] | 3 | All at hardMax (7) |
-| Extension 2 [W+13..W+15] | 3 | All at hardMax (7) |
+| maxDuration [W+0..W+9] | 10 | All at maxSlots (7) |
+| Extension 1 [W+10..W+12] | 3 | All at maxSlots (7) |
+| Extension 2 [W+13..W+15] | 3 | All at maxSlots (7) |
 
 **Walkthrough**:
 
 | Phase | Result |
 |-------|--------|
-| Phase A | All chunks exhausted at softMax |
-| Phase B | All windows at hardMax |
-| Phase C, ext 1 | All windows at softMax+ |
-| Phase C, ext 2 | All windows at softMax+ |
+| Phase 1 | All chunks exhausted at softMax |
+| Phase 2 | All windows at maxSlots |
+| Phase 3, ext 1 | All windows at softMax+ |
+| Phase 3, ext 2 | All windows at softMax+ |
 
 **Result**: `SlotAssignmentException(eventId=evt-fail, windowsSearched=16, "No available window...")`
 
@@ -693,10 +719,11 @@ HTTP response: **503 Service Unavailable**
 
 | Design Choice | Benefit | Trade-off |
 |---------------|---------|-----------|
-| **Optimistic inserts (no row locks)** | No lock contention, no deadlocks, scales linearly with pods | Advisory occupancy read can be stale — hard cap needed as safety net |
-| **Advisory counter + hard cap** | Fast reads (no lock), atomic enforcement via RETURNING INTO | Two-tier capacity model is more complex than a single limit |
+| **Optimistic inserts (no row locks)** | No lock contention, no deadlocks, scales linearly with pods | Advisory occupancy read can be stale — maxSlots enforcement needed as safety net |
+| **Advisory counter + maxSlots enforcement** | Fast reads (no lock), atomic enforcement via RETURNING INTO | Two-tier capacity model adds some complexity |
+| **softMax = 90% of maxSlots** | 10% buffer absorbs concurrent overbooking; maxSlots is the true ceiling | Effective sustained TPS is 90% of configured max |
 | **DB-backed skip pointer** | Multi-pod coordination without Redis/external cache | Extra DB call per request (PK lookup, ~0.1ms) |
-| **Chunked Phase A** | Tight proximity weighting, small occupancy reads | More DB round-trips if many chunks are exhausted |
+| **Chunked Phase 1** | Tight proximity weighting, small occupancy reads | More DB round-trips if many chunks are exhausted |
 | **Three-phase allocation** | Graceful degradation with caller visibility | More complex algorithm; caller must handle three status values |
 | **No pre-provisioning** | Zero setup, zero background jobs, zero wasted storage | First slot in a window pays the counter INSERT cost (~0.5ms) |
 | **Proximity-weighted random** | Balances closeness and load spreading | Non-deterministic — harder to predict exact fill order |
@@ -712,7 +739,7 @@ HTTP response: **503 Service Unavailable**
 | Locking | `FOR UPDATE SKIP LOCKED` | None |
 | Pre-provisioning | Required (60-day batch cron) | Not needed |
 | Counter accuracy | Exact (locked increment) | Advisory read + atomic upsert |
-| Capacity model | Single `maxPerWindow` | Soft max + hard max |
+| Capacity model | Single `maxPerWindow` | softMax (90%) + maxSlotsPerWindow |
 | Window selection | Sequential (first available) | Proximity-weighted random |
 | Multi-pod coordination | Row locks provide implicit coordination | DB skip pointer |
 | Allocation control | Fixed search depth | Per-request `maxDuration` + 3-phase |

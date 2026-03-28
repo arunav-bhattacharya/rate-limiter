@@ -16,13 +16,18 @@ object WindowCounterTable : Table("RL_WNDW_CT") {
     }
 }
 
-/** DB-backed skip pointer for V5 multi-pod coordination. */
+/**
+ * Append-only skip pointer for V5 multi-pod coordination.
+ * Composite PK (REQ_TS, SKIP_TO_TS) — multiple rows per requestedTime.
+ * Read: SELECT SKIP_TO_TS WHERE REQ_TS = ? ORDER BY SKIP_TO_TS DESC FETCH FIRST 1 ROW ONLY
+ * Write: INSERT (rt, skipTo) — duplicates silently caught by PK.
+ */
 object SkipPointerTable : Table("RL_SKIP_PTR") {
     val requestedTime = timestamp("REQ_TS")
     val skipTo = timestamp("SKIP_TO_TS")
-    val updatedAt = timestamp("UPD_TS")
+    val createdAt = timestamp("CREAT_TS")
 
-    override val primaryKey = PrimaryKey(requestedTime)
+    override val primaryKey = PrimaryKey(requestedTime, skipTo)
 }
 
 /** Immutable slot assignment record. */

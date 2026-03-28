@@ -9,19 +9,24 @@ import org.jetbrains.exposed.sql.transactions.transaction
 import java.time.Duration
 import java.time.Instant
 import java.util.concurrent.ThreadLocalRandom
+import kotlin.math.floor
 
 /**
  * V5 slot assignment — optimistic INSERT with advisory counter table,
  * proximity-weighted random window selection, and DB-backed skip pointer.
  *
  * Three-phase allocation:
- *   Phase A: Normal — softMax within maxDuration, chunked into configurable
+ *   Phase 1: Normal — softMax within maxDuration, chunked into configurable
  *            batches (default 15 min) so proximity weighting stays tight.
- *   Phase B: Overflow — hardMax within maxDuration (fresh read from requestedTime)
- *   Phase C: Extension — softMax beyond maxDuration (fresh read per chunk)
+ *   Phase 2: Overflow — maxSlotsPerWindow within maxDuration (fresh read from requestedTime)
+ *   Phase 3: Extension — softMax beyond maxDuration (fresh read per chunk)
+ *
+ * Capacity:
+ *   softMax          = floor(maxSlots * softMaxPercent / 100)  — Phase 1 operating limit
+ *   maxSlotsPerWindow = configured ceiling                     — no window ever exceeds this
  *
  * No row locks. No pre-provisioning. Counter rows created on demand via
- * UPDATE-first upsert with RETURNING INTO for hard-cap enforcement.
+ * UPDATE-first upsert with RETURNING INTO for capacity enforcement.
  *
  * DB calls per request (happy path): 3
  *   1. Skip pointer read       — PK lookup on RL_SKIP_PTR
@@ -38,20 +43,20 @@ class SlotAssignmentServiceV5(
     private val skipPointerRepository: SkipPointerRepository,
     @param:ConfigProperty(name = "rate-limiter.window-size-seconds", defaultValue = "30")
     private val windowSizeSeconds: Long,
-    @param:ConfigProperty(name = "rate-limiter.v5.soft-max-per-window", defaultValue = "870")
-    private val softMaxPerWindow: Int,
-    @param:ConfigProperty(name = "rate-limiter.v5.hard-max-per-window", defaultValue = "990")
-    private val hardMaxPerWindow: Int,
+    @param:ConfigProperty(name = "rate-limiter.v5.max-slots-per-window", defaultValue = "900")
+    private val maxSlotsPerWindow: Int,
+    @param:ConfigProperty(name = "rate-limiter.v5.soft-max-percent", defaultValue = "90")
+    private val softMaxPercent: Int,
     @param:ConfigProperty(name = "rate-limiter.v5.default-max-duration-hours", defaultValue = "8")
     private val defaultMaxDurationHours: Long,
-    @param:ConfigProperty(name = "rate-limiter.v5.phase-a-chunk-seconds", defaultValue = "900")
-    private val phaseAChunkSeconds: Long,
+    @param:ConfigProperty(name = "rate-limiter.v5.phase1-chunk-seconds", defaultValue = "900")
+    private val phase1ChunkSeconds: Long,
     @param:ConfigProperty(name = "rate-limiter.v5.extension-windows", defaultValue = "40")
     private val extensionWindows: Int,
     @param:ConfigProperty(name = "rate-limiter.v5.max-extensions-beyond", defaultValue = "5")
     private val maxExtensionsBeyond: Int,
-    @param:ConfigProperty(name = "rate-limiter.v5.max-hard-cap-retries", defaultValue = "3")
-    private val maxHardCapRetries: Int,
+    @param:ConfigProperty(name = "rate-limiter.v5.max-claim-retries", defaultValue = "3")
+    private val maxClaimRetries: Int,
 ) {
     companion object {
         const val STATIC_CONFIG_ID = "STATIC"
@@ -59,31 +64,34 @@ class SlotAssignmentServiceV5(
 
     private val windowSize: Duration = Duration.ofSeconds(windowSizeSeconds)
     private val windowSizeMs: Long = windowSizeSeconds * 1000
-    private val phaseAChunkDuration: Duration = Duration.ofSeconds(phaseAChunkSeconds)
+    private val phase1ChunkDuration: Duration = Duration.ofSeconds(phase1ChunkSeconds)
     private val extensionDuration: Duration = windowSize.multipliedBy(extensionWindows.toLong())
     val defaultMaxDuration: Duration = Duration.ofHours(defaultMaxDurationHours)
+
+    /** Phase 1 operating limit: floor(maxSlots * softMaxPercent / 100) */
+    private val softMax: Int = floor(maxSlotsPerWindow * softMaxPercent / 100.0).toInt()
 
     fun assignSlot(eventId: String, requestedTime: Instant, maxDuration: Duration = defaultMaxDuration): AssignedSlot {
         // Step 1: Read DB skip pointer
         val skipTo = skipPointerRepository.fetchSkipTo(requestedTime) ?: requestedTime
         val maxDurationEnd = requestedTime.plus(maxDuration)
-        val phaseAStart = maxOf(skipTo, requestedTime)
+        val phase1Start = maxOf(skipTo, requestedTime)
 
-        // ---- PHASE A: Normal allocation within maxDuration (softMax, chunked) ----
+        // ---- PHASE 1: Normal allocation within maxDuration (softMax, chunked) ----
         // Advances skip pointer per-chunk as each chunk is exhausted.
-        val phaseAResult = phaseA(eventId, requestedTime, phaseAStart, maxDurationEnd)
-        if (phaseAResult != null) return phaseAResult
+        val phase1Result = phase1(eventId, requestedTime, phase1Start, maxDurationEnd)
+        if (phase1Result != null) return phase1Result
 
-        // ---- PHASE B: Overflow within maxDuration (hardMax, fresh read) ----
-        val phaseBResult = phaseB(eventId, requestedTime, maxDurationEnd)
-        if (phaseBResult != null) return phaseBResult
+        // ---- PHASE 2: Overflow within maxDuration (maxSlots, fresh read) ----
+        val phase2Result = phase2(eventId, requestedTime, maxDurationEnd)
+        if (phase2Result != null) return phase2Result
 
-        // ---- PHASE C: Extension beyond maxDuration (softMax, fresh read per chunk) ----
-        val phaseCResult = phaseC(eventId, requestedTime, maxDurationEnd)
-        if (phaseCResult != null) return phaseCResult
+        // ---- PHASE 3: Extension beyond maxDuration (softMax, fresh read per chunk) ----
+        val phase3Result = phase3(eventId, requestedTime, maxDurationEnd)
+        if (phase3Result != null) return phase3Result
 
-        val phaseCEnd = maxDurationEnd.plus(extensionDuration.multipliedBy(maxExtensionsBeyond.toLong()))
-        val totalWindowsSearched = Duration.between(requestedTime, phaseCEnd).toSeconds() / windowSizeSeconds
+        val phase3End = maxDurationEnd.plus(extensionDuration.multipliedBy(maxExtensionsBeyond.toLong()))
+        val totalWindowsSearched = Duration.between(requestedTime, phase3End).toSeconds() / windowSizeSeconds
         throw SlotAssignmentException(
             eventId = eventId,
             windowsSearched = totalWindowsSearched,
@@ -94,29 +102,29 @@ class SlotAssignmentServiceV5(
     // ---- Phase implementations ----
 
     /**
-     * Phase A: scan forward from skipTo one chunk at a time (default 15 min).
+     * Phase 1: scan forward from skipTo one chunk at a time (default 15 min).
      * Each chunk reads its own occupancy and picks within that narrow window set.
      * Advances skip pointer per-chunk as each is exhausted, so other pods
      * and subsequent requests skip already-exhausted chunks immediately.
      */
-    private fun phaseA(
+    private fun phase1(
         eventId: String,
         requestedTime: Instant,
-        phaseAStart: Instant,
+        phase1Start: Instant,
         maxDurationEnd: Instant
     ): AssignedSlot? {
-        var chunkStart = phaseAStart
+        var chunkStart = phase1Start
         while (chunkStart < maxDurationEnd) {
-            val chunkEnd = minOf(chunkStart.plus(phaseAChunkDuration), maxDurationEnd)
+            val chunkEnd = minOf(chunkStart.plus(phase1ChunkDuration), maxDurationEnd)
 
             val occupancy = windowSlotCounterRepository.readOccupancy(chunkStart, chunkEnd)
             val windows = generateWindowsInRange(chunkStart, chunkEnd)
-            val picked = pickProximityWeightedRandom(windows, occupancy, softMaxPerWindow)
+            val picked = pickProximityWeightedRandom(windows, occupancy, softMax)
 
             if (picked != null) {
-                val result = tryClaimWithHardCapRetry(
+                val result = tryClaimWithRetry(
                     eventId, requestedTime, picked, chunkStart, chunkEnd,
-                    softMaxPerWindow, AllocationStatus.NORMAL
+                    softMax, AllocationStatus.NORMAL
                 )
                 if (result != null) return result
             }
@@ -128,30 +136,33 @@ class SlotAssignmentServiceV5(
         return null
     }
 
-    private fun phaseB(
+    /**
+     * Phase 2: overflow within maxDuration using maxSlotsPerWindow threshold.
+     * Fresh occupancy read from requestedTime (not skipTo) — windows between
+     * softMax and maxSlotsPerWindow may exist before the skip pointer.
+     */
+    private fun phase2(
         eventId: String,
         requestedTime: Instant,
         maxDurationEnd: Instant
     ): AssignedSlot? {
-        // Fresh occupancy read from requestedTime (not skipTo) — windows between
-        // softMax and hardMax may exist before the skip pointer.
         val freshOccupancy = windowSlotCounterRepository.readOccupancy(requestedTime, maxDurationEnd)
         val windows = generateWindowsInRange(requestedTime, maxDurationEnd)
-        val picked = pickProximityWeightedRandom(windows, freshOccupancy, hardMaxPerWindow)
+        val picked = pickProximityWeightedRandom(windows, freshOccupancy, maxSlotsPerWindow)
             ?: return null
 
-        val result = tryClaimWithHardCapRetry(
+        val result = tryClaimWithRetry(
             eventId, requestedTime, picked, requestedTime, maxDurationEnd,
-            hardMaxPerWindow, AllocationStatus.SOFT_MAX_EXCEEDED
+            maxSlotsPerWindow, AllocationStatus.SOFT_MAX_EXCEEDED
         )
         return result
     }
 
     /**
-     * Phase C: extend beyond maxDuration in chunks, each with its own fresh
-     * occupancy read. Only reached when Phases A and B are exhausted.
+     * Phase 3: extend beyond maxDuration in chunks, each with its own fresh
+     * occupancy read. Only reached when Phases 1 and 2 are exhausted.
      */
-    private fun phaseC(
+    private fun phase3(
         eventId: String,
         requestedTime: Instant,
         maxDurationEnd: Instant
@@ -162,12 +173,12 @@ class SlotAssignmentServiceV5(
 
             val occupancy = windowSlotCounterRepository.readOccupancy(extStart, extEnd)
             val windows = generateWindowsInRange(extStart, extEnd)
-            val picked = pickProximityWeightedRandom(windows, occupancy, softMaxPerWindow)
+            val picked = pickProximityWeightedRandom(windows, occupancy, softMax)
 
             if (picked != null) {
-                val result = tryClaimWithHardCapRetry(
+                val result = tryClaimWithRetry(
                     eventId, requestedTime, picked, extStart, extEnd,
-                    softMaxPerWindow, AllocationStatus.MAX_DURATION_EXCEEDED
+                    softMax, AllocationStatus.MAX_DURATION_EXCEEDED
                 )
                 if (result != null) return result
             }
@@ -179,13 +190,13 @@ class SlotAssignmentServiceV5(
         return null
     }
 
-    // ---- Claim + hard-cap retry ----
+    // ---- Claim + retry ----
 
     /**
-     * Attempts to claim the picked window. If hard cap is hit (transaction rolled back),
-     * re-reads occupancy and retries with a different window up to [maxHardCapRetries] times.
+     * Attempts to claim the picked window. If maxSlots is exceeded (transaction rolled back),
+     * re-reads occupancy and retries with a different window up to [maxClaimRetries] times.
      */
-    private fun tryClaimWithHardCapRetry(
+    private fun tryClaimWithRetry(
         eventId: String,
         requestedTime: Instant,
         initialPick: Instant,
@@ -200,8 +211,8 @@ class SlotAssignmentServiceV5(
         val result = claimSlotAndUpdateCounter(eventId, requestedTime, initialPick, scheduledTime, status)
         if (result != null) return result
 
-        // Hard cap hit — retry with fresh occupancy
-        for (retry in 1..maxHardCapRetries) {
+        // maxSlots exceeded — retry with fresh occupancy
+        for (retry in 1..maxClaimRetries) {
             val freshOccupancy = windowSlotCounterRepository.readOccupancy(rangeStart, rangeEnd)
             val windows = generateWindowsInRange(rangeStart, rangeEnd)
             val retryPick = pickProximityWeightedRandom(windows, freshOccupancy, threshold)
@@ -217,7 +228,7 @@ class SlotAssignmentServiceV5(
 
     /**
      * Insert event slot + upsert counter in a single short-lived transaction.
-     * Returns null if hard cap is breached (transaction rolled back).
+     * Returns null if maxSlots is exceeded (transaction rolled back).
      * Handles duplicate EVENT_ID via catch (idempotency: re-reads existing slot).
      */
     private fun claimSlotAndUpdateCounter(
@@ -242,8 +253,8 @@ class SlotAssignmentServiceV5(
                 upsertCounterReturningCount(windowStart)
             }
 
-            if (newCount > hardMaxPerWindow) {
-                // Hard cap breached — rollback everything (slot INSERT + counter increment)
+            if (newCount > maxSlotsPerWindow) {
+                // maxSlots exceeded — rollback everything (slot INSERT + counter increment)
                 rollback()
                 return@transaction null
             }

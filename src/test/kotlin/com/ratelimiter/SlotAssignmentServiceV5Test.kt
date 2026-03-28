@@ -17,6 +17,7 @@ import org.jetbrains.exposed.sql.deleteAll
 import org.jetbrains.exposed.sql.insert
 import org.jetbrains.exposed.sql.selectAll
 import org.jetbrains.exposed.sql.transactions.transaction
+import org.jetbrains.exposed.sql.update
 import org.junit.jupiter.api.Assertions.*
 import org.junit.jupiter.api.BeforeEach
 import org.junit.jupiter.api.Test
@@ -33,12 +34,13 @@ import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * Tests for V5 slot assignment with DB-backed skip pointer,
- * three-phase allocation (A/B/C), proximity-weighted random selection,
- * hard-cap enforcement, and per-request maxDuration.
+ * three-phase allocation (1/2/3), proximity-weighted random selection,
+ * maxSlots enforcement, and per-request maxDuration.
  *
- * Test profile: windowSize=4s, softMaxPerWindow=4, hardMaxPerWindow=6,
+ * Test profile: windowSize=4s, maxSlotsPerWindow=4,
+ *               softMaxPercent=75 (softMax=3),
  *               defaultMaxDurationHours=1, extensionWindows=4,
- *               maxExtensionsBeyond=3, maxHardCapRetries=2.
+ *               maxExtensionsBeyond=3, maxClaimRetries=2.
  */
 @QuarkusTest
 @QuarkusTestResource(OracleTestResource::class)
@@ -88,18 +90,27 @@ class SlotAssignmentServiceV5Test {
 
     private fun seedCounter(windowStart: Instant, count: Int) {
         transaction {
-            WindowCounterTable.insert {
-                it[WindowCounterTable.windowStart] = windowStart
-                it[slotCount] = count
-                it[createdAt] = Instant.now().truncatedTo(ChronoUnit.MILLIS)
+            val exists = WindowCounterTable.selectAll()
+                .where { WindowCounterTable.windowStart eq windowStart }
+                .firstOrNull()
+            if (exists != null) {
+                WindowCounterTable.update({ WindowCounterTable.windowStart eq windowStart }) {
+                    it[slotCount] = count
+                }
+            } else {
+                WindowCounterTable.insert {
+                    it[WindowCounterTable.windowStart] = windowStart
+                    it[slotCount] = count
+                    it[createdAt] = Instant.now().truncatedTo(ChronoUnit.MILLIS)
+                }
             }
         }
     }
 
-    // ==================== Phase A: Normal allocation ====================
+    // ==================== Phase 1: Normal allocation ====================
 
     @Test
-    fun `phase A - empty table first request assigns slot within maxDuration`() {
+    fun `phase 1 - empty table first request assigns slot within maxDuration`() {
         val requestedTime = Instant.parse("2025-06-01T14:00:00Z")
 
         val slot = service.assignSlot("evt-1", requestedTime)
@@ -116,7 +127,7 @@ class SlotAssignmentServiceV5Test {
     }
 
     @Test
-    fun `phase A - different requestedTime gets independent search range`() {
+    fun `phase 1 - different requestedTime gets independent search range`() {
         val time1 = Instant.parse("2025-06-01T14:00:00Z")
         val time2 = Instant.parse("2025-06-01T13:00:00Z")
 
@@ -132,16 +143,16 @@ class SlotAssignmentServiceV5Test {
     }
 
     @Test
-    fun `phase A - enough available windows skips extension`() {
+    fun `phase 1 - enough available windows skips extension`() {
         val requestedTime = Instant.parse("2025-06-01T14:00:00Z")
         val w0 = requestedTime
         val w1 = requestedTime.plusSeconds(4)
         val w2 = requestedTime.plusSeconds(8)
 
-        // W+0 full, W+1 available, W+2 full, W+3 available
-        seedCounter(w0, 4)
+        // W+0 full (at softMax=3), W+1 available, W+2 full, W+3 available
+        seedCounter(w0, 3)
         seedCounter(w1, 1)
-        seedCounter(w2, 4)
+        seedCounter(w2, 3)
 
         val slot = service.assignSlot("evt-ne1", requestedTime)
 
@@ -151,7 +162,7 @@ class SlotAssignmentServiceV5Test {
     }
 
     @Test
-    fun `phase A - proximity weighting prefers closer windows`() {
+    fun `phase 1 - proximity weighting prefers closer windows`() {
         val requestedTime = Instant.parse("2025-06-01T14:00:00Z")
         val w0 = requestedTime
         val w1 = requestedTime.plusSeconds(4)
@@ -179,10 +190,10 @@ class SlotAssignmentServiceV5Test {
         assertTrue(slotsByWindow.size > 1, "Should span multiple windows")
     }
 
-    // ==================== Phase B: Overflow within maxDuration ====================
+    // ==================== Phase 2: Overflow within maxDuration ====================
 
     @Test
-    fun `phase B - all windows at softMax returns SOFT_MAX_EXCEEDED`() {
+    fun `phase 2 - all windows at softMax returns SOFT_MAX_EXCEEDED`() {
         val requestedTime = Instant.parse("2025-06-01T14:00:00Z")
 
         // Fill all windows within default maxDuration (1h = 900 windows at 4s)
@@ -190,34 +201,34 @@ class SlotAssignmentServiceV5Test {
         val maxDuration = Duration.ofSeconds(16) // 4 windows
         for (w in 0 until 4) {
             val ws = requestedTime.plusSeconds(w * 4L)
-            for (s in 0 until 4) {
+            for (s in 0 until 3) {
                 seedSlot("pre-b-w${w}s${s}", requestedTime, ws, ws.plusMillis(s * 500L + 100))
             }
-            seedCounter(ws, 4) // at softMax
+            seedCounter(ws, 3) // at softMax
         }
 
         val slot = service.assignSlot("evt-overflow", requestedTime, maxDuration)
 
         assertEquals("evt-overflow", slot.eventId)
         assertEquals(AllocationStatus.SOFT_MAX_EXCEEDED, slot.allocationStatus)
-        // Should still be within maxDuration (windows have room up to hardMax=6)
+        // Should still be within maxDuration (windows have room up to maxSlots=4)
         assertTrue(slot.scheduledTime.isBefore(requestedTime.plus(maxDuration)))
     }
 
-    // ==================== Phase C: Extension beyond maxDuration ====================
+    // ==================== Phase 3: Extension beyond maxDuration ====================
 
     @Test
-    fun `phase C - all windows at hardMax returns MAX_DURATION_EXCEEDED`() {
+    fun `phase 3 - all windows at maxSlots returns MAX_DURATION_EXCEEDED`() {
         val requestedTime = Instant.parse("2025-06-01T14:00:00Z")
         val maxDuration = Duration.ofSeconds(16) // 4 windows
 
-        // Fill all windows within maxDuration to hardMax (6)
+        // Fill all windows within maxDuration to maxSlots (4)
         for (w in 0 until 4) {
             val ws = requestedTime.plusSeconds(w * 4L)
-            for (s in 0 until 6) {
+            for (s in 0 until 4) {
                 seedSlot("pre-c-w${w}s${s}", requestedTime, ws, ws.plusMillis(s * 500L + 100))
             }
-            seedCounter(ws, 6) // at hardMax
+            seedCounter(ws, 4) // at maxSlots
         }
 
         val slot = service.assignSlot("evt-extend", requestedTime, maxDuration)
@@ -237,21 +248,21 @@ class SlotAssignmentServiceV5Test {
     fun `different maxDuration per request affects phase transitions`() {
         val requestedTime = Instant.parse("2025-06-01T14:00:00Z")
 
-        // Fill windows 0-3 (first 16s) to softMax
+        // Fill windows 0-3 (first 16s) to softMax (3)
         for (w in 0 until 4) {
             val ws = requestedTime.plusSeconds(w * 4L)
-            for (s in 0 until 4) {
+            for (s in 0 until 3) {
                 seedSlot("pre-md-w${w}s${s}", requestedTime, ws, ws.plusMillis(s * 500L + 100))
             }
-            seedCounter(ws, 4)
+            seedCounter(ws, 3)
         }
         // Windows 4+ are empty
 
-        // Request with maxDuration=16s — all windows in range at softMax → Phase B
+        // Request with maxDuration=16s — all windows in range at softMax → Phase 2
         val shortSlot = service.assignSlot("evt-short", requestedTime, Duration.ofSeconds(16))
         assertEquals(AllocationStatus.SOFT_MAX_EXCEEDED, shortSlot.allocationStatus)
 
-        // Request with maxDuration=32s — windows 4-7 are available → Phase A
+        // Request with maxDuration=32s — windows 4-7 are available → Phase 1
         val longSlot = service.assignSlot("evt-long", requestedTime, Duration.ofSeconds(32))
         assertEquals(AllocationStatus.NORMAL, longSlot.allocationStatus)
     }
@@ -263,13 +274,13 @@ class SlotAssignmentServiceV5Test {
         val requestedTime = Instant.parse("2025-06-01T14:00:00Z")
         val maxDuration = Duration.ofSeconds(16) // 4 windows
 
-        // Fill all windows in maxDuration to softMax
+        // Fill all windows in maxDuration to softMax (3)
         for (w in 0 until 4) {
             val ws = requestedTime.plusSeconds(w * 4L)
-            seedCounter(ws, 4)
+            seedCounter(ws, 3)
         }
 
-        // This will exhaust Phase A and advance skip pointer to maxDurationEnd
+        // This will exhaust Phase 1 and advance skip pointer to maxDurationEnd
         val slot1 = service.assignSlot("evt-sp1", requestedTime, maxDuration)
         assertEquals(AllocationStatus.SOFT_MAX_EXCEEDED, slot1.allocationStatus)
 
@@ -477,10 +488,10 @@ class SlotAssignmentServiceV5Test {
         val requestedTime = Instant.parse("2025-06-01T14:00:00Z")
         val maxDuration = Duration.ofSeconds(16) // 4 windows
 
-        // Fill all windows in maxDuration + all extension ranges to hardMax
+        // Fill all windows in maxDuration + all extension ranges to maxSlots
         // maxDuration: 4 windows, extensions: 3 * 4 = 12 windows → total 16 windows
         for (w in 0 until 16) {
-            seedCounter(requestedTime.plusSeconds(w * 4L), 6) // hardMax
+            seedCounter(requestedTime.plusSeconds(w * 4L), 4) // maxSlots
         }
 
         assertThrows(SlotAssignmentException::class.java) {
@@ -495,12 +506,12 @@ class SlotAssignmentServiceV5Test {
         val time1 = Instant.parse("2025-06-01T14:00:00Z")
         val time2 = Instant.parse("2025-06-01T14:00:08Z") // W+2 of time1's range
 
-        // Fill W+2 (14:00:08) to softMax from time1
+        // Fill W+2 (14:00:08) to softMax (3) from time1
         val w2 = Instant.parse("2025-06-01T14:00:08Z")
-        for (s in 0 until 4) {
+        for (s in 0 until 3) {
             seedSlot("pre-t1-w2s$s", time1, w2, w2.plusMillis(s * 500L + 100))
         }
-        seedCounter(w2, 4)
+        seedCounter(w2, 3)
 
         // time2 starts at W+2, but it's full. Should pick a different window.
         val slot = service.assignSlot("evt-shared1", time2)
@@ -565,39 +576,39 @@ class SlotAssignmentServiceV5Test {
         assertTrue(nearSlot.scheduledTime.isBefore(nearTerm.plus(Duration.ofHours(1))))
     }
 
-    // ==================== Phase B scans from requestedTime, not skipTo ====================
+    // ==================== Phase 2 scans from requestedTime, not skipTo ====================
 
     @Test
-    fun `phase B scans from requestedTime even when skip pointer is advanced`() {
+    fun `phase 2 scans from requestedTime even when skip pointer is advanced`() {
         val requestedTime = Instant.parse("2025-06-01T14:00:00Z")
         val maxDuration = Duration.ofSeconds(16) // 4 windows
 
         // Advance skip pointer past maxDurationEnd
         skipPointerRepository.advanceSkipTo(requestedTime, requestedTime.plusSeconds(20))
 
-        // Seed windows 0-3 at softMax (Phase A will find nothing since skipTo > maxDurationEnd)
-        // but Phase B scans from requestedTime and finds room up to hardMax
+        // Seed windows 0-3 at softMax (Phase 1 will find nothing since skipTo > maxDurationEnd)
+        // but Phase 2 scans from requestedTime and finds room up to maxSlots (4)
         for (w in 0 until 4) {
-            seedCounter(requestedTime.plusSeconds(w * 4L), 4) // at softMax, below hardMax
+            seedCounter(requestedTime.plusSeconds(w * 4L), 3) // at softMax, below maxSlots
         }
 
         val slot = service.assignSlot("evt-phaseb-scan", requestedTime, maxDuration)
 
-        // Phase A should fail (skip pointer past maxDuration), Phase B should succeed
+        // Phase 1 should fail (skip pointer past maxDuration), Phase 2 should succeed
         assertEquals(AllocationStatus.SOFT_MAX_EXCEEDED, slot.allocationStatus)
         assertTrue(slot.scheduledTime.isBefore(requestedTime.plus(maxDuration)))
     }
 
-    // ==================== Phase A chunking ====================
+    // ==================== Phase 1 chunking ====================
 
     @Test
-    fun `phase A chunking - first chunk full, slot lands in second chunk`() {
+    fun `phase 1 chunking - first chunk full, slot lands in second chunk`() {
         val requestedTime = Instant.parse("2025-06-01T14:00:00Z")
         // Test profile: phaseAChunkSeconds=16 → 4 windows per chunk
 
-        // Fill first chunk (W+0..W+3) to softMax
+        // Fill first chunk (W+0..W+3) to softMax (3)
         for (w in 0 until 4) {
-            seedCounter(requestedTime.plusSeconds(w * 4L), 4) // softMax
+            seedCounter(requestedTime.plusSeconds(w * 4L), 3) // softMax
         }
         // Second chunk (W+4..W+7) is empty
 
@@ -618,9 +629,9 @@ class SlotAssignmentServiceV5Test {
     fun `skip pointer advances per chunk so next request skips exhausted chunks`() {
         val requestedTime = Instant.parse("2025-06-01T14:00:00Z")
 
-        // Fill first chunk (W+0..W+3) to softMax
+        // Fill first chunk (W+0..W+3) to softMax (3)
         for (w in 0 until 4) {
-            seedCounter(requestedTime.plusSeconds(w * 4L), 4)
+            seedCounter(requestedTime.plusSeconds(w * 4L), 3)
         }
 
         // First request: exhausts chunk 1, lands in chunk 2
@@ -636,7 +647,7 @@ class SlotAssignmentServiceV5Test {
 
         // Fill chunk 2 to softMax (now both chunks exhausted)
         for (w in 4 until 8) {
-            seedCounter(requestedTime.plusSeconds(w * 4L), 4)
+            seedCounter(requestedTime.plusSeconds(w * 4L), 3)
         }
 
         // Second request: should start from chunk 2 (skip pointer), exhaust it, land in chunk 3
@@ -649,21 +660,21 @@ class SlotAssignmentServiceV5Test {
         )
     }
 
-    // ==================== Hard cap rollback ====================
+    // ==================== maxSlots rollback ====================
 
     @Test
-    fun `hard cap triggers rollback and retry in different window`() {
+    fun `maxSlots exceeded triggers rollback and retry in different window`() {
         val requestedTime = Instant.parse("2025-06-01T14:00:00Z")
 
-        // Set W+0 to hardMax — any claim should rollback and retry on W+1+
-        seedCounter(requestedTime, 6) // hardMax in test profile
+        // Set W+0 to maxSlots — any claim should rollback and retry on W+1+
+        seedCounter(requestedTime, 4) // maxSlots in test profile
         // W+1..W+3 are empty — plenty of room
 
         val slot = service.assignSlot("evt-hc", requestedTime)
 
         assertEquals(AllocationStatus.NORMAL, slot.allocationStatus)
 
-        // Verify the slot did NOT land in W+0 (hardMax)
+        // Verify the slot did NOT land in W+0 (at maxSlots)
         val slotWindowStart = transaction {
             RateLimitEventSlotTable.selectAll()
                 .where { RateLimitEventSlotTable.eventId eq "evt-hc" }
@@ -671,7 +682,7 @@ class SlotAssignmentServiceV5Test {
         }
         assertNotEquals(
             requestedTime, slotWindowStart,
-            "Slot should not be in W+0 (at hardMax), but was"
+            "Slot should not be in W+0 (at maxSlots), but was"
         )
 
         // W+0's counter should still be 6 (rollback undid the increment)
@@ -680,19 +691,19 @@ class SlotAssignmentServiceV5Test {
                 .where { WindowCounterTable.windowStart eq requestedTime }
                 .first()[WindowCounterTable.slotCount]
         }
-        assertEquals(6, w0Count, "W+0 counter should remain at hardMax (rollback)")
+        assertEquals(4, w0Count, "W+0 counter should remain at maxSlots (rollback undid increment)")
     }
 
-    // ==================== Phase C advances skip pointer ====================
+    // ==================== Phase 3 advances skip pointer ====================
 
     @Test
-    fun `phase C advances skip pointer into extension range`() {
+    fun `phase 3 advances skip pointer into extension range`() {
         val requestedTime = Instant.parse("2025-06-01T14:00:00Z")
         val maxDuration = Duration.ofSeconds(16) // 4 windows
 
-        // Fill all windows in maxDuration to hardMax (forces Phase C)
+        // Fill all windows in maxDuration to maxSlots (4, forces Phase 3)
         for (w in 0 until 4) {
-            seedCounter(requestedTime.plusSeconds(w * 4L), 6)
+            seedCounter(requestedTime.plusSeconds(w * 4L), 4)
         }
 
         val slot = service.assignSlot("evt-pc-skip", requestedTime, maxDuration)
@@ -703,7 +714,7 @@ class SlotAssignmentServiceV5Test {
         assertNotNull(skipTo)
         assertTrue(
             !skipTo!!.isBefore(requestedTime.plus(maxDuration)),
-            "Skip pointer should be at or beyond maxDurationEnd after Phase C"
+            "Skip pointer should be at or beyond maxDurationEnd after Phase 3"
         )
     }
 
@@ -729,28 +740,28 @@ class SlotAssignmentServiceV5Test {
     // ==================== Full three-phase transition in one request ====================
 
     @Test
-    fun `request transitions through Phase A to Phase B to Phase C`() {
+    fun `request transitions through Phase 1 to Phase 2 to Phase 3`() {
         val requestedTime = Instant.parse("2025-06-01T14:00:00Z")
         val maxDuration = Duration.ofSeconds(16)
 
-        // Phase A windows (0-3): at softMax → Phase A fails
-        // Phase B windows (0-3): at hardMax → Phase B fails
-        // Phase C windows (4+): empty → Phase C succeeds
+        // Phase 1 windows (0-3): at softMax → Phase 1 fails
+        // Phase 2 windows (0-3): at maxSlots → Phase 2 fails
+        // Phase 3 windows (4+): empty → Phase 3 succeeds
         for (w in 0 until 4) {
             val ws = requestedTime.plusSeconds(w * 4L)
-            for (s in 0 until 6) {
+            for (s in 0 until 4) {
                 seedSlot("pre-3p-w${w}s${s}", requestedTime, ws, ws.plusMillis(s * 500L + 100))
             }
-            seedCounter(ws, 6) // at hardMax
+            seedCounter(ws, 4) // at maxSlots
         }
 
         val slot = service.assignSlot("evt-3phase", requestedTime, maxDuration)
 
-        // Phase A and B both exhausted → must be Phase C
+        // Phase 1 and B both exhausted → must be Phase 3
         assertEquals(AllocationStatus.MAX_DURATION_EXCEEDED, slot.allocationStatus)
         assertFalse(
             slot.scheduledTime.isBefore(requestedTime.plus(maxDuration)),
-            "Slot should be beyond maxDuration (Phase C)"
+            "Slot should be beyond maxDuration (Phase 3)"
         )
     }
 
