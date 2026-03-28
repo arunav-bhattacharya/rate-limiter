@@ -8,7 +8,6 @@ import org.jetbrains.exposed.sql.Transaction
 import org.jetbrains.exposed.sql.transactions.transaction
 import java.time.Duration
 import java.time.Instant
-import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ThreadLocalRandom
 
 /**
@@ -19,11 +18,11 @@ import java.util.concurrent.ThreadLocalRandom
  * Relies on [WindowPreProvisioningScheduler] to have pre-provisioned window
  * counter rows in advance. The hot path is:
  * 1. Idempotency check
- * 2. Compute scan upper bound from max assigned window + headroom
- * 3. Find+lock+claim within that range
+ * 2. Lightweight read to find first available window (no lock)
+ * 3. Lock+claim within a narrow range around the hint
  *
- * The scan upper bound is derived from actual slot assignments in RL_EVENT_SLOT_DTL:
- * MAX(WNDW_STRT_TS) WHERE REQ_TS = requestedTime, plus [headroomWindows] of headroom.
+ * The lightweight read avoids scanning through full windows with FOR UPDATE
+ * SKIP LOCKED — it jumps directly to the first window with capacity.
  *
  * DB work is split across multiple short-lived transactions to minimize
  * connection hold time and reduce pool contention under high TPS.
@@ -35,18 +34,20 @@ import java.util.concurrent.ThreadLocalRandom
 class SlotAssignmentServiceV3(
     private val eventSlotRepository: EventSlotRepository,
     private val windowSlotCounterRepository: WindowSlotCounterRepository,
-    @param:ConfigProperty(name = "rate-limiter.max-per-window", defaultValue = "100")
+    @param:ConfigProperty(name = "rate-limiter.max-per-window", defaultValue = "900")
     private val maxPerWindow: Int,
     @param:ConfigProperty(name = "rate-limiter.window-size-seconds", defaultValue = "30")
     private val windowSizeSeconds: Long,
-    @param:ConfigProperty(name = "rate-limiter.headroom-windows", defaultValue = "100")
-    private val headroomWindows: Long
+    @param:ConfigProperty(name = "rate-limiter.headroom-windows", defaultValue = "600")
+    private val headroomWindows: Long,
+    @param:ConfigProperty(name = "rate-limiter.lock-headroom-windows", defaultValue = "50")
+    private val lockHeadroomWindows: Long,
+    @param:ConfigProperty(name = "rate-limiter.max-retry-iterations", defaultValue = "4")
+    private val maxRetryIterations: Int
 ) {
     private val windowSizeMs: Long = windowSizeSeconds * 1000
     private val windowSize: Duration = Duration.ofSeconds(windowSizeSeconds)
-
-    /** JVM-level cache: requestedTime → max WNDW_STRT_TS with actual slot assignments. */
-    private val maxWindowCache = ConcurrentHashMap<Instant, Instant>()
+    private val lockHeadroom: Duration = windowSize.multipliedBy(lockHeadroomWindows)
 
     companion object {
         const val STATIC_CONFIG_ID = "STATIC"
@@ -60,31 +61,31 @@ class SlotAssignmentServiceV3(
             return existing
         }
 
-        // Compute scan upper bound: cache-first, fall through to DB on miss.
-        val maxWindowStartTime = maxWindowCache[requestedTime]
-            ?: eventSlotRepository.fetchMaxWindowStartForRequestedTime(requestedTime)
-                ?.also { maxWindowCache[requestedTime] = it }
-        val scanEndTime = (maxWindowStartTime ?: requestedTime).plus(windowSize.multipliedBy(headroomWindows))
+        var searchEnd = requestedTime.plus(windowSize.multipliedBy(headroomWindows))
 
-        // Single find+lock+claim within the bounded range.
-        val result = lockWindowAndClaimSlot(eventId, requestedTime, scanEndTime, requestedTime)
-        if (result != null) return result
+        // Bounded retry loop: hint read → lock+claim → extend search range on failure.
+        for (iteration in 0..maxRetryIterations) {
+            // Hint read: find first available window (no lock, own transaction).
+            val hint = windowSlotCounterRepository
+                .findFirstAvailableWindow(requestedTime, searchEnd, maxPerWindow)
+                ?: break // All windows in range are full
 
-        // Scan exhausted — refresh from DB in case cache was stale, retry once.
-        val dbMaxWindowStartTime = eventSlotRepository.fetchMaxWindowStartForRequestedTime(requestedTime)
-        if (dbMaxWindowStartTime != null) {
-            maxWindowCache.merge(requestedTime, dbMaxWindowStartTime) { oldValue, newValue -> maxOf(oldValue, newValue) }
-            val refreshedEndTime = dbMaxWindowStartTime.plus(windowSize.multipliedBy(headroomWindows))
-            if (refreshedEndTime > scanEndTime) {
-                val retry = lockWindowAndClaimSlot(eventId, requestedTime, refreshedEndTime, requestedTime)
-                if (retry != null) return retry
+            // Lock + claim within narrow range around the hint.
+            val lockEnd = minOf(hint.plus(lockHeadroom), searchEnd)
+            val result = lockWindowAndClaimSlot(eventId, hint, lockEnd, requestedTime)
+            if (result != null) return result
+
+            // Narrow range exhausted under contention — extend search range.
+            val maxAssigned = eventSlotRepository.fetchMaxWindowStartTime(requestedTime)
+            if (maxAssigned != null) {
+                searchEnd = maxOf(searchEnd, maxAssigned.plus(windowSize.multipliedBy(headroomWindows)))
             }
         }
 
         throw SlotAssignmentException(
             eventId = eventId,
             windowsSearched = headroomWindows,
-            message = "No available window for event $eventId within headroom of $headroomWindows windows"
+            message = "No available window for event $eventId after $maxRetryIterations retries"
         )
     }
 
@@ -106,9 +107,7 @@ class SlotAssignmentServiceV3(
             } ?: return@transaction null
 
             val jitterMs = ThreadLocalRandom.current().nextLong(0, windowSizeMs)
-            claimSlot(eventId, lockedWindow, jitterMs, requestedTime).also {
-                maxWindowCache.merge(requestedTime, lockedWindow) { oldValue, newValue -> maxOf(oldValue, newValue) }
-            }
+            claimSlot(eventId, lockedWindow, jitterMs, requestedTime)
         }
     }
 

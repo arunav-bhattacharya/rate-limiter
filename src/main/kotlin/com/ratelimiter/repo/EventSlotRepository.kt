@@ -6,13 +6,12 @@ import com.ratelimiter.slot.AssignedSlot
 import jakarta.enterprise.context.ApplicationScoped
 import org.jetbrains.exposed.exceptions.ExposedSQLException
 import org.jetbrains.exposed.sql.Transaction
-import org.jetbrains.exposed.sql.IntegerColumnType
+import org.jetbrains.exposed.sql.count
 import org.jetbrains.exposed.sql.insert
-import org.jetbrains.exposed.sql.javatime.JavaInstantColumnType
 import org.jetbrains.exposed.sql.selectAll
-import org.jetbrains.exposed.sql.statements.StatementType
 import org.jetbrains.exposed.sql.transactions.transaction
 import org.jetbrains.exposed.sql.SortOrder.DESC
+import org.jetbrains.exposed.sql.and
 import java.time.Duration
 import java.time.Instant
 import java.time.temporal.ChronoUnit
@@ -114,7 +113,7 @@ class EventSlotRepository {
      * Returns the furthest window that has actual slot assignments for a given requestedTime.
      * Used by V3 and V4 to compute the scan upper bound (maxUsed + headroom).
      */
-    fun fetchMaxWindowStartForRequestedTime(requestedTime: Instant): Instant? {
+    fun fetchMaxWindowStartTime(requestedTime: Instant): Instant? {
         return transaction {
             RateLimitEventSlotTable
                 .select(RateLimitEventSlotTable.windowStart)
@@ -129,41 +128,23 @@ class EventSlotRepository {
     // ==================== V4 methods ====================
 
     /**
-     * Find the earliest window with available capacity for the given requestedTime.
-     * Used by V4 to jump directly to the first window that can accept a slot.
+     * Full windows (slot count >= [softMax]) in [rangeStart, rangeEnd).
+     * Counts globally across all requestedTimes (shared window capacity).
+     * Narrow index range scan + GROUP BY — bounded by the adaptive scan range.
      */
-    fun Transaction.findFirstAvailableWindow(requestedTime: Instant, maxCapacity: Int): Instant? {
-        val sql = """
-            SELECT WNDW_STRT_TS
-            FROM RL_EVENT_SLOT_DTL
-            WHERE REQ_TS = ?
-            GROUP BY WNDW_STRT_TS
-            HAVING COUNT(*) < ?
-            ORDER BY WNDW_STRT_TS ASC
-            FETCH FIRST 1 ROW ONLY
-        """.trimIndent()
-
-        return exec(
-            sql,
-            listOf(
-                Pair(JavaInstantColumnType(), requestedTime),
-                Pair(IntegerColumnType(), maxCapacity)
-            ),
-            StatementType.SELECT
-        ) { rs ->
-            if (rs.next()) rs.getTimestamp("WNDW_STRT_TS").toInstant()
-            else null
+    fun findFullWindowsInRange(rangeStart: Instant, rangeEnd: Instant, softMax: Int): Set<Instant> {
+        val slotCount = RateLimitEventSlotTable.slotId.count()
+        return transaction {
+            RateLimitEventSlotTable
+                .select(RateLimitEventSlotTable.windowStart)
+                .where {
+                    (RateLimitEventSlotTable.windowStart greaterEq rangeStart) and
+                            (RateLimitEventSlotTable.windowStart less rangeEnd)
+                }
+                .groupBy(RateLimitEventSlotTable.windowStart)
+                .having { slotCount greaterEq softMax.toLong() }
+                .mapTo(mutableSetOf()) { it[RateLimitEventSlotTable.windowStart] }
         }
-    }
-
-    /**
-     * Count slots assigned in a specific window.
-     */
-    fun Transaction.countSlotsInWindow(windowStart: Instant): Long {
-        return RateLimitEventSlotTable
-            .selectAll()
-            .where { RateLimitEventSlotTable.windowStart eq windowStart }
-            .count()
     }
 
     /**
@@ -171,23 +152,25 @@ class EventSlotRepository {
      * On duplicate EVENT_ID, returns the existing slot (idempotent).
      * Returns null only if the insert fails for a non-duplicate reason (shouldn't happen).
      */
-    fun Transaction.insertAndReturnSlot(
+    fun insertAndReturnSlot(
         eventId: String,
         windowStart: Instant,
         scheduledTime: Instant,
         configId: String,
         requestedTime: Instant
     ): AssignedSlot {
-        val inserted = insertEventSlot(eventId, requestedTime, windowStart, scheduledTime, configId)
+        return transaction {
+            val inserted = insertEventSlot(eventId, requestedTime, windowStart, scheduledTime, configId)
 
-        if (!inserted) {
-            return queryAssignedSlot(eventId)
-                ?: error("Failed to re-read slot for eventId=$eventId after duplicate key")
-        }
+            if (!inserted) {
+                return@transaction queryAssignedSlot(eventId)
+                    ?: error("Failed to re-read slot for eventId=$eventId after duplicate key")
+            }
 
-        val delay = Duration.between(requestedTime, scheduledTime).let { d ->
-            if (d.isNegative) Duration.ZERO else d
+            val delay = Duration.between(requestedTime, scheduledTime).let { d ->
+                if (d.isNegative) Duration.ZERO else d
+            }
+            AssignedSlot(eventId = eventId, scheduledTime = scheduledTime, delay = delay)
         }
-        return AssignedSlot(eventId = eventId, scheduledTime = scheduledTime, delay = delay)
     }
 }

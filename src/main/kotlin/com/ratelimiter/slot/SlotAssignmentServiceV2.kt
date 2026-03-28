@@ -34,7 +34,7 @@ class SlotAssignmentServiceV2 @Inject constructor(
     }
 
     private fun assignNewSlot(eventId: String, requestedTime: Instant): AssignedSlot {
-        val maxUsed = eventSlotRepository.fetchMaxWindowStartForRequestedTime(requestedTime)
+        val maxUsed = eventSlotRepository.fetchMaxWindowStartTime(requestedTime)
         val scanEnd = (maxUsed ?: requestedTime).plus(windowSize.multipliedBy(headroomWindows))
 
         return transaction {

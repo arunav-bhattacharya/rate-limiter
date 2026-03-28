@@ -16,6 +16,15 @@ object WindowCounterTable : Table("RL_WNDW_CT") {
     }
 }
 
+/** DB-backed skip pointer for V5 multi-pod coordination. */
+object SkipPointerTable : Table("RL_SKIP_PTR") {
+    val requestedTime = timestamp("REQ_TS")
+    val skipTo = timestamp("SKIP_TO_TS")
+    val updatedAt = timestamp("UPD_TS")
+
+    override val primaryKey = PrimaryKey(requestedTime)
+}
+
 /** Immutable slot assignment record. */
 object RateLimitEventSlotTable : Table("RL_EVENT_SLOT_DTL") {
     val slotId = varchar("WNDW_SLOT_ID", 50)

@@ -127,18 +127,38 @@ quarkus:
 
 rate-limiter:
   window-size-seconds: 30
-  max-per-window: 100
-  headroom-windows: 100
-  lock-query-timeout-seconds: 2
-  pre-provision-days: 30
-  pre-provision-batch-size: 5000
+  max-per-window: 900
+  headroom-windows: 600
+  lock-headroom-windows: 50
+  lock-query-timeout-seconds: 5
+  max-retry-iterations: 4
+  pre-provision-days: 60
+  pre-provision-batch-size: 10000
+  v5:
+    soft-max-per-window: 870
+    hard-max-per-window: 990
+    default-max-duration-hours: 8
+    phase-a-chunk-seconds: 900
+    extension-windows: 40
+    max-extensions-beyond: 5
+    max-hard-cap-retries: 3
 
 # Test profile — longer timeouts for Oracle XE under ARM emulation
 "%test":
   rate-limiter:
     window-size-seconds: 4
-    max-per-window: 2
+    max-per-window: 4
+    lock-headroom-windows: 5
     lock-query-timeout-seconds: 30
+    max-retry-iterations: 3
+    v5:
+      soft-max-per-window: 4
+      hard-max-per-window: 6
+      default-max-duration-hours: 1
+      phase-a-chunk-seconds: 16
+      extension-windows: 4
+      max-extensions-beyond: 3
+      max-hard-cap-retries: 2
   quarkus:
     datasource:
       jdbc:

@@ -3,24 +3,22 @@ package com.ratelimiter.slot
 import com.ratelimiter.repo.EventSlotRepository
 import jakarta.enterprise.context.ApplicationScoped
 import org.eclipse.microprofile.config.inject.ConfigProperty
-import org.jetbrains.exposed.sql.transactions.transaction
 import java.time.Duration
 import java.time.Instant
 import java.util.concurrent.ThreadLocalRandom
+import kotlin.math.floor
 
 /**
- * V4 slot assignment — conditional INSERT, no locks, no counter table.
+ * V4 slot assignment — optimistic INSERT, no row locks, no counter table.
  *
- * Replaces V3's lock+update pattern with a simpler approach:
- * 1. Find the starting window via a DB query (skips past full windows)
- * 2. Compute scan upper bound from max assigned window + headroom
- * 3. Random pick within that range, fallback to sequential scan
+ * DB calls per request:
+ *   1. Idempotency check        — indexed lookup on EVENT_ID
+ *   2. Per-requestedTime frontier — MAX(WNDW_STRT_TS) WHERE REQ_TS = ?
+ *   3. Full-windows blocklist    — global GROUP BY HAVING on [requestedTime, computedEnd)
+ *   4. Slot insert               — single INSERT
  *
- * Uses a soft fill threshold (default 90%) — windows are treated as "full"
- * before reaching exact capacity. Over-capacity is tolerated.
- *
- * Uses static config from application.yaml (no config table).
- * Assumes requestedTime is always window-aligned (no alignment needed).
+ * Scan boundaries are per-requestedTime (each requestedTime discovers capacity
+ * independently). Capacity counting is global (shared windows across requestedTimes).
  */
 @ApplicationScoped
 class SlotAssignmentServiceV4(
@@ -32,75 +30,66 @@ class SlotAssignmentServiceV4(
     @param:ConfigProperty(name = "rate-limiter.headroom-windows", defaultValue = "100")
     private val headroomWindows: Long,
     @param:ConfigProperty(name = "rate-limiter.window-fill-threshold", defaultValue = "0.9")
-    private val windowFillThreshold: Double
+    private val windowFillThreshold: Double,
+    @param:ConfigProperty(name = "rate-limiter.headroom-capacity-threshold", defaultValue = "0.5")
+    private val headroomCapacityThreshold: Double,
 ) {
     private val windowSize: Duration = Duration.ofSeconds(windowSizeSeconds)
     private val windowSizeMs: Long = windowSizeSeconds * 1000
 
     fun assignSlot(eventId: String, requestedTime: Instant): AssignedSlot {
-        // Idempotency check (own transaction, ~1ms)
+        // 1. Idempotency
         val existing = eventSlotRepository.fetchAssignedSlot(eventId)
         if (existing != null) return existing
 
-        val softMax = Math.floor(maxPerWindow * windowFillThreshold).toInt()
+        val softMax = floor(maxPerWindow * windowFillThreshold).toInt()
 
-        // Compute scan upper bound: max assigned window + headroom.
-        val maxWindowStartTime = eventSlotRepository.fetchMaxWindowStartForRequestedTime(requestedTime)
-        val upperBound = (maxWindowStartTime ?: requestedTime).plus(windowSize.multipliedBy(headroomWindows))
-
-        // Find starting window via DB query (jumps past full windows)
-        val startWindow = findStartWindow(requestedTime, softMax) ?: requestedTime
-
-        // Number of windows to try within the bounded range
-        val windowsToTry = maxOf(1L, Duration.between(startWindow, upperBound).toSeconds() / windowSizeSeconds)
-
-        // 1. Random pick within range — distributes concurrent threads
-        val randomOffset = ThreadLocalRandom.current().nextLong(windowsToTry)
-        val randomWindow = startWindow.plus(windowSize.multipliedBy(randomOffset))
-        val randomResult = tryClaimSlot(eventId, randomWindow, softMax, requestedTime)
-        if (randomResult != null) return randomResult
-
-        // 2. Fallback: sequential scan through the range (skip the already-tried random window)
-        for (attempt in 0 until windowsToTry) {
-            if (attempt == randomOffset) continue
-            val windowStart = startWindow.plus(windowSize.multipliedBy(attempt))
-            val result = tryClaimSlot(eventId, windowStart, softMax, requestedTime)
-            if (result != null) return result
-        }
-
-        throw SlotAssignmentException(
-            eventId = eventId,
-            windowsSearched = windowsToTry,
-            message = "Could not assign slot for event $eventId after $windowsToTry attempts"
+        // 2. Scan boundaries — per-requestedTime frontier
+        val currMaxWindow = eventSlotRepository.fetchMaxWindowStartTime(requestedTime)
+        val initialEndWindow = maxOf(
+            requestedTime,
+            currMaxWindow?.plus(windowSize) ?: requestedTime
         )
-    }
+        val totalInInitialRange = if (initialEndWindow > requestedTime) {
+            Duration.between(requestedTime, initialEndWindow).toSeconds() / windowSizeSeconds
+        } else 0L
 
-    private fun tryClaimSlot(
-        eventId: String,
-        windowStart: Instant,
-        softMax: Int,
-        requestedTime: Instant
-    ): AssignedSlot? {
-        // Step 1: Check capacity
-        val count = transaction {
-            with(eventSlotRepository) { countSlotsInWindow(windowStart) }
-        }
-        if (count >= softMax) return null
+        // 3. Blocklist — global capacity check (counts slots from ALL requestedTimes)
+        val fullWindowsInInitialRange =
+            eventSlotRepository.findFullWindowsInRange(requestedTime, initialEndWindow, softMax)
+        val availableInInitialRange = totalInInitialRange - fullWindowsInInitialRange.size
 
-        // Step 2: Plain INSERT + jitter
-        val jitterMs = ThreadLocalRandom.current().nextLong(0, windowSizeMs)
-        val scheduledTime = windowStart.plusMillis(jitterMs)
-
-        return transaction {
-            with(eventSlotRepository) {
-                insertAndReturnSlot(eventId, windowStart, scheduledTime, SlotAssignmentServiceV3.STATIC_CONFIG_ID, requestedTime)
+        // 4. Adaptive extension — only extend when available capacity is below threshold
+        val computedEndWindow =
+            if (availableInInitialRange >= (headroomWindows * headroomCapacityThreshold).toLong()) {
+                initialEndWindow
+            } else {
+                initialEndWindow.plus(windowSize.multipliedBy(headroomWindows))
             }
-        }
-    }
 
-    private fun findStartWindow(requestedTime: Instant, softMax: Int): Instant? {
-        return transaction {
-            with(eventSlotRepository) { findFirstAvailableWindow(requestedTime, softMax) }
+        // 5. Build available windows
+        //    Windows in [requestedTime, initialEndWindow] are filtered against the blocklist.
+        //    Windows in [initialEndWindow, computedEndWindow] have no slots — all available.
+        val availableWindows = generateSequence(requestedTime) { it + windowSize }
+            .takeWhile { it < computedEndWindow }
+            .filter { it !in fullWindowsInInitialRange }
+            .toList()
+
+        if (availableWindows.isEmpty()) {
+            throw SlotAssignmentException(
+                eventId = eventId,
+                windowsSearched = totalInInitialRange,
+                message = "Could not assign slot for event $eventId — all windows at capacity"
+            )
         }
+
+        // 6. Random pick + jitter + insert
+        val windowStart = availableWindows[ThreadLocalRandom.current().nextInt(availableWindows.size)]
+        val scheduledTime = windowStart.plusMillis(ThreadLocalRandom.current().nextLong(0, windowSizeMs))
+
+        return eventSlotRepository.insertAndReturnSlot(
+            eventId, windowStart, scheduledTime,
+            SlotAssignmentServiceV3.STATIC_CONFIG_ID, requestedTime
+        )
     }
 }
