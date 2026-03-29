@@ -151,7 +151,6 @@ rate-limiter:
     window-chunk-duration: 15m
     extension-windows: 40
     max-extensions-beyond: 5
-    overflow-buffer: 20
     counter-refresh-every: 3s
     counter-refresh-since: 6s
 
@@ -180,7 +179,6 @@ rate-limiter:
       window-chunk-duration: 16s
       extension-windows: 4
       max-extensions-beyond: 3
-      overflow-buffer: 1
       counter-refresh-every: 1s
       counter-refresh-since: 2s
   quarkus:

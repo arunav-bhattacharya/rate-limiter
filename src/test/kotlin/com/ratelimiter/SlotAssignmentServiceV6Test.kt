@@ -37,8 +37,8 @@ import java.util.concurrent.atomic.AtomicInteger
  * Tests for V6 slot assignment with async counter + soft guard.
  *
  * Test profile: windowSize=4s, maxSlotsPerWindow=4,
- *               softMaxPercent=75 (softMax=3), overflowBuffer=1 (absoluteCeiling=5),
- *               defaultMaxDurationHours=1, extensionWindows=4,
+ *               softMaxPercent=75 (softMax=3),
+ *               defaultMaxDuration=1h, extensionWindows=4,
  *               maxExtensionsBeyond=3.
  */
 @QuarkusTest
@@ -197,6 +197,33 @@ class SlotAssignmentServiceV6Test {
         }
 
         assertTrue(slotsByWindow.size > 1, "Should span multiple windows")
+    }
+
+    // ==================== Delay computation ====================
+
+    @Test
+    fun `delay reflects how far event was pushed from requestedTime`() {
+        val requestedTime = Instant.parse("2025-06-01T14:00:00Z")
+
+        // Fill W+0 to softMax (3 slots) — need both actual slots (soft guard) and counter (weighted random)
+        for (s in 0 until 3) {
+            seedSlot("pre-delay-w0s$s", requestedTime, requestedTime, requestedTime.plusMillis(s * 500L + 100))
+        }
+        seedCounter(requestedTime, 3) // softMax
+
+        val slot = service.assignSlot("evt-delay", requestedTime)
+
+        assertTrue(slot.delay >= Duration.ZERO, "Delay must be non-negative")
+        assertEquals(
+            Duration.between(requestedTime, slot.scheduledTime).let { if (it.isNegative) Duration.ZERO else it },
+            slot.delay,
+            "Delay must equal Duration.between(requestedTime, scheduledTime)"
+        )
+        // Since W+0 is at softMax, the slot must be in W+1 or later
+        assertTrue(
+            slot.delay >= windowSize,
+            "Delay should be at least one window (4s) since W+0 is at softMax"
+        )
     }
 
     // ==================== Phase 2: Overflow within maxDuration ====================
@@ -495,6 +522,59 @@ class SlotAssignmentServiceV6Test {
         )
     }
 
+    // ==================== Over-allocation bounded ====================
+
+    @Test
+    fun `over-allocation bounded under high concurrency`() {
+        val totalEvents = 50
+        val threadCount = 20
+        val requestedTime = Instant.parse("2025-06-01T14:00:00Z")
+        val maxDuration = Duration.ofSeconds(16) // 4 windows — force concentration
+
+        val results = ConcurrentHashMap<String, AssignedSlot>()
+        val errors = ConcurrentLinkedQueue<Throwable>()
+        val latch = CountDownLatch(totalEvents)
+        val executor = Executors.newFixedThreadPool(threadCount)
+
+        repeat(totalEvents) { i ->
+            executor.submit {
+                try {
+                    results["evt-oa$i"] = service.assignSlot("evt-oa$i", requestedTime, maxDuration)
+                } catch (e: Throwable) {
+                    errors.add(e)
+                } finally {
+                    latch.countDown()
+                }
+            }
+        }
+
+        assertTrue(latch.await(60, TimeUnit.SECONDS))
+        executor.shutdown()
+
+        // Some SlotAssignmentExceptions may occur if extension windows also fill
+        val nonExhaustionErrors = errors.filter { it !is SlotAssignmentException }
+        assertTrue(nonExhaustionErrors.isEmpty(),
+            "No non-exhaustion errors: ${nonExhaustionErrors.map { "${it.javaClass.simpleName}: ${it.message}" }}")
+
+        // Check: no window has vastly more slots than maxSlotsPerWindow
+        val actualCounts = transaction {
+            RateLimitEventSlotTable.selectAll().toList()
+                .filter { it[RateLimitEventSlotTable.eventId].startsWith("evt-oa") }
+                .groupBy { it[RateLimitEventSlotTable.windowStart] }
+                .mapValues { it.value.size }
+        }
+
+        val maxSlots = 4 // test config maxSlotsPerWindow
+        val maxAllowedOvershoot = threadCount // bounded by concurrency level
+        for ((windowStart, count) in actualCounts) {
+            assertTrue(
+                count <= maxSlots + maxAllowedOvershoot,
+                "Window $windowStart has $count slots — over-allocation unbounded " +
+                    "(expected <= ${maxSlots + maxAllowedOvershoot})"
+            )
+        }
+    }
+
     // ==================== Far-future isolation ====================
 
     @Test
@@ -699,13 +779,13 @@ class SlotAssignmentServiceV6Test {
     // ==================== V6-specific: Soft guard ====================
 
     @Test
-    fun `soft guard rejects window when fresh count at absolute ceiling`() {
+    fun `soft guard rejects window when fresh count at maxSlotsPerWindow`() {
         val requestedTime = Instant.parse("2025-06-01T14:00:00Z")
 
-        // Seed W+0 with 5 actual slots (= absoluteCeiling = maxSlots(4) + overflow(1))
+        // Seed W+0 with 4 actual slots (= maxSlotsPerWindow)
         // but counter at 0 (stale). Weighted random will pick W+0 (counter says empty),
-        // but soft guard should reject it (fresh COUNT = 5 >= 5).
-        for (s in 0 until 5) {
+        // but soft guard should reject it (fresh COUNT = 4 >= 4).
+        for (s in 0 until 4) {
             seedSlot("pre-sg-w0s$s", requestedTime, requestedTime, requestedTime.plusMillis(s * 500L + 100))
         }
         seedCounter(requestedTime, 0) // stale counter
@@ -720,24 +800,24 @@ class SlotAssignmentServiceV6Test {
         }
         assertNotEquals(
             requestedTime, slotWindowStart,
-            "Soft guard should reject W+0 (fresh count at absoluteCeiling)"
+            "Soft guard should reject W+0 (fresh count at maxSlotsPerWindow)"
         )
     }
 
     @Test
-    fun `soft guard allows window when fresh count below absolute ceiling`() {
+    fun `soft guard allows window when fresh count below maxSlotsPerWindow`() {
         val requestedTime = Instant.parse("2025-06-01T14:00:00Z")
 
-        // Seed W+0 with 4 actual slots (below absoluteCeiling of 5)
+        // Seed W+0 with 3 actual slots (below maxSlotsPerWindow of 4)
         // Counter at 0 (stale). Weighted random picks W+0, soft guard allows it.
-        for (s in 0 until 4) {
+        for (s in 0 until 3) {
             seedSlot("pre-sg-w0s$s", requestedTime, requestedTime, requestedTime.plusMillis(s * 500L + 100))
         }
         seedCounter(requestedTime, 0) // stale counter
 
         val slot = service.assignSlot("evt-sg-allow", requestedTime)
 
-        // Slot CAN be in W+0 — soft guard allowed it (fresh count 4 < ceiling 5)
+        // Slot CAN be in W+0 — soft guard allowed it (fresh count 3 < maxSlots 4)
         // Note: proximity weighting might still pick another window, so we just verify
         // the request succeeded
         assertEquals("evt-sg-allow", slot.eventId)
@@ -807,6 +887,36 @@ class SlotAssignmentServiceV6Test {
     }
 
     @Test
+    fun `scheduler idempotency - running refresh twice produces same counter state`() {
+        val requestedTime = Instant.parse("2025-06-01T14:00:00Z")
+
+        for (i in 1..6) {
+            service.assignSlot("evt-idem-sch$i", requestedTime)
+        }
+
+        // First refresh
+        counterRefreshScheduler.refresh()
+
+        val countersAfterFirst = transaction {
+            WindowCounterTable.selectAll().associate { row ->
+                row[WindowCounterTable.windowStart] to row[WindowCounterTable.slotCount]
+            }
+        }
+
+        // Second refresh — should produce identical state (MERGE uses SET, not INCREMENT)
+        counterRefreshScheduler.refresh()
+
+        val countersAfterSecond = transaction {
+            WindowCounterTable.selectAll().associate { row ->
+                row[WindowCounterTable.windowStart] to row[WindowCounterTable.slotCount]
+            }
+        }
+
+        assertEquals(countersAfterFirst, countersAfterSecond,
+            "Running refresh() twice should produce identical counter state")
+    }
+
+    @Test
     fun `counter eventually consistent after scheduler run`() {
         val totalEvents = 30
         val threadCount = 10
@@ -860,10 +970,11 @@ class SlotAssignmentServiceV6Test {
 
     @Test
     fun `multiple requestedTimes share same counter table`() {
+        // Two genuinely different requestedTimes whose windows may overlap
         val time1 = Instant.parse("2025-06-01T14:00:00Z")
-        val time2 = Instant.parse("2025-06-01T14:00:00Z") // same aligned start, different stream
+        val time2 = Instant.parse("2025-06-01T14:00:04Z") // W+1 of time1's range
 
-        // Assign from two different "streams" (same requestedTime but different eventIds)
+        // Assign from two different requestedTimes
         service.assignSlot("evt-mt-a1", time1)
         service.assignSlot("evt-mt-b1", time2)
 

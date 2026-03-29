@@ -190,6 +190,33 @@ class SlotAssignmentServiceV5Test {
         assertTrue(slotsByWindow.size > 1, "Should span multiple windows")
     }
 
+    // ==================== Delay computation ====================
+
+    @Test
+    fun `delay reflects how far event was pushed from requestedTime`() {
+        val requestedTime = Instant.parse("2025-06-01T14:00:00Z")
+
+        // Fill W+0 to softMax (3 slots) so next request must go to W+1+
+        for (s in 0 until 3) {
+            seedSlot("pre-delay-w0s$s", requestedTime, requestedTime, requestedTime.plusMillis(s * 500L + 100))
+        }
+        seedCounter(requestedTime, 3) // softMax
+
+        val slot = service.assignSlot("evt-delay", requestedTime)
+
+        assertTrue(slot.delay >= Duration.ZERO, "Delay must be non-negative")
+        assertEquals(
+            Duration.between(requestedTime, slot.scheduledTime).let { if (it.isNegative) Duration.ZERO else it },
+            slot.delay,
+            "Delay must equal Duration.between(requestedTime, scheduledTime)"
+        )
+        // Since W+0 is at softMax, the slot must be in W+1 or later
+        assertTrue(
+            slot.delay >= windowSize,
+            "Delay should be at least one window (4s) since W+0 is at softMax"
+        )
+    }
+
     // ==================== Phase 2: Overflow within maxDuration ====================
 
     @Test

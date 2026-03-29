@@ -224,6 +224,55 @@ The 10% gap absorbs concurrent overbooking. When 20 pods read stale occupancy an
 
 ## Algorithm Flow
 
+### Flow Diagram
+
+```mermaid
+flowchart TD
+    Start([assignSlot]) --> ReadSkip[Read skip pointer from DB]
+    ReadSkip --> Phase1Start{skipTo < maxDurationEnd?}
+
+    Phase1Start -->|Yes| Phase1Chunk[Phase 1: Read chunk occupancy]
+    Phase1Chunk --> WtdRandom1[Proximity-weighted random pick\nthreshold = softMax]
+    WtdRandom1 --> Found1{Candidate\nfound?}
+    Found1 -->|Yes| Claim1[INSERT slot + upsert counter\nRETURNING INTO]
+    Claim1 --> MaxCheck{newCount >\nmaxSlots?}
+    MaxCheck -->|No| ReturnNormal([Return NORMAL])
+    MaxCheck -->|Yes| Rollback[ROLLBACK transaction]
+    Rollback --> RetryCheck{Retries\nleft?}
+    RetryCheck -->|Yes| FreshRead[Fresh occupancy read]
+    FreshRead --> WtdRandom1
+    RetryCheck -->|No| AdvanceSkip1
+    Found1 -->|No| AdvanceSkip1[Advance skip pointer\nto chunk end]
+    AdvanceSkip1 --> NextChunk1{More chunks in\nmaxDuration?}
+    NextChunk1 -->|Yes| Phase1Chunk
+
+    Phase1Start -->|No| Phase2
+    NextChunk1 -->|No| Phase2
+
+    Phase2[Phase 2: Fresh read from requestedTime\nthreshold = maxSlotsPerWindow]
+    Phase2 --> WtdRandom2[Proximity-weighted random pick]
+    WtdRandom2 --> Found2{Candidate\nfound?}
+    Found2 -->|Yes| Claim2[INSERT slot + upsert counter\nRETURNING INTO]
+    Claim2 --> MaxCheck2{newCount >\nmaxSlots?}
+    MaxCheck2 -->|No| ReturnSoftMax([Return SOFT_MAX_EXCEEDED])
+    MaxCheck2 -->|Yes| Rollback2[ROLLBACK + retry]
+    Rollback2 --> WtdRandom2
+    Found2 -->|No| Phase3
+
+    Phase3[Phase 3: Extension chunks\nbeyond maxDuration]
+    Phase3 --> ExtChunk[Read extension chunk occupancy]
+    ExtChunk --> WtdRandom3[Proximity-weighted random pick\nthreshold = softMax]
+    WtdRandom3 --> Found3{Candidate\nfound?}
+    Found3 -->|Yes| Claim3[INSERT slot + upsert counter]
+    Claim3 --> ReturnMaxExc([Return MAX_DURATION_EXCEEDED])
+    Found3 -->|No| AdvanceSkip3[Advance skip pointer]
+    AdvanceSkip3 --> MoreExt{More\nextensions?}
+    MoreExt -->|Yes| ExtChunk
+    MoreExt -->|No| Throw([SlotAssignmentException 503])
+```
+
+### Pseudocode
+
 ```
 assignSlot(eventId, requestedTime, maxDuration)
 │

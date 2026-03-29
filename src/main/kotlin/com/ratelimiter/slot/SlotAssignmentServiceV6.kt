@@ -29,11 +29,11 @@ import kotlin.math.floor
  *
  * Capacity:
  *   softMax          = floor(maxSlots * softMaxPercent / 100)  — Phase 1 operating limit
- *   absoluteCeiling  = maxSlotsPerWindow + overflowBuffer      — soft guard hard limit
+ *   maxSlotsPerWindow = configured ceiling                     — soft guard hard limit
  *
  * Soft guard: before INSERT, a fresh COUNT(*) on RL_EVENT_SLOT_DTL for the
- * picked window. If freshCount >= absoluteCeiling, the window is rejected and
- * another is picked. This caps over-allocation to overflowBuffer per window.
+ * picked window. If freshCount >= maxSlotsPerWindow, the window is rejected and
+ * another is picked.
  *
  * Counter updates: handled asynchronously by WindowCounterRefreshScheduler,
  * which uses CREAT_TS-based discovery to find recently active windows and
@@ -68,8 +68,6 @@ class SlotAssignmentServiceV6(
     private val extensionWindows: Int,
     @param:ConfigProperty(name = "rate-limiter.v6.max-extensions-beyond", defaultValue = "5")
     private val maxExtensionsBeyond: Int,
-    @param:ConfigProperty(name = "rate-limiter.v6.overflow-buffer", defaultValue = "20")
-    private val overflowBuffer: Int,
 ) {
     companion object {
         const val STATIC_CONFIG_ID = "STATIC"
@@ -81,9 +79,6 @@ class SlotAssignmentServiceV6(
 
     /** Phase 1 operating limit: floor(maxSlots * softMaxPercent / 100) */
     private val softMax: Int = floor(maxSlotsPerWindow * softMaxPercent / 100.0).toInt()
-
-    /** Soft guard absolute ceiling: no window ever exceeds this count */
-    private val absoluteCeiling: Int = maxSlotsPerWindow + overflowBuffer
 
     fun assignSlot(eventId: String, requestedTime: Instant, maxDuration: Duration = defaultMaxDuration): AssignedSlot {
         // Step 1: Read DB skip pointer
@@ -194,7 +189,7 @@ class SlotAssignmentServiceV6(
 
     /**
      * Pick a window via weighted random, check the soft guard (fresh COUNT on slot table),
-     * and INSERT the slot. If the soft guard rejects a window (fresh count >= absoluteCeiling),
+     * and INSERT the slot. If the soft guard rejects a window (fresh count >= maxSlotsPerWindow),
      * exclude it and re-pick from remaining candidates.
      *
      * Unlike V5's tryClaimWithRetry, there is no rollback or retry — once the soft guard
@@ -216,7 +211,7 @@ class SlotAssignmentServiceV6(
 
             // Soft guard: fresh COUNT(*) on RL_EVENT_SLOT_DTL
             val freshCount = eventSlotRepository.countSlotsInWindow(picked)
-            if (freshCount >= absoluteCeiling) {
+            if (freshCount >= maxSlotsPerWindow) {
                 candidates.remove(picked)
                 continue // re-pick from remaining
             }
