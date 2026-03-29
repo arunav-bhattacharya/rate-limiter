@@ -13,7 +13,7 @@ Without rate limiting:              With V5 rate limiting:
 
   Requests   Downstream               Requests    V5 Service    Downstream
   ────────   ──────────               ────────    ──────────    ──────────
-  ██████████ → 500K/sec  → CRASH!     ██████████ → schedules → ▓▓▓▓ 30/sec
+  ██████████ → 500K/sec  → CRASH!     ██████████ → schedules  → ▓▓▓▓ 30/sec
                                                     future    → ▓▓▓▓ 30/sec
                                                     time      → ▓▓▓▓ 30/sec
                                                     slots     → ▓▓▓▓ 30/sec
@@ -211,9 +211,9 @@ maxSlotsPerWindow = configured absolute ceiling
       │                                │
       ▼                                ▼
   ┌───────────────────────────────────────┐
-  │░░░░░░░░░░░░░░░░░░░░│▓▓▓▓▓▓▓▓▓▓▓▓│
-  │  Phase 1 territory  │  Phase 2    │
-  │  (normal)           │  (overflow) │
+  │░░░░░░░░░░░░░░░░░░░░░│▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓│
+  │  Phase 1 territory  │  Phase 2        │
+  │  (normal)           │  (overflow)     │
   └───────────────────────────────────────┘
   0                                    900
 ```
@@ -300,12 +300,12 @@ assignSlot(eventId, requestedTime, maxDuration)
 
 ```yaml
 rate-limiter:
-  window-size-seconds: 30
   v5:
+    window-size: 30s                 # Window duration
     max-slots-per-window: 900        # 30 TPS × 30s = absolute ceiling per window
     soft-max-percent: 90             # softMax = floor(900 × 90 / 100) = 810
-    default-max-duration-hours: 8    # Default: slots can go up to 8h out
-    phase1-chunk-seconds: 900        # 15-min chunks (30 windows each)
+    default-max-duration: 8h         # Default: slots can go up to 8h out
+    window-chunk-duration: 15m       # Chunked scan batch size for proximity weighting
     extension-windows: 40            # 20-min extension chunks
     max-extensions-beyond: 5         # Up to 5 extensions beyond maxDuration
     max-claim-retries: 3             # Retries when maxSlots exceeded on claim
@@ -338,7 +338,7 @@ v5:
   max-slots-per-window: 900
   soft-max-percent: 90
   default-max-duration-hours: 8
-  phase1-chunk-seconds: 900      # 15 min — tight proximity
+  window-chunk-duration: 15m      # 15 min — tight proximity
 ```
 
 At 400 TPS inbound / 30 TPS outbound, each second produces ~13 "excess" requests that spill forward. An 8-hour maxDuration holds 864K events — sufficient for sustained bursts up to ~30 minutes (720K events).
@@ -349,8 +349,8 @@ At 400 TPS inbound / 30 TPS outbound, each second produces ~13 "excess" requests
 v5:
   max-slots-per-window: 900
   soft-max-percent: 90
-  default-max-duration-hours: 24    # Allow wider spread
-  phase1-chunk-seconds: 1800        # 30-min chunks (less DB round-trips)
+  default-max-duration: 24h          # Allow wider spread
+  window-chunk-duration: 30m         # 30-min chunks (less DB round-trips)
   max-extensions-beyond: 10         # More room to extend
 ```
 

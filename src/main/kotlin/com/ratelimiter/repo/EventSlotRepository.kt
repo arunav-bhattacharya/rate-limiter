@@ -152,6 +152,26 @@ class EventSlotRepository {
      * On duplicate EVENT_ID, returns the existing slot (idempotent).
      * Returns null only if the insert fails for a non-duplicate reason (shouldn't happen).
      */
+    // ==================== V6 methods ====================
+
+    /**
+     * Fresh COUNT(*) for the V6 soft guard — returns actual slot count for a single window.
+     * Uses index RL_EVENT_SLOT_DTL_I01X(WNDW_STRT_TS) for efficient single-value scan.
+     * Runs in its own short-lived transaction (separate from the INSERT transaction)
+     * so it sees committed data from other pods.
+     */
+    fun countSlotsInWindow(windowStart: Instant): Int {
+        return transaction {
+            RateLimitEventSlotTable
+                .selectAll()
+                .where { RateLimitEventSlotTable.windowStart eq windowStart }
+                .count()
+                .toInt()
+        }
+    }
+
+    // ==================== Legacy methods ====================
+
     fun insertAndReturnSlot(
         eventId: String,
         windowStart: Instant,

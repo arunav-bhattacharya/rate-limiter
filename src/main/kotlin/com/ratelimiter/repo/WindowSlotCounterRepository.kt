@@ -255,6 +255,48 @@ class WindowSlotCounterRepository(
      * If the row doesn't exist (cold start for this window), creates it.
      * Must be called within an existing transaction.
      */
+    // ==================== V6 methods ====================
+
+    /**
+     * Refresh counters for windows that received slot inserts since [since].
+     * Uses CREAT_TS index to discover recently active windows (regardless of how
+     * far in the future WNDW_STRT_TS is), then counts ALL slots for each.
+     *
+     * At 500 TPS with 3s refresh interval (since = now - 6s):
+     *   Inner query: ~3000 recent slots → ~50-100 distinct windows
+     *   Outer query: ~50-100 windows × ~900 slots = ~45-90K rows to COUNT
+     *   MERGE: ~50-100 upserts
+     * All fast on Oracle with existing indexes.
+     */
+    fun refreshRecentlyActiveCounters(since: Instant) {
+        org.jetbrains.exposed.sql.transactions.transaction {
+            val conn = TransactionManager.current().connection.connection as java.sql.Connection
+            conn.prepareStatement(
+                """
+                MERGE INTO RL_WNDW_CT tgt
+                USING (
+                    SELECT d.WNDW_STRT_TS, COUNT(*) cnt
+                    FROM RL_EVENT_SLOT_DTL d
+                    WHERE d.WNDW_STRT_TS IN (
+                        SELECT DISTINCT WNDW_STRT_TS
+                        FROM RL_EVENT_SLOT_DTL
+                        WHERE CREAT_TS >= ?
+                    )
+                    GROUP BY d.WNDW_STRT_TS
+                ) src ON (tgt.WNDW_STRT_TS = src.WNDW_STRT_TS)
+                WHEN MATCHED THEN UPDATE SET SLOT_CT = src.cnt
+                WHEN NOT MATCHED THEN INSERT (WNDW_STRT_TS, SLOT_CT, CREAT_TS)
+                    VALUES (src.WNDW_STRT_TS, src.cnt, SYSTIMESTAMP)
+                """.trimIndent()
+            ).use { stmt ->
+                stmt.setTimestamp(1, java.sql.Timestamp.from(since))
+                stmt.executeUpdate()
+            }
+        }
+    }
+
+    // ==================== Legacy methods ====================
+
     fun Transaction.upsertCounter(windowStart: Instant) {
         val updated = WindowCounterTable.update({ WindowCounterTable.windowStart eq windowStart }) {
             with(SqlExpressionBuilder) {

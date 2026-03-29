@@ -12,8 +12,14 @@ import java.util.concurrent.ThreadLocalRandom
 import kotlin.math.floor
 
 /**
- * V5 slot assignment — optimistic INSERT with advisory counter table,
- * proximity-weighted random window selection, and DB-backed skip pointer.
+ * V6 slot assignment — async counter with soft guard.
+ *
+ * Borrows V5's three-phase allocation and proximity-weighted random selection,
+ * but eliminates counter-table write contention by moving counter updates to a
+ * background scheduler ([WindowCounterRefreshScheduler]).
+ *
+ * Hot path: skip pointer read → stale occupancy read → soft guard (fresh COUNT)
+ *           → INSERT slot only. Zero writes to RL_WNDW_CT.
  *
  * Three-phase allocation:
  *   Phase 1: Normal — softMax within maxDuration, chunked into configurable
@@ -23,41 +29,47 @@ import kotlin.math.floor
  *
  * Capacity:
  *   softMax          = floor(maxSlots * softMaxPercent / 100)  — Phase 1 operating limit
- *   maxSlotsPerWindow = configured ceiling                     — no window ever exceeds this
+ *   absoluteCeiling  = maxSlotsPerWindow + overflowBuffer      — soft guard hard limit
  *
- * No row locks. No pre-provisioning. Counter rows created on demand via
- * UPDATE-first upsert with RETURNING INTO for capacity enforcement.
+ * Soft guard: before INSERT, a fresh COUNT(*) on RL_EVENT_SLOT_DTL for the
+ * picked window. If freshCount >= absoluteCeiling, the window is rejected and
+ * another is picked. This caps over-allocation to overflowBuffer per window.
  *
- * DB calls per request (happy path): 3
+ * Counter updates: handled asynchronously by WindowCounterRefreshScheduler,
+ * which uses CREAT_TS-based discovery to find recently active windows and
+ * MERGEs actual counts into RL_WNDW_CT.
+ *
+ * DB calls per request (happy path): 4
  *   1. Skip pointer read       — PK lookup on RL_SKIP_PTR
- *   2. Advisory occupancy read — range scan on RL_WNDW_CT PK (one chunk)
- *   3. Slot insert + counter upsert — single transaction
+ *   2. Advisory occupancy read — range scan on RL_WNDW_CT PK (one chunk, stale)
+ *   3. Soft guard COUNT(*)     — index scan on RL_EVENT_SLOT_DTL (single window)
+ *   4. Slot INSERT             — single row into RL_EVENT_SLOT_DTL
  *
  * Idempotency is handled by the UNIQUE(EVENT_ID) constraint: duplicate inserts
  * are caught and the existing slot is re-read within the same transaction.
  */
 @ApplicationScoped
-class SlotAssignmentServiceV5(
+class SlotAssignmentServiceV6(
     private val eventSlotRepository: EventSlotRepository,
     private val windowSlotCounterRepository: WindowSlotCounterRepository,
     private val skipPointerRepository: SkipPointerRepository,
     private val windowPicker: WindowPicker,
-    @param:ConfigProperty(name = "rate-limiter.v5.window-size", defaultValue = "30s")
+    @param:ConfigProperty(name = "rate-limiter.v6.window-size", defaultValue = "30s")
     private val windowSize: Duration,
-    @param:ConfigProperty(name = "rate-limiter.v5.max-slots-per-window", defaultValue = "900")
+    @param:ConfigProperty(name = "rate-limiter.v6.max-slots-per-window", defaultValue = "900")
     private val maxSlotsPerWindow: Int,
-    @param:ConfigProperty(name = "rate-limiter.v5.soft-max-percent", defaultValue = "90")
+    @param:ConfigProperty(name = "rate-limiter.v6.soft-max-percent", defaultValue = "90")
     private val softMaxPercent: Int,
-    @param:ConfigProperty(name = "rate-limiter.v5.default-max-duration", defaultValue = "8h")
+    @param:ConfigProperty(name = "rate-limiter.v6.default-max-duration", defaultValue = "8h")
     val defaultMaxDuration: Duration,
-    @param:ConfigProperty(name = "rate-limiter.v5.window-chunk-duration", defaultValue = "15m")
+    @param:ConfigProperty(name = "rate-limiter.v6.window-chunk-duration", defaultValue = "15m")
     private val windowChunkDuration: Duration,
-    @param:ConfigProperty(name = "rate-limiter.v5.extension-windows", defaultValue = "40")
+    @param:ConfigProperty(name = "rate-limiter.v6.extension-windows", defaultValue = "40")
     private val extensionWindows: Int,
-    @param:ConfigProperty(name = "rate-limiter.v5.max-extensions-beyond", defaultValue = "5")
+    @param:ConfigProperty(name = "rate-limiter.v6.max-extensions-beyond", defaultValue = "5")
     private val maxExtensionsBeyond: Int,
-    @param:ConfigProperty(name = "rate-limiter.v5.max-claim-retries", defaultValue = "3")
-    private val maxClaimRetries: Int,
+    @param:ConfigProperty(name = "rate-limiter.v6.overflow-buffer", defaultValue = "20")
+    private val overflowBuffer: Int,
 ) {
     companion object {
         const val STATIC_CONFIG_ID = "STATIC"
@@ -70,6 +82,9 @@ class SlotAssignmentServiceV5(
     /** Phase 1 operating limit: floor(maxSlots * softMaxPercent / 100) */
     private val softMax: Int = floor(maxSlotsPerWindow * softMaxPercent / 100.0).toInt()
 
+    /** Soft guard absolute ceiling: no window ever exceeds this count */
+    private val absoluteCeiling: Int = maxSlotsPerWindow + overflowBuffer
+
     fun assignSlot(eventId: String, requestedTime: Instant, maxDuration: Duration = defaultMaxDuration): AssignedSlot {
         // Step 1: Read DB skip pointer
         val skipTo = skipPointerRepository.fetchSkipTo(requestedTime) ?: requestedTime
@@ -77,7 +92,6 @@ class SlotAssignmentServiceV5(
         val phase1Start = maxOf(skipTo, requestedTime)
 
         // ---- PHASE 1: Normal allocation within maxDuration (softMax, chunked) ----
-        // Advances skip pointer per-chunk as each chunk is exhausted.
         val phase1Result = phase1(eventId, requestedTime, phase1Start, maxDurationEnd)
         if (phase1Result != null) return phase1Result
 
@@ -102,9 +116,8 @@ class SlotAssignmentServiceV5(
 
     /**
      * Phase 1: scan forward from skipTo one chunk at a time (default 15 min).
-     * Each chunk reads its own occupancy and picks within that narrow window set.
-     * Advances skip pointer per-chunk as each is exhausted, so other pods
-     * and subsequent requests skip already-exhausted chunks immediately.
+     * Each chunk reads its own stale occupancy and picks within that narrow window set.
+     * Advances skip pointer per-chunk as each is exhausted.
      */
     private fun phase1(
         eventId: String,
@@ -118,15 +131,11 @@ class SlotAssignmentServiceV5(
 
             val occupancy = windowSlotCounterRepository.readOccupancy(chunkStart, chunkEnd)
             val windows = generateWindowsInRange(chunkStart, chunkEnd)
-            val picked = windowPicker.pickProximityWeightedRandom(windows, occupancy, softMax)
 
-            if (picked != null) {
-                val result = tryClaimWithRetry(
-                    eventId, requestedTime, picked, chunkStart, chunkEnd,
-                    softMax, AllocationStatus.NORMAL
-                )
-                if (result != null) return result
-            }
+            val result = tryClaimWithSoftGuard(
+                eventId, requestedTime, windows, occupancy, softMax, AllocationStatus.NORMAL
+            )
+            if (result != null) return result
 
             // Chunk exhausted at softMax — advance skip pointer so other pods skip it
             skipPointerRepository.advanceSkipTo(requestedTime, chunkEnd)
@@ -147,14 +156,10 @@ class SlotAssignmentServiceV5(
     ): AssignedSlot? {
         val freshOccupancy = windowSlotCounterRepository.readOccupancy(requestedTime, maxDurationEnd)
         val windows = generateWindowsInRange(requestedTime, maxDurationEnd)
-        val picked = windowPicker.pickProximityWeightedRandom(windows, freshOccupancy, maxSlotsPerWindow)
-            ?: return null
 
-        val result = tryClaimWithRetry(
-            eventId, requestedTime, picked, requestedTime, maxDurationEnd,
-            maxSlotsPerWindow, AllocationStatus.SOFT_MAX_EXCEEDED
+        return tryClaimWithSoftGuard(
+            eventId, requestedTime, windows, freshOccupancy, maxSlotsPerWindow, AllocationStatus.SOFT_MAX_EXCEEDED
         )
-        return result
     }
 
     /**
@@ -172,15 +177,11 @@ class SlotAssignmentServiceV5(
 
             val occupancy = windowSlotCounterRepository.readOccupancy(extStart, extEnd)
             val windows = generateWindowsInRange(extStart, extEnd)
-            val picked = windowPicker.pickProximityWeightedRandom(windows, occupancy, softMax)
 
-            if (picked != null) {
-                val result = tryClaimWithRetry(
-                    eventId, requestedTime, picked, extStart, extEnd,
-                    softMax, AllocationStatus.MAX_DURATION_EXCEEDED
-                )
-                if (result != null) return result
-            }
+            val result = tryClaimWithSoftGuard(
+                eventId, requestedTime, windows, occupancy, softMax, AllocationStatus.MAX_DURATION_EXCEEDED
+            )
+            if (result != null) return result
 
             // Advance skip pointer as we exhaust extension ranges
             skipPointerRepository.advanceSkipTo(requestedTime, extEnd)
@@ -189,54 +190,56 @@ class SlotAssignmentServiceV5(
         return null
     }
 
-    // ---- Claim + retry ----
+    // ---- Claim with soft guard ----
 
     /**
-     * Attempts to claim the picked window. If maxSlots is exceeded (transaction rolled back),
-     * re-reads occupancy and retries with a different window up to [maxClaimRetries] times.
+     * Pick a window via weighted random, check the soft guard (fresh COUNT on slot table),
+     * and INSERT the slot. If the soft guard rejects a window (fresh count >= absoluteCeiling),
+     * exclude it and re-pick from remaining candidates.
+     *
+     * Unlike V5's tryClaimWithRetry, there is no rollback or retry — once the soft guard
+     * passes, the INSERT always succeeds (or idempotency catches duplicates).
      */
-    private fun tryClaimWithRetry(
+    private fun tryClaimWithSoftGuard(
         eventId: String,
         requestedTime: Instant,
-        initialPick: Instant,
-        rangeStart: Instant,
-        rangeEnd: Instant,
+        windows: List<Instant>,
+        occupancy: Map<Instant, Int>,
         threshold: Int,
         status: AllocationStatus
     ): AssignedSlot? {
-        // First attempt with initial pick
-        val jitterMs = ThreadLocalRandom.current().nextLong(0, windowSizeMs)
-        val scheduledTime = initialPick.plusMillis(jitterMs)
-        val result = claimSlotAndUpdateCounter(eventId, requestedTime, initialPick, scheduledTime, status)
-        if (result != null) return result
+        val candidates = windows.toMutableList()
 
-        // maxSlots exceeded — retry with fresh occupancy
-        for (retry in 1..maxClaimRetries) {
-            val freshOccupancy = windowSlotCounterRepository.readOccupancy(rangeStart, rangeEnd)
-            val windows = generateWindowsInRange(rangeStart, rangeEnd)
-            val retryPick = windowPicker.pickProximityWeightedRandom(windows, freshOccupancy, threshold)
-                ?: return null // All windows in range are full
+        while (candidates.isNotEmpty()) {
+            val picked = windowPicker.pickProximityWeightedRandom(candidates, occupancy, threshold)
+                ?: return null
 
-            val retryJitter = ThreadLocalRandom.current().nextLong(0, windowSizeMs)
-            val retryScheduled = retryPick.plusMillis(retryJitter)
-            val retryResult = claimSlotAndUpdateCounter(eventId, requestedTime, retryPick, retryScheduled, status)
-            if (retryResult != null) return retryResult
+            // Soft guard: fresh COUNT(*) on RL_EVENT_SLOT_DTL
+            val freshCount = eventSlotRepository.countSlotsInWindow(picked)
+            if (freshCount >= absoluteCeiling) {
+                candidates.remove(picked)
+                continue // re-pick from remaining
+            }
+
+            val jitterMs = ThreadLocalRandom.current().nextLong(0, windowSizeMs)
+            val scheduledTime = picked.plusMillis(jitterMs)
+            return claimSlot(eventId, requestedTime, picked, scheduledTime, status)
         }
         return null
     }
 
     /**
-     * Insert event slot + upsert counter in a single short-lived transaction.
-     * Returns null if maxSlots is exceeded (transaction rolled back).
-     * Handles duplicate EVENT_ID via catch (idempotency: re-reads existing slot).
+     * INSERT event slot in a single short-lived transaction.
+     * No counter upsert — the scheduler handles counter updates asynchronously.
+     * Never returns null: INSERT always succeeds, or idempotency re-reads existing.
      */
-    private fun claimSlotAndUpdateCounter(
+    private fun claimSlot(
         eventId: String,
         requestedTime: Instant,
         windowStart: Instant,
         scheduledTime: Instant,
         status: AllocationStatus
-    ): AssignedSlot? {
+    ): AssignedSlot {
         return transaction {
             val inserted = with(eventSlotRepository) {
                 insertEventSlot(eventId, requestedTime, windowStart, scheduledTime, STATIC_CONFIG_ID)
@@ -246,16 +249,6 @@ class SlotAssignmentServiceV5(
                 // Duplicate eventId — idempotency
                 return@transaction with(eventSlotRepository) { queryAssignedSlot(eventId) }
                     ?: error("Failed to re-read slot for eventId=$eventId after duplicate key")
-            }
-
-            val newCount = with(windowSlotCounterRepository) {
-                upsertCounterReturningCount(windowStart)
-            }
-
-            if (newCount > maxSlotsPerWindow) {
-                // maxSlots exceeded — rollback everything (slot INSERT + counter increment)
-                rollback()
-                return@transaction null
             }
 
             val delay = Duration.between(requestedTime, scheduledTime).let { d ->
