@@ -341,6 +341,14 @@ assignSlot(eventId, requestedTime, maxDuration)
 | `RL_WNDW_CT` | Per-window occupancy counter | Upsert (INSERT or UPDATE +1) |
 | `RL_SKIP_PTR` | Per-requestedTime skip pointer | Append-only INSERT (read via ORDER BY DESC) |
 
+### Why Each Table Exists
+
+**`RL_EVENT_SLOT_DTL`** — The source of truth for every assigned slot. Each row records which event was placed in which window, at what scheduled time. Two roles: (1) the immutable audit trail that downstream consumers read to know when to execute an event, and (2) the idempotency mechanism — the `UNIQUE(EVENT_ID)` constraint guarantees exactly one slot per event across all pods, with zero coordination beyond the DB constraint itself. Without this table, there is no record of assignments and no way to prevent double-scheduling.
+
+**`RL_WNDW_CT`** — An advisory counter that tracks how many slots have been assigned to each window. The weighted random window picker reads this to decide which windows have capacity. Without it, every request would need to `COUNT(*)` all slot rows per window in the range — a full table scan of potentially thousands of rows per chunk. The counter table turns that into a cheap PK range scan (~30 rows per chunk). In V5 specifically, the counter also serves as the atomic enforcement point: `RETURNING INTO` after `UPDATE SLOT_CT = SLOT_CT + 1` gives the exact post-increment value, enabling the maxSlots rollback mechanism. The counter is created on-demand (no pre-provisioning) — a row appears the first time a slot is claimed in that window.
+
+**`RL_SKIP_PTR`** — A distributed cursor that tracks the furthest exhausted chunk boundary per `requestedTime`. When a pod exhausts a chunk (all windows at or above softMax), it writes a skip pointer so that other pods — and subsequent requests on the same pod — skip directly past that chunk instead of re-scanning it. Without it, every request would start from `requestedTime` and re-read chunks that are already known to be full. With 20 pods and high TPS, this avoids O(exhausted_chunks) redundant reads per request. The composite PK `(REQ_TS, SKIP_TO_TS)` and append-only writes ensure zero contention: concurrent pods inserting different skip-to values never block each other.
+
 ---
 
 ## Configuration

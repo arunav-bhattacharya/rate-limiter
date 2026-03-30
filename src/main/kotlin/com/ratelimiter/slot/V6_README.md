@@ -405,6 +405,14 @@ assignSlot(eventId, requestedTime, maxDuration)
 | `RL_WNDW_CT` | Per-window occupancy counter | MERGE by scheduler only (not hot path) |
 | `RL_SKIP_PTR` | Per-requestedTime skip pointer | Append-only INSERT |
 
+### Why Each Table Exists
+
+**`RL_EVENT_SLOT_DTL`** — The source of truth for every assigned slot. Each row records which event was placed in which window, at what scheduled time. Three roles in V6: (1) the immutable audit trail that downstream consumers read to know when to execute an event, (2) the idempotency mechanism — the `UNIQUE(EVENT_ID)` constraint guarantees exactly one slot per event across all pods, and (3) the soft guard data source — `COUNT(*) WHERE WNDW_STRT_TS = ?` gives the fresh, authoritative slot count for a window before INSERT. In V5, this table is read-only after insert; in V6, it is also the real-time capacity enforcement layer (via the soft guard COUNT). Without this table, there is no record of assignments, no idempotency, and no soft guard.
+
+**`RL_WNDW_CT`** — An eventually-consistent counter that tracks how many slots have been assigned to each window. The weighted random window picker reads this to decide which windows have capacity. Without it, every request would need to COUNT all slot rows across every window in the chunk — expensive range scans on the slot table. The counter table turns that into a cheap PK range scan (~30 rows per chunk). Unlike V5, the hot path never writes to this table. The background `WindowCounterRefreshScheduler` reconciles it asynchronously via MERGE using CREAT_TS-based discovery. The counters are therefore stale by up to ~150ms (effective refresh rate with 20 pods at 3s interval), but that staleness is acceptable because the soft guard on `RL_EVENT_SLOT_DTL` provides the authoritative check before INSERT. The counter table exists purely to make window selection efficient — it is an optimization, not a correctness mechanism.
+
+**`RL_SKIP_PTR`** — A distributed cursor that tracks the furthest exhausted chunk boundary per `requestedTime`. When a pod exhausts a chunk (all windows at or above softMax), it writes a skip pointer so that other pods — and subsequent requests on the same pod — skip directly past that chunk instead of re-scanning it. Without it, every request would start from `requestedTime` and re-read chunks that are already known to be full. With 20 pods and high TPS, this avoids O(exhausted_chunks) redundant reads per request. The composite PK `(REQ_TS, SKIP_TO_TS)` and append-only writes ensure zero contention: concurrent pods inserting different skip-to values never block each other.
+
 ---
 
 ## Configuration
