@@ -246,7 +246,7 @@ class WindowSlotCounterRepository(
                     VALUES (src.WNDW_STRT_TS, src.cnt, SYSTIMESTAMP)
                 """.trimIndent()
             ).use { stmt ->
-                stmt.setTimestamp(1, java.sql.Timestamp.from(since))
+                stmt.setTimestamp(1, Timestamp.from(since))
                 stmt.executeUpdate()
             }
         }
