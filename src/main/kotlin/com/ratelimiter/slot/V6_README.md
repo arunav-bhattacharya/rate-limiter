@@ -170,7 +170,7 @@ Phase 1 window selection:
 **Key properties**:
 - Runs in its own short-lived transaction (separate from INSERT) so it sees committed data from other pods
 - Not atomic with the INSERT — the core V6 trade-off. Between COUNT and INSERT, another pod may insert, causing rare over-allocation
-- Replaces V5's `RETURNING INTO` + rollback mechanism — no rollbacks, no retries
+- Similar to V5's approach — neither version uses rollbacks or retries
 
 ### 7. Zero Counter Contention in Hot Path
 
@@ -254,8 +254,8 @@ maxSlotsPerWindow = configured absolute ceiling
   0                                    900
 ```
 
-The 10% gap between softMax and maxSlots serves a different purpose in V6 than V5:
-- **V5**: Absorbs concurrent atomic counter increments (multiple pods increment past softMax before rollback).
+The 10% gap between softMax and maxSlots serves the same purpose in both V5 and V6:
+- **V5**: Absorbs racing — multiple pods may claim past softMax between occupancy read and INSERT. No rollback; downstream tolerance absorbs the marginal overshoot.
 - **V6**: Absorbs stale-counter-based mis-picks. The stale occupancy read may show a window below softMax when it's actually above; the soft guard (fresh COUNT) catches it at the maxSlots boundary.
 
 ---
@@ -648,7 +648,7 @@ INSERT slot (W+0) → OK               INSERT slot (W+0) → OK
 
 **Result**: W+0 has 8 slots, exceeding maxSlots by 1. This is the documented V6 trade-off. The over-allocation is bounded by the concurrency level (number of threads that can pass the soft guard simultaneously for the same window). At production scale, the over-allocation is ~0.55% (see Over-Allocation Analysis below).
 
-**Contrast with V5**: V5's `RETURNING INTO` would catch this — Thread B's counter increment would return 8, which exceeds maxSlots, triggering a rollback. V6 accepts this race to eliminate counter write contention.
+**Contrast with V5**: V5 also accepts this race — it no longer rolls back on maxSlots exceeded. Both V5 and V6 rely on downstream tolerance for marginal over-allocation. The key difference is that V6 eliminates counter write contention entirely by moving counter updates to a background scheduler.
 
 ---
 
@@ -738,17 +738,17 @@ The over-allocation is bounded by the number of concurrent threads that can pass
 | Aspect | V5 (Atomic Counter) | V6 (Async Counter + Soft Guard) |
 |--------|---------------------|--------------------------------|
 | **Hot path DB writes** | INSERT slot + UPDATE counter | INSERT slot only |
-| **Counter updates** | Atomic in hot path (RETURNING INTO) | Background scheduler (MERGE via CREAT_TS) |
-| **Capacity enforcement** | Atomic check + rollback + retry | Soft guard (fresh COUNT before INSERT) |
-| **Over-allocation** | Zero (atomic guarantee) | Rare, bounded by concurrency window (~0.55% at 500 TPS) |
+| **Counter updates** | Inline upsert in hot path | Background scheduler (MERGE via CREAT_TS) |
+| **Capacity enforcement** | Advisory (picker threshold, no rollback) | Soft guard (fresh COUNT before INSERT) |
+| **Over-allocation** | Rare, bounded by racing between occupancy read and INSERT | Rare, bounded by concurrency window (~0.55% at 500 TPS) |
 | **Counter contention** | Every claim serializes on counter row | Zero in hot path |
-| **Rollback rate** | Non-zero (maxSlots exceeded triggers rollback) | Zero |
+| **Rollback rate** | Zero | Zero |
 | **DB calls per request** | 3: skip ptr + occupancy + (INSERT+UPDATE) | 4: skip ptr + occupancy + COUNT + INSERT |
 | **Window selection** | Proximity+occupancy weighted random | Same |
 | **Skip pointer** | DB-backed, append-only | Same |
 | **Phase model** | Three-phase (Normal/Overflow/Extension) | Same |
 | **Idempotency** | UNIQUE(EVENT_ID) constraint | Same |
-| **Best for** | Strict capacity accuracy | High throughput, zero contention |
+| **Best for** | Simple hot path (atomic counter in same transaction) | High throughput, zero counter contention |
 
 ---
 

@@ -40,7 +40,7 @@ import java.util.concurrent.atomic.AtomicInteger
  * Test profile: windowSize=4s, maxSlotsPerWindow=4,
  *               softMaxPercent=75 (softMax=3),
  *               defaultMaxDurationHours=1, extensionWindows=4,
- *               maxExtensionsBeyond=3, maxClaimRetries=2.
+ *               maxExtensionsBeyond=3.
  */
 @QuarkusTest
 @QuarkusTestResource(OracleTestResource::class)
@@ -685,40 +685,6 @@ class SlotAssignmentServiceV5Test {
             slot2.scheduledTime.isBefore(chunk3Start),
             "Second request should land in chunk 3 (>= $chunk3Start)"
         )
-    }
-
-    // ==================== maxSlots rollback ====================
-
-    @Test
-    fun `maxSlots exceeded triggers rollback and retry in different window`() {
-        val requestedTime = Instant.parse("2025-06-01T14:00:00Z")
-
-        // Set W+0 to maxSlots — any claim should rollback and retry on W+1+
-        seedCounter(requestedTime, 4) // maxSlots in test profile
-        // W+1..W+3 are empty — plenty of room
-
-        val slot = service.assignSlot("evt-hc", requestedTime)
-
-        assertEquals(AllocationStatus.NORMAL, slot.allocationStatus)
-
-        // Verify the slot did NOT land in W+0 (at maxSlots)
-        val slotWindowStart = transaction {
-            RateLimitEventSlotTable.selectAll()
-                .where { RateLimitEventSlotTable.eventId eq "evt-hc" }
-                .first()[RateLimitEventSlotTable.windowStart]
-        }
-        assertNotEquals(
-            requestedTime, slotWindowStart,
-            "Slot should not be in W+0 (at maxSlots), but was"
-        )
-
-        // W+0's counter should still be 6 (rollback undid the increment)
-        val w0Count = transaction {
-            WindowCounterTable.selectAll()
-                .where { WindowCounterTable.windowStart eq requestedTime }
-                .first()[WindowCounterTable.slotCount]
-        }
-        assertEquals(4, w0Count, "W+0 counter should remain at maxSlots (rollback undid increment)")
     }
 
     // ==================== Phase 3 advances skip pointer ====================

@@ -142,7 +142,6 @@ rate-limiter:
     window-chunk-duration: 15m
     extension-windows: 40
     max-extensions-beyond: 5
-    max-claim-retries: 3
   v6:
     window-size: 30s
     max-slots-per-window: 900
@@ -170,7 +169,6 @@ rate-limiter:
       window-chunk-duration: 16s
       extension-windows: 4
       max-extensions-beyond: 3
-      max-claim-retries: 2
     v6:
       window-size: 4s
       max-slots-per-window: 4

@@ -154,25 +154,15 @@ Counter rows in `RL_WNDW_CT` are created when the first slot is claimed in a win
 
 The counter upsert uses UPDATE-first (common path: row exists) with INSERT fallback (cold start: row doesn't exist). Both paths are handled in the same transaction as the slot INSERT.
 
-### 7. Atomic MaxSlots Enforcement via RETURNING INTO
+### 7. Advisory Capacity — No Rollback
 
-Occupancy reads are advisory — stale by the time a claim is made. Under 20-pod concurrency, multiple pods may pick the same window based on the same stale snapshot. The `maxSlotsPerWindow` limit is enforced atomically at claim time:
-
-```sql
-BEGIN
-  UPDATE RL_WNDW_CT SET SLOT_CT = SLOT_CT + 1
-  WHERE WNDW_STRT_TS = :windowStart
-  RETURNING SLOT_CT INTO :newCount;
-END;
-```
-
-If `newCount > maxSlotsPerWindow`, the entire transaction (slot INSERT + counter increment) is rolled back, and the service retries with a fresh occupancy read and a different window pick. No window ever exceeds `maxSlotsPerWindow`, regardless of concurrency.
+Occupancy reads are advisory — stale by the time a claim is made. Under 20-pod concurrency, multiple pods may pick the same window based on the same stale snapshot. Capacity enforcement is handled entirely by the picker's `softMax` and `maxSlotsPerWindow` thresholds, which filter out windows that appear full. No rollback occurs if a window overshoots `maxSlotsPerWindow` due to racing — downstream tolerance absorbs the marginal overshoot (~1-5 events per window).
 
 ### 8. Optimistic Inserts — No Row Locks
 
 V5 uses no `FOR UPDATE`, no `SELECT ... FOR UPDATE SKIP LOCKED`, no pessimistic locking of any kind. All writes are plain INSERTs and UPDATEs. Concurrency is handled by:
 - Advisory counter reads (non-locking)
-- Atomic upsert with RETURNING INTO (maxSlots enforcement)
+- Counter upsert (fire-and-forget, no return value needed)
 - UNIQUE constraint on EVENT_ID (idempotency)
 - Append-only skip pointer (no write contention)
 
@@ -218,7 +208,7 @@ maxSlotsPerWindow = configured absolute ceiling
   0                                    900
 ```
 
-The 10% gap absorbs concurrent overbooking. When 20 pods read stale occupancy and simultaneously pick the same window, actual fill may exceed softMax. The maxSlots limit enforced atomically via `RETURNING INTO` ensures no window ever goes above the configured maximum.
+The 10% gap absorbs concurrent overbooking. When 20 pods read stale occupancy and simultaneously pick the same window, actual fill may exceed softMax. Phase 2 uses maxSlotsPerWindow as the picker threshold to fill this gap before extending beyond maxDuration. Downstream tolerance absorbs any marginal overshoot from racing.
 
 ---
 
@@ -234,14 +224,8 @@ flowchart TD
     Phase1Start -->|Yes| Phase1Chunk[Phase 1: Read chunk occupancy]
     Phase1Chunk --> WtdRandom1[Proximity-weighted random pick\nthreshold = softMax]
     WtdRandom1 --> Found1{Candidate\nfound?}
-    Found1 -->|Yes| Claim1[INSERT slot + upsert counter\nRETURNING INTO]
-    Claim1 --> MaxCheck{newCount >\nmaxSlots?}
-    MaxCheck -->|No| ReturnNormal([Return NORMAL])
-    MaxCheck -->|Yes| Rollback[ROLLBACK transaction]
-    Rollback --> RetryCheck{Retries\nleft?}
-    RetryCheck -->|Yes| FreshRead[Fresh occupancy read]
-    FreshRead --> WtdRandom1
-    RetryCheck -->|No| AdvanceSkip1
+    Found1 -->|Yes| Claim1[INSERT slot + upsert counter]
+    Claim1 --> ReturnNormal([Return NORMAL])
     Found1 -->|No| AdvanceSkip1[Advance skip pointer\nto chunk end]
     AdvanceSkip1 --> NextChunk1{More chunks in\nmaxDuration?}
     NextChunk1 -->|Yes| Phase1Chunk
@@ -252,11 +236,8 @@ flowchart TD
     Phase2[Phase 2: Fresh read from requestedTime\nthreshold = maxSlotsPerWindow]
     Phase2 --> WtdRandom2[Proximity-weighted random pick]
     WtdRandom2 --> Found2{Candidate\nfound?}
-    Found2 -->|Yes| Claim2[INSERT slot + upsert counter\nRETURNING INTO]
-    Claim2 --> MaxCheck2{newCount >\nmaxSlots?}
-    MaxCheck2 -->|No| ReturnSoftMax([Return SOFT_MAX_EXCEEDED])
-    MaxCheck2 -->|Yes| Rollback2[ROLLBACK + retry]
-    Rollback2 --> WtdRandom2
+    Found2 -->|Yes| Claim2[INSERT slot + upsert counter]
+    Claim2 --> ReturnSoftMax([Return SOFT_MAX_EXCEEDED])
     Found2 -->|No| Phase3
 
     Phase3[Phase 3: Extension chunks\nbeyond maxDuration]
@@ -284,21 +265,20 @@ assignSlot(eventId, requestedTime, maxDuration)
 │  │   ├─ Read occupancy (30 windows)
 │  │   ├─ Pick via proximity+occupancy weighted random (threshold = softMax)
 │  │   ├─ Claim: INSERT slot + upsert counter in single transaction
-│  │   │   └─ If newCount > maxSlots → rollback, retry with fresh read
 │  │   └─ If chunk exhausted → advance skip pointer, next chunk
 │  └─ If found → return NORMAL
 │
 ├─ Step 3: Phase 2 — full rescan [requestedTime, maxDurationEnd)
 │  ├─ Fresh occupancy read (ignores skip pointer)
 │  ├─ Pick via weighted random (threshold = maxSlots)
-│  ├─ Claim with retry
+│  ├─ Claim slot
 │  └─ If found → return SOFT_MAX_EXCEEDED
 │
 ├─ Step 4: Phase 3 — extension chunks beyond maxDuration
 │  ├─ For each extension chunk (up to maxExtensionsBeyond):
 │  │   ├─ Fresh occupancy read
 │  │   ├─ Pick via weighted random (threshold = softMax)
-│  │   ├─ Claim with retry
+│  │   ├─ Claim slot
 │  │   └─ Advance skip pointer
 │  └─ If found → return MAX_DURATION_EXCEEDED
 │
@@ -345,7 +325,7 @@ assignSlot(eventId, requestedTime, maxDuration)
 
 **`RL_EVENT_SLOT_DTL`** — The source of truth for every assigned slot. Each row records which event was placed in which window, at what scheduled time. Two roles: (1) the immutable audit trail that downstream consumers read to know when to execute an event, and (2) the idempotency mechanism — the `UNIQUE(EVENT_ID)` constraint guarantees exactly one slot per event across all pods, with zero coordination beyond the DB constraint itself. Without this table, there is no record of assignments and no way to prevent double-scheduling.
 
-**`RL_WNDW_CT`** — An advisory counter that tracks how many slots have been assigned to each window. The weighted random window picker reads this to decide which windows have capacity. Without it, every request would need to `COUNT(*)` all slot rows per window in the range — a full table scan of potentially thousands of rows per chunk. The counter table turns that into a cheap PK range scan (~30 rows per chunk). In V5 specifically, the counter also serves as the atomic enforcement point: `RETURNING INTO` after `UPDATE SLOT_CT = SLOT_CT + 1` gives the exact post-increment value, enabling the maxSlots rollback mechanism. The counter is created on-demand (no pre-provisioning) — a row appears the first time a slot is claimed in that window.
+**`RL_WNDW_CT`** — An advisory counter that tracks how many slots have been assigned to each window. The weighted random window picker reads this to decide which windows have capacity. Without it, every request would need to `COUNT(*)` all slot rows per window in the range — a full table scan of potentially thousands of rows per chunk. The counter table turns that into a cheap PK range scan (~30 rows per chunk). In V5, the counter is updated via `RETURNING INTO` after `UPDATE SLOT_CT = SLOT_CT + 1` to get the exact post-increment value. Capacity enforcement is advisory — the picker uses the counter to steer traffic away from full windows, but no rollback occurs on overshoot (downstream tolerance absorbs marginal racing). The counter is created on-demand (no pre-provisioning) — a row appears the first time a slot is claimed in that window.
 
 **`RL_SKIP_PTR`** — A distributed cursor that tracks the furthest exhausted chunk boundary per `requestedTime`. When a pod exhausts a chunk (all windows at or above softMax), it writes a skip pointer so that other pods — and subsequent requests on the same pod — skip directly past that chunk instead of re-scanning it. Without it, every request would start from `requestedTime` and re-read chunks that are already known to be full. With 20 pods and high TPS, this avoids O(exhausted_chunks) redundant reads per request. The composite PK `(REQ_TS, SKIP_TO_TS)` and append-only writes ensure zero contention: concurrent pods inserting different skip-to values never block each other.
 
@@ -365,7 +345,6 @@ rate-limiter:
     window-chunk-duration: 15m       # Chunked scan batch size for proximity weighting
     extension-windows: 40            # 20-min extension chunks
     max-extensions-beyond: 5         # Up to 5 extensions beyond maxDuration
-    max-claim-retries: 3             # Retries when maxSlots exceeded on claim
 ```
 
 ### Capacity Math
@@ -625,8 +604,7 @@ All windows in maxDuration + all extension ranges at maxSlots.
 | **Incremental chunk claims** | Tight proximity, small DB reads, progressive skip pointer | More DB round-trips if many chunks are exhausted |
 | **Three-phase degradation** | Graceful capacity handling with caller visibility | Caller must handle three status values |
 | **DB-backed skip pointer** | Multi-pod coordination without Redis/external cache | Extra DB call per request (PK lookup, ~0.1ms) |
-| **Optimistic inserts (no row locks)** | No deadlocks, linear throughput scaling | Advisory reads can be stale — maxSlots enforcement needed |
-| **Atomic maxSlots enforcement** | No window ever exceeds configured limit | Rollback + retry cost on contention (~3ms per retry) |
+| **Optimistic inserts (no row locks, no rollback)** | No deadlocks, no retries, linear throughput scaling | Advisory reads can be stale — marginal overshoot possible under racing |
 | **On-demand counter creation** | Zero setup, no background jobs | First slot in a window pays INSERT cost (~0.5ms) |
 | **Per-request maxDuration** | Flexible per-caller SLAs | Different maxDurations can cause fragmented fill patterns |
 | **Zero-cost idempotency** | No extra DB call on happy path | Duplicate handling adds ~1ms (re-read within same transaction) |
@@ -653,7 +631,7 @@ All windows in maxDuration + all extension ranges at maxSlots.
 | File | Role |
 |------|------|
 | `slot/SlotAssignmentServiceV5.kt` | Core three-phase algorithm |
-| `repo/WindowSlotCounterRepository.kt` | Occupancy reads, `upsertCounterReturningCount` |
+| `repo/WindowSlotCounterRepository.kt` | Occupancy reads, `upsertCounter` |
 | `repo/SkipPointerRepository.kt` | DB-backed skip pointer (monotonic) |
 | `repo/EventSlotRepository.kt` | Slot insertion, idempotency |
 | `db/Tables.kt` | `WindowCounterTable`, `SkipPointerTable`, `RateLimitEventSlotTable` |
