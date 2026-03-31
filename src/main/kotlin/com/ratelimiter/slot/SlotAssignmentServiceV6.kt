@@ -128,7 +128,7 @@ class SlotAssignmentServiceV6(
             val windows = generateWindowsInRange(chunkStart, chunkEnd)
 
             val result = tryClaimWithSoftGuard(
-                eventId, requestedTime, windows, occupancy, softMax, AllocationStatus.NORMAL
+                eventId, requestedTime, windows, occupancy, softMax
             )
             if (result != null) return result
 
@@ -153,7 +153,7 @@ class SlotAssignmentServiceV6(
         val windows = generateWindowsInRange(requestedTime, maxDurationEnd)
 
         return tryClaimWithSoftGuard(
-            eventId, requestedTime, windows, freshOccupancy, maxSlotsPerWindow, AllocationStatus.SOFT_MAX_EXCEEDED
+            eventId, requestedTime, windows, freshOccupancy, maxSlotsPerWindow
         )
     }
 
@@ -174,7 +174,7 @@ class SlotAssignmentServiceV6(
             val windows = generateWindowsInRange(extStart, extEnd)
 
             val result = tryClaimWithSoftGuard(
-                eventId, requestedTime, windows, occupancy, softMax, AllocationStatus.MAX_DURATION_EXCEEDED
+                eventId, requestedTime, windows, occupancy, softMax
             )
             if (result != null) return result
 
@@ -201,7 +201,6 @@ class SlotAssignmentServiceV6(
         windows: List<Instant>,
         occupancy: Map<Instant, Int>,
         threshold: Int,
-        status: AllocationStatus
     ): AssignedSlot? {
         val candidates = windows.toMutableList()
 
@@ -218,7 +217,7 @@ class SlotAssignmentServiceV6(
 
             val jitterMs = ThreadLocalRandom.current().nextLong(0, windowSizeMs)
             val scheduledTime = picked.plusMillis(jitterMs)
-            return claimSlot(eventId, requestedTime, picked, scheduledTime, status)
+            return claimSlot(eventId, requestedTime, picked, scheduledTime)
         }
         return null
     }
@@ -233,7 +232,6 @@ class SlotAssignmentServiceV6(
         requestedTime: Instant,
         windowStart: Instant,
         scheduledTime: Instant,
-        status: AllocationStatus
     ): AssignedSlot {
         return transaction {
             val inserted = with(eventSlotRepository) {
@@ -252,8 +250,7 @@ class SlotAssignmentServiceV6(
             AssignedSlot(
                 eventId = eventId,
                 scheduledTime = scheduledTime,
-                delay = delay,
-                allocationStatus = status
+                delay = delay
             )
         }
     }

@@ -119,7 +119,7 @@ class SlotAssignmentServiceV5(
             val picked = windowPicker.pickProximityWeightedRandom(windows, occupancy, softMax)
 
             if (picked != null) {
-                return claimSlot(eventId, requestedTime, picked, AllocationStatus.NORMAL)
+                return claimSlot(eventId, requestedTime, picked)
             }
 
             // Chunk exhausted at softMax — advance skip pointer so other pods skip it
@@ -144,7 +144,7 @@ class SlotAssignmentServiceV5(
         val picked = windowPicker.pickProximityWeightedRandom(windows, freshOccupancy, maxSlotsPerWindow)
             ?: return null
 
-        return claimSlot(eventId, requestedTime, picked, AllocationStatus.SOFT_MAX_EXCEEDED)
+        return claimSlot(eventId, requestedTime, picked)
     }
 
     /**
@@ -165,7 +165,7 @@ class SlotAssignmentServiceV5(
             val picked = windowPicker.pickProximityWeightedRandom(windows, occupancy, softMax)
 
             if (picked != null) {
-                return claimSlot(eventId, requestedTime, picked, AllocationStatus.MAX_DURATION_EXCEEDED)
+                return claimSlot(eventId, requestedTime, picked)
             }
 
             // Advance skip pointer as we exhaust extension ranges
@@ -185,11 +185,10 @@ class SlotAssignmentServiceV5(
         eventId: String,
         requestedTime: Instant,
         pickedWindow: Instant,
-        status: AllocationStatus
     ): AssignedSlot {
         val jitterMs = ThreadLocalRandom.current().nextLong(0, windowSizeMs)
         val scheduledTime = pickedWindow.plusMillis(jitterMs)
-        return claimSlotAndUpdateCounter(eventId, requestedTime, pickedWindow, scheduledTime, status)
+        return claimSlotAndUpdateCounter(eventId, requestedTime, pickedWindow, scheduledTime)
     }
 
     /**
@@ -202,7 +201,6 @@ class SlotAssignmentServiceV5(
         requestedTime: Instant,
         windowStart: Instant,
         scheduledTime: Instant,
-        status: AllocationStatus
     ): AssignedSlot {
         return transaction {
             val inserted = with(eventSlotRepository) {
@@ -225,8 +223,7 @@ class SlotAssignmentServiceV5(
             AssignedSlot(
                 eventId = eventId,
                 scheduledTime = scheduledTime,
-                delay = delay,
-                allocationStatus = status
+                delay = delay
             )
         }
     }

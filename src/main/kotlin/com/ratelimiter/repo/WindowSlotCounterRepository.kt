@@ -142,7 +142,7 @@ class WindowSlotCounterRepository(
      * SLOT_CT < maxSlots. No row lock acquired — result may be stale.
      */
     fun findFirstAvailableWindow(from: Instant, to: Instant, maxSlots: Int): Instant? {
-        return org.jetbrains.exposed.sql.transactions.transaction {
+        return transaction {
             exec(
                 """
                 SELECT WNDW_STRT_TS
@@ -170,7 +170,7 @@ class WindowSlotCounterRepository(
      * Used by the pre-provisioner to determine where provisioning left off.
      */
     fun fetchMaxProvisionedWindow(): Instant? {
-        return org.jetbrains.exposed.sql.transactions.transaction {
+        return transaction {
             WindowCounterTable
                 .select(WindowCounterTable.windowStart)
                 .orderBy(WindowCounterTable.windowStart, org.jetbrains.exposed.sql.SortOrder.DESC)
@@ -293,11 +293,15 @@ class WindowSlotCounterRepository(
     }
 
     /**
-     * Delta-based counter refresh for V7.
+     * Absolute-count counter refresh for V7.
      *
-     * Statement 1: MERGE increments SLOT_CT by the count of new slots inserted
-     * between [lastRunTs] and [cutoffTs]. No WHEN NOT MATCHED — windows are
-     * pre-provisioned by WindowPreProvisioningScheduler.
+     * Statement 1: MERGE sets SLOT_CT to the total slot count for windows that
+     * received new inserts between [lastRunTs] and [cutoffTs]. Uses CREAT_TS
+     * range in an inner subquery for efficient discovery of recently-active
+     * windows, then counts ALL slots per window for an idempotent absolute set.
+     * Safe under multi-pod: any pod writes the same correct total count.
+     * No WHEN NOT MATCHED — windows are pre-provisioned by
+     * WindowPreProvisioningScheduler.
      *
      * Statement 2: Transitions STATUS to 'FULL' for any window that has reached
      * or exceeded [maxSlotsPerWindow].
@@ -306,20 +310,24 @@ class WindowSlotCounterRepository(
         transaction {
             val conn = TransactionManager.current().connection.connection as java.sql.Connection
 
-            // Delta MERGE — increment counters by new slot count
+            // Absolute-count MERGE — set counters to total slot count
             conn.prepareStatement(
                 """
                 MERGE INTO RL_WNDW_CT b
                 USING (
-                    SELECT a.WNDW_STRT_TS, COUNT(*) AS delta_count
-                    FROM RL_EVENT_SLOT_DTL a
-                    WHERE a.CREAT_TS > ?
-                      AND a.CREAT_TS <= ?
-                    GROUP BY a.WNDW_STRT_TS
+                    SELECT d.WNDW_STRT_TS, COUNT(*) AS total_count
+                    FROM RL_EVENT_SLOT_DTL d
+                    WHERE d.WNDW_STRT_TS IN (
+                        SELECT DISTINCT WNDW_STRT_TS
+                        FROM RL_EVENT_SLOT_DTL
+                        WHERE CREAT_TS > ?
+                          AND CREAT_TS <= ?
+                    )
+                    GROUP BY d.WNDW_STRT_TS
                 ) src
                 ON (b.WNDW_STRT_TS = src.WNDW_STRT_TS)
                 WHEN MATCHED THEN
-                    UPDATE SET b.SLOT_CT = b.SLOT_CT + src.delta_count
+                    UPDATE SET b.SLOT_CT = src.total_count
                 """.trimIndent()
             ).use { stmt ->
                 stmt.setTimestamp(1, Timestamp.from(lastRunTs))
@@ -338,6 +346,50 @@ class WindowSlotCounterRepository(
             ).use { stmt ->
                 stmt.setInt(1, maxSlotsPerWindow)
                 stmt.executeUpdate()
+            }
+        }
+    }
+
+    // ==================== V8 methods ====================
+
+    /**
+     * Returns up to [limit] windows with SLOT_CT < [maxSlots] in [from, to),
+     * ordered by WNDW_STRT_TS ASC. No status flag check — filters purely on count.
+     *
+     * Uses index RL_WNDW_CT_I01X(WNDW_STRT_TS, SLOT_CT) for efficient range scan.
+     */
+    fun fetchWindowsWithAvailableCapacity(
+        from: Instant,
+        to: Instant,
+        maxSlots: Int,
+        limit: Int
+    ): List<Pair<Instant, Int>> {
+        return transaction {
+            val conn = TransactionManager.current().connection.connection as java.sql.Connection
+            conn.prepareStatement(
+                """
+                SELECT WNDW_STRT_TS, SLOT_CT
+                FROM   RL_WNDW_CT
+                WHERE  WNDW_STRT_TS >= ?
+                AND    WNDW_STRT_TS < ?
+                AND    SLOT_CT < ?
+                ORDER BY WNDW_STRT_TS ASC
+                FETCH FIRST ? ROWS ONLY
+                """.trimIndent()
+            ).use { stmt ->
+                stmt.setTimestamp(1, Timestamp.from(from))
+                stmt.setTimestamp(2, Timestamp.from(to))
+                stmt.setInt(3, maxSlots)
+                stmt.setInt(4, limit)
+                val rs = stmt.executeQuery()
+                val results = mutableListOf<Pair<Instant, Int>>()
+                while (rs.next()) {
+                    results.add(
+                        rs.getTimestamp("WNDW_STRT_TS").toInstant() to rs.getInt("SLOT_CT")
+                    )
+                }
+                rs.close()
+                results
             }
         }
     }

@@ -158,6 +158,10 @@ rate-limiter:
     candidate-window-count: 30
     counter-refresh-every: 3s
     counter-refresh-since: 6s
+  v8:
+    window-size: 30s
+    max-slots-per-window: 900
+    candidate-window-count: 30
 
 # Test profile — longer timeouts for Oracle XE under ARM emulation
 "%test":
@@ -191,6 +195,10 @@ rate-limiter:
       candidate-window-count: 10
       counter-refresh-every: 1s
       counter-refresh-since: 2s
+    v8:
+      window-size: 4s
+      max-slots-per-window: 4
+      candidate-window-count: 10
   quarkus:
     datasource:
       jdbc:

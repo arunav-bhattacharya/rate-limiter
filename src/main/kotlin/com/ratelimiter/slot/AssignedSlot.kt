@@ -25,14 +25,7 @@ data class AssignedSlot(
      * requested window. A positive value means it was pushed forward because
      * earlier windows were full or contended.
      */
-    val delay: Duration,
-
-    /**
-     * Indicates which allocation phase produced this slot.
-     * V3 always returns [AllocationStatus.NORMAL] (default).
-     * V5 returns the phase that succeeded (normal, overflow, or extension).
-     */
-    val allocationStatus: AllocationStatus = AllocationStatus.NORMAL
+    val delay: Duration
 )
 
 /**

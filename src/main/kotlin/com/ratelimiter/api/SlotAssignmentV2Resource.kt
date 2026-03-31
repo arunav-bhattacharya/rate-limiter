@@ -1,6 +1,5 @@
 package com.ratelimiter.api
 
-import com.ratelimiter.slot.AllocationStatus
 import com.ratelimiter.slot.AssignedSlot
 import com.ratelimiter.slot.SlotAssignmentException
 import com.ratelimiter.slot.SlotAssignmentServiceV5
@@ -19,8 +18,7 @@ import java.time.Instant
  * REST endpoint for V5 slot assignment.
  *
  * Exposes the [SlotAssignmentServiceV5] as a synchronous HTTP API.
- * Supports per-request `maxDuration` and returns [AllocationStatus]
- * in the response to indicate which allocation phase produced the slot.
+ * Supports per-request `maxDuration`.
  */
 @Path("/api/v2/slots")
 @Produces(MediaType.APPLICATION_JSON)
@@ -44,8 +42,7 @@ class SlotAssignmentV2Resource @Inject constructor(
     data class SlotAssignmentV2Response(
         val eventId: String,
         val scheduledTime: String,
-        val delayMs: Long,
-        val allocationStatus: AllocationStatus
+        val delayMs: Long
     )
 
     @POST
@@ -84,7 +81,6 @@ class SlotAssignmentV2Resource @Inject constructor(
     private fun AssignedSlot.toV2Response() = SlotAssignmentV2Response(
         eventId = eventId,
         scheduledTime = scheduledTime.toString(),
-        delayMs = delay.toMillis(),
-        allocationStatus = allocationStatus
+        delayMs = delay.toMillis()
     )
 }

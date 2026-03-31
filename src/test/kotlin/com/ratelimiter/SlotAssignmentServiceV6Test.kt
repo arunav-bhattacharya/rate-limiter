@@ -6,7 +6,6 @@ import com.ratelimiter.db.WindowCounterTable
 import com.ratelimiter.repo.EventSlotRepository
 import com.ratelimiter.repo.SkipPointerRepository
 import com.ratelimiter.repo.WindowSlotCounterRepository
-import com.ratelimiter.slot.AllocationStatus
 import com.ratelimiter.slot.AssignedSlot
 import com.ratelimiter.slot.SlotAssignmentException
 import com.ratelimiter.slot.SlotAssignmentServiceV6
@@ -118,7 +117,6 @@ class SlotAssignmentServiceV6Test {
         val slot = service.assignSlot("evt-1", requestedTime)
 
         assertEquals("evt-1", slot.eventId)
-        assertEquals(AllocationStatus.NORMAL, slot.allocationStatus)
         assertFalse(slot.scheduledTime.isBefore(requestedTime))
         assertTrue(slot.delay >= Duration.ZERO)
 
@@ -138,7 +136,6 @@ class SlotAssignmentServiceV6Test {
         val slot = service.assignSlot("evt-b1", time2)
 
         assertEquals("evt-b1", slot.eventId)
-        assertEquals(AllocationStatus.NORMAL, slot.allocationStatus)
         assertFalse(slot.scheduledTime.isBefore(time2))
         assertTrue(slot.scheduledTime.isBefore(time1))
     }
@@ -166,7 +163,6 @@ class SlotAssignmentServiceV6Test {
 
         val slot = service.assignSlot("evt-ne1", requestedTime)
 
-        assertEquals(AllocationStatus.NORMAL, slot.allocationStatus)
         val maxDurationEnd = requestedTime.plus(Duration.ofHours(1))
         assertTrue(slot.scheduledTime.isBefore(maxDurationEnd))
     }
@@ -187,7 +183,6 @@ class SlotAssignmentServiceV6Test {
             service.assignSlot("evt-prox$i", requestedTime)
         }
 
-        assertTrue(slots.all { it.allocationStatus == AllocationStatus.NORMAL })
 
         val slotsByWindow = transaction {
             RateLimitEventSlotTable.selectAll().toList()
@@ -244,7 +239,6 @@ class SlotAssignmentServiceV6Test {
         val slot = service.assignSlot("evt-overflow", requestedTime, maxDuration)
 
         assertEquals("evt-overflow", slot.eventId)
-        assertEquals(AllocationStatus.SOFT_MAX_EXCEEDED, slot.allocationStatus)
         assertTrue(slot.scheduledTime.isBefore(requestedTime.plus(maxDuration)))
     }
 
@@ -266,7 +260,6 @@ class SlotAssignmentServiceV6Test {
         val slot = service.assignSlot("evt-extend", requestedTime, maxDuration)
 
         assertEquals("evt-extend", slot.eventId)
-        assertEquals(AllocationStatus.MAX_DURATION_EXCEEDED, slot.allocationStatus)
         assertFalse(
             slot.scheduledTime.isBefore(requestedTime.plus(maxDuration)),
             "Slot should be beyond maxDuration"
@@ -290,11 +283,9 @@ class SlotAssignmentServiceV6Test {
 
         // Request with maxDuration=16s — all windows in range at softMax → Phase 2
         val shortSlot = service.assignSlot("evt-short", requestedTime, Duration.ofSeconds(16))
-        assertEquals(AllocationStatus.SOFT_MAX_EXCEEDED, shortSlot.allocationStatus)
 
         // Request with maxDuration=32s — windows 4-7 are available → Phase 1
         val longSlot = service.assignSlot("evt-long", requestedTime, Duration.ofSeconds(32))
-        assertEquals(AllocationStatus.NORMAL, longSlot.allocationStatus)
     }
 
     // ==================== Skip pointer DB ====================
@@ -311,7 +302,6 @@ class SlotAssignmentServiceV6Test {
         }
 
         val slot1 = service.assignSlot("evt-sp1", requestedTime, maxDuration)
-        assertEquals(AllocationStatus.SOFT_MAX_EXCEEDED, slot1.allocationStatus)
 
         val skipTo = skipPointerRepository.fetchSkipTo(requestedTime)
         assertNotNull(skipTo)
@@ -610,7 +600,6 @@ class SlotAssignmentServiceV6Test {
 
         val slot = service.assignSlot("evt-phaseb-scan", requestedTime, maxDuration)
 
-        assertEquals(AllocationStatus.SOFT_MAX_EXCEEDED, slot.allocationStatus)
         assertTrue(slot.scheduledTime.isBefore(requestedTime.plus(maxDuration)))
     }
 
@@ -628,7 +617,6 @@ class SlotAssignmentServiceV6Test {
 
         val slot = service.assignSlot("evt-chunk", requestedTime)
 
-        assertEquals(AllocationStatus.NORMAL, slot.allocationStatus)
         val chunk2Start = requestedTime.plusSeconds(16)
         assertFalse(
             slot.scheduledTime.isBefore(chunk2Start),
@@ -660,7 +648,6 @@ class SlotAssignmentServiceV6Test {
         }
 
         val slot2 = service.assignSlot("evt-sp-adv2", requestedTime)
-        assertEquals(AllocationStatus.NORMAL, slot2.allocationStatus)
         val chunk3Start = requestedTime.plusSeconds(32)
         assertFalse(
             slot2.scheduledTime.isBefore(chunk3Start),
@@ -684,7 +671,6 @@ class SlotAssignmentServiceV6Test {
         }
 
         val slot = service.assignSlot("evt-pc-skip", requestedTime, maxDuration)
-        assertEquals(AllocationStatus.MAX_DURATION_EXCEEDED, slot.allocationStatus)
 
         val skipTo = skipPointerRepository.fetchSkipTo(requestedTime)
         assertNotNull(skipTo)
@@ -727,7 +713,6 @@ class SlotAssignmentServiceV6Test {
 
         val slot = service.assignSlot("evt-3phase", requestedTime, maxDuration)
 
-        assertEquals(AllocationStatus.MAX_DURATION_EXCEEDED, slot.allocationStatus)
         assertFalse(
             slot.scheduledTime.isBefore(requestedTime.plus(maxDuration)),
             "Slot should be beyond maxDuration (Phase 3)"
@@ -821,7 +806,6 @@ class SlotAssignmentServiceV6Test {
         // Note: proximity weighting might still pick another window, so we just verify
         // the request succeeded
         assertEquals("evt-sg-allow", slot.eventId)
-        assertEquals(AllocationStatus.NORMAL, slot.allocationStatus)
     }
 
     // ==================== V6-specific: Scheduler ====================

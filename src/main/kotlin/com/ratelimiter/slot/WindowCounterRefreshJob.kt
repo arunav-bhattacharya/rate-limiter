@@ -14,8 +14,9 @@ import java.time.Instant
  *   - A Temporal Activity (in a subsequent iteration)
  *
  * Two operations per run:
- *   1. Delta MERGE: increments SLOT_CT by the count of new slots inserted
- *      between [since] and [until]
+ *   1. Absolute-count MERGE: sets SLOT_CT to the total slot count for windows
+ *      that received new inserts between [since] and [until]. Idempotent —
+ *      safe under multi-pod concurrent execution.
  *   2. Status transition: marks windows as FULL when SLOT_CT >= maxSlotsPerWindow
  */
 @ApplicationScoped

@@ -10,36 +10,36 @@ import java.time.Instant
 import java.util.concurrent.ThreadLocalRandom
 
 /**
- * V7 slot assignment — simplified single-phase with occupancy-weighted selection.
+ * V8 slot assignment — synchronous counters, pre-provisioned windows, proximity-biased selection.
  *
- * Simplifications over V6:
- *   - Single phase: no softMax overflow, no extension beyond maxDuration
- *   - No skip pointer: always starts from requestedTime
- *   - No soft guard: trusts background-maintained STATUS column
- *   - No in-memory window generation: queries pre-provisioned windows from DB
- *   - Occupancy-only weighting: no proximity factor
+ * Changes from V7:
+ *   - Counter update is synchronous (same transaction as slot INSERT), not async
+ *   - No WNDW_STATUS flag — filters by SLOT_CT < maxSlots directly
+ *   - Proximity+capacity weighted selection (bias toward requestedTime on equal counts)
  *
  * Hot path (2 DB calls):
- *   1. Fetch N available windows — index scan on (WNDW_STATUS, WNDW_STRT_TS)
- *   2. Slot INSERT — single row into RL_EVENT_SLOT_DTL
+ *   1. fetchWindowsWithAvailableCapacity — first N windows with SLOT_CT < max
+ *   2. claimSlot — INSERT slot + increment counter in single transaction
  *
  * Window lifecycle:
  *   - Pre-provisioned 60 days ahead by [WindowPreProvisioningScheduler]
- *   - Counter + status maintained by [WindowCounterRefreshJob]
- *   - STATUS transitions: AVAILABLE → FULL (when SLOT_CT >= maxSlotsPerWindow)
+ *   - Counter incremented synchronously on each slot INSERT
  *
- * maxDuration is required per-request (no default).
+ * If fewer than N candidates exist in the range, proceeds with whatever is available.
+ *
+ * Assumes requestedTime is always window-aligned.
+ * No background counter refresh job required.
  */
 @ApplicationScoped
-class SlotAssignmentServiceV7(
+class SlotAssignmentServiceV8(
     private val eventSlotRepository: EventSlotRepository,
     private val windowSlotCounterRepository: WindowSlotCounterRepository,
     private val windowPicker: WindowPicker,
-    @param:ConfigProperty(name = "rate-limiter.v7.window-size", defaultValue = "30s")
+    @param:ConfigProperty(name = "rate-limiter.v8.window-size", defaultValue = "30s")
     private val windowSize: Duration,
-    @param:ConfigProperty(name = "rate-limiter.v7.max-slots-per-window", defaultValue = "900")
+    @param:ConfigProperty(name = "rate-limiter.v8.max-slots-per-window", defaultValue = "900")
     private val maxSlotsPerWindow: Int,
-    @param:ConfigProperty(name = "rate-limiter.v7.candidate-window-count", defaultValue = "30")
+    @param:ConfigProperty(name = "rate-limiter.v8.candidate-window-count", defaultValue = "30")
     private val candidateWindowCount: Int,
 ) {
     companion object {
@@ -47,26 +47,25 @@ class SlotAssignmentServiceV7(
     }
 
     private val windowSizeMs: Long = windowSize.toMillis()
-    private val windowSizeSeconds: Long = windowSize.toSeconds()
 
     /**
      * Assigns a slot for [eventId] within [requestedTime, requestedTime + maxDuration).
      *
      * @param eventId unique event identifier (idempotency key)
-     * @param requestedTime desired execution time
-     * @param maxDuration maximum duration from requestedTime for slot placement (required)
+     * @param requestedTime desired execution time (must be window-aligned)
+     * @param maxDuration maximum delay from requestedTime (required)
      * @throws SlotAssignmentException if no available window exists in the range
      */
     fun assignSlot(eventId: String, requestedTime: Instant, maxDuration: Duration): AssignedSlot {
         val maxDurationEnd = requestedTime.plus(maxDuration)
 
-        // Fetch candidate windows with capacity
-        val candidates = windowSlotCounterRepository.fetchAvailableWindows(
-            requestedTime, maxDurationEnd, candidateWindowCount
+        // DB call 1: first N pre-provisioned windows with SLOT_CT < max in [requestedTime, maxDurationEnd)
+        val candidates = windowSlotCounterRepository.fetchWindowsWithAvailableCapacity(
+            requestedTime, maxDurationEnd, maxSlotsPerWindow, candidateWindowCount
         )
 
         if (candidates.isEmpty()) {
-            val totalWindows = Duration.between(requestedTime, maxDurationEnd).toSeconds() / windowSizeSeconds
+            val totalWindows = maxDuration.toSeconds() / windowSize.toSeconds()
             throw SlotAssignmentException(
                 eventId = eventId,
                 windowsSearched = totalWindows,
@@ -74,8 +73,11 @@ class SlotAssignmentServiceV7(
             )
         }
 
-        // Occupancy-weighted random selection (lower occupancy = higher chance)
-        val picked = windowPicker.pickOccupancyWeightedRandom(candidates, maxSlotsPerWindow)
+        // Proximity+capacity weighted selection (closer windows with more capacity preferred)
+        val windows = candidates.map { it.first }
+        val occupancy = candidates.associate { it.first to it.second }
+
+        val picked = windowPicker.pickProximityWeightedRandom(windows, occupancy, maxSlotsPerWindow)
             ?: throw SlotAssignmentException(
                 eventId = eventId,
                 windowsSearched = candidates.size.toLong(),
@@ -85,13 +87,14 @@ class SlotAssignmentServiceV7(
         val jitterMs = ThreadLocalRandom.current().nextLong(0, windowSizeMs)
         val scheduledTime = picked.plusMillis(jitterMs)
 
+        // DB call 2: INSERT slot + synchronous counter increment
         return claimSlot(eventId, requestedTime, picked, scheduledTime)
     }
 
     /**
-     * INSERT event slot in a single short-lived transaction.
-     * No counter write — the background scheduler handles counter updates.
-     * Idempotent: duplicate eventId caught by UNIQUE constraint, existing slot re-read.
+     * INSERT event slot + synchronous counter increment in a single transaction.
+     * Idempotent: duplicate eventId caught by UNIQUE constraint, existing slot re-read
+     * (counter NOT incremented on idempotent replay).
      */
     private fun claimSlot(
         eventId: String,
@@ -105,10 +108,13 @@ class SlotAssignmentServiceV7(
             }
 
             if (!inserted) {
-                // Duplicate eventId — idempotency
+                // Duplicate eventId — idempotency (no counter touch)
                 return@transaction with(eventSlotRepository) { queryAssignedSlot(eventId) }
                     ?: error("Failed to re-read slot for eventId=$eventId after duplicate key")
             }
+
+            // Synchronous counter increment (row guaranteed to exist via pre-provisioning)
+            with(windowSlotCounterRepository) { incrementSlotCount(windowStart) }
 
             val delay = Duration.between(requestedTime, scheduledTime).let { d ->
                 if (d.isNegative) Duration.ZERO else d
