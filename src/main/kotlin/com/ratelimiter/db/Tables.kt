@@ -7,12 +7,14 @@ import org.jetbrains.exposed.sql.javatime.timestamp
 object WindowCounterTable : Table("RL_WNDW_CT") {
     val windowStart = timestamp("WNDW_STRT_TS")
     val slotCount = integer("SLOT_CT").default(0)
+    val windowStatus = varchar("WNDW_STATUS", 10).default("AVAILABLE")
     val createdAt = timestamp("CREAT_TS")
 
     override val primaryKey = PrimaryKey(windowStart)
 
     init {
         index("RL_WNDW_CT_I01X", false, windowStart, slotCount)
+        index("RL_WNDW_CT_I02X", false, windowStatus, windowStart)
     }
 }
 

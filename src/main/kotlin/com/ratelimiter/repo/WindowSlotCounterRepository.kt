@@ -252,6 +252,96 @@ class WindowSlotCounterRepository(
         }
     }
 
+    // ==================== V7 methods ====================
+
+    /**
+     * Returns up to [limit] windows with STATUS = 'AVAILABLE' in [from, to),
+     * ordered by WNDW_STRT_TS ASC. Each result includes (windowStart, slotCount)
+     * for occupancy-weighted selection.
+     *
+     * Uses index RL_WNDW_CT_I02X(WNDW_STATUS, WNDW_STRT_TS) for efficient
+     * range scan filtered to available windows only.
+     */
+    fun fetchAvailableWindows(from: Instant, to: Instant, limit: Int): List<Pair<Instant, Int>> {
+        return transaction {
+            val conn = TransactionManager.current().connection.connection as java.sql.Connection
+            conn.prepareStatement(
+                """
+                SELECT WNDW_STRT_TS, SLOT_CT
+                FROM   RL_WNDW_CT
+                WHERE  WNDW_STATUS = 'AVAILABLE'
+                AND    WNDW_STRT_TS >= ?
+                AND    WNDW_STRT_TS < ?
+                ORDER BY WNDW_STRT_TS ASC
+                FETCH FIRST ? ROWS ONLY
+                """.trimIndent()
+            ).use { stmt ->
+                stmt.setTimestamp(1, Timestamp.from(from))
+                stmt.setTimestamp(2, Timestamp.from(to))
+                stmt.setInt(3, limit)
+                val rs = stmt.executeQuery()
+                val results = mutableListOf<Pair<Instant, Int>>()
+                while (rs.next()) {
+                    results.add(
+                        rs.getTimestamp("WNDW_STRT_TS").toInstant() to rs.getInt("SLOT_CT")
+                    )
+                }
+                rs.close()
+                results
+            }
+        }
+    }
+
+    /**
+     * Delta-based counter refresh for V7.
+     *
+     * Statement 1: MERGE increments SLOT_CT by the count of new slots inserted
+     * between [lastRunTs] and [cutoffTs]. No WHEN NOT MATCHED — windows are
+     * pre-provisioned by WindowPreProvisioningScheduler.
+     *
+     * Statement 2: Transitions STATUS to 'FULL' for any window that has reached
+     * or exceeded [maxSlotsPerWindow].
+     */
+    fun refreshCountersDelta(lastRunTs: Instant, cutoffTs: Instant, maxSlotsPerWindow: Int) {
+        transaction {
+            val conn = TransactionManager.current().connection.connection as java.sql.Connection
+
+            // Delta MERGE — increment counters by new slot count
+            conn.prepareStatement(
+                """
+                MERGE INTO RL_WNDW_CT b
+                USING (
+                    SELECT a.WNDW_STRT_TS, COUNT(*) AS delta_count
+                    FROM RL_EVENT_SLOT_DTL a
+                    WHERE a.CREAT_TS > ?
+                      AND a.CREAT_TS <= ?
+                    GROUP BY a.WNDW_STRT_TS
+                ) src
+                ON (b.WNDW_STRT_TS = src.WNDW_STRT_TS)
+                WHEN MATCHED THEN
+                    UPDATE SET b.SLOT_CT = b.SLOT_CT + src.delta_count
+                """.trimIndent()
+            ).use { stmt ->
+                stmt.setTimestamp(1, Timestamp.from(lastRunTs))
+                stmt.setTimestamp(2, Timestamp.from(cutoffTs))
+                stmt.executeUpdate()
+            }
+
+            // Status transition — mark full windows
+            conn.prepareStatement(
+                """
+                UPDATE RL_WNDW_CT
+                SET    WNDW_STATUS = 'FULL'
+                WHERE  SLOT_CT >= ?
+                AND    WNDW_STATUS = 'AVAILABLE'
+                """.trimIndent()
+            ).use { stmt ->
+                stmt.setInt(1, maxSlotsPerWindow)
+                stmt.executeUpdate()
+            }
+        }
+    }
+
     // ==================== Legacy methods ====================
 
     fun Transaction.upsertCounter(windowStart: Instant) {

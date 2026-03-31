@@ -44,4 +44,35 @@ class WindowPicker {
         }
         return candidates.last().first
     }
+
+    /**
+     * V7 occupancy-weighted random selection. No proximity factor.
+     *
+     * weight(W) = max(0, maxSlotsPerWindow - slotCount)
+     *
+     * Windows with more remaining capacity are proportionally more likely
+     * to be selected, naturally spreading load across available windows.
+     *
+     * @param candidates list of (windowStart, currentSlotCount) from fetchAvailableWindows()
+     * @param maxSlotsPerWindow the configured maximum slots per window
+     * @return selected window, or null if all candidates are at capacity
+     */
+    fun pickOccupancyWeightedRandom(
+        candidates: List<Pair<Instant, Int>>,
+        maxSlotsPerWindow: Int
+    ): Instant? {
+        val weighted = candidates.map { (window, slotCount) ->
+            window to maxOf(0L, (maxSlotsPerWindow - slotCount).toLong())
+        }.filter { it.second > 0 }
+
+        if (weighted.isEmpty()) return null
+
+        val totalWeight = weighted.sumOf { it.second }
+        var roll = ThreadLocalRandom.current().nextLong(totalWeight)
+        for ((window, weight) in weighted) {
+            roll -= weight
+            if (roll < 0) return window
+        }
+        return weighted.last().first
+    }
 }

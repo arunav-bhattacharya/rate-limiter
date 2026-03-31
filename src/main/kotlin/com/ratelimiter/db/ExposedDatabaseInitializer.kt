@@ -46,7 +46,7 @@ class ExposedDatabaseInitializer @Inject constructor(
         Database.connect(dataSource, databaseConfig = dbConfig)
 
         transaction {
-            SchemaUtils.create(
+            SchemaUtils.createMissingTablesAndColumns(
                 WindowCounterTable,
                 RateLimitEventSlotTable,
                 SkipPointerTable
