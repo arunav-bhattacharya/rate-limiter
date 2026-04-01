@@ -24,6 +24,8 @@ class WindowCounterRefreshSchedulerV7(
     private val job: WindowCounterRefreshJob,
     @param:ConfigProperty(name = "rate-limiter.v7.counter-refresh-since", defaultValue = "6s")
     private val counterRefreshSince: Duration,
+    @param:ConfigProperty(name = "rate-limiter.use-temporal-scheduler", defaultValue = "false")
+    private val useTemporalScheduler: Boolean
 ) {
     private val logger = LoggerFactory.getLogger(WindowCounterRefreshSchedulerV7::class.java)
     private val lastSuccessfulRunTs = AtomicReference<Instant>(null)
@@ -33,6 +35,8 @@ class WindowCounterRefreshSchedulerV7(
         concurrentExecution = Scheduled.ConcurrentExecution.SKIP
     )
     fun refresh() {
+        if (useTemporalScheduler) return
+
         try {
             val now = Instant.now()
             val since = lastSuccessfulRunTs.get() ?: now.minus(counterRefreshSince)

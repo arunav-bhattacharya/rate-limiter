@@ -31,13 +31,20 @@ class WindowPreProvisioningScheduler(
     @param:ConfigProperty(name = "rate-limiter.pre-provision-days", defaultValue = "30")
     private val preProvisionDays: Long,
     @param:ConfigProperty(name = "rate-limiter.pre-provision-batch-size", defaultValue = "5000")
-    private val batchSize: Int
+    private val batchSize: Int,
+    @param:ConfigProperty(name = "rate-limiter.use-temporal-scheduler", defaultValue = "false")
+    private val useTemporalScheduler: Boolean
 ) {
     private val logger = LoggerFactory.getLogger(WindowPreProvisioningScheduler::class.java)
     private val windowSize: Duration = Duration.ofSeconds(windowSizeSeconds)
 
     @PostConstruct
     fun init() {
+        if (useTemporalScheduler) {
+            logger.info("Temporal scheduler active — skipping Quarkus startup pre-provisioning")
+            return
+        }
+
         Thread.startVirtualThread {
             try {
                 provisionWindows()
@@ -49,6 +56,8 @@ class WindowPreProvisioningScheduler(
 
     @Scheduled(cron = "0 0 2 * * ?", concurrentExecution = Scheduled.ConcurrentExecution.SKIP)
     fun scheduledProvision() {
+        if (useTemporalScheduler) return
+
         try {
             provisionWindows()
         } catch (e: Exception) {

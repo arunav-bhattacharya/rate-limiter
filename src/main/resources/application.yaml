@@ -125,7 +125,28 @@ quarkus:
       "org.jetbrains.exposed":
         level: INFO
 
+temporal:
+  server:
+    target: ${TEMPORAL_TARGET:localhost:7233}
+  namespace: ${TEMPORAL_NAMESPACE:rate-limiter}
+  task-queue: rate-limiter-jobs
+  counter-refresh:
+    schedule-id: v7-counter-refresh
+    workflow-id: v7-counter-refresh
+    start-to-close-timeout-seconds: 10
+    retry-max-attempts: 3
+    retry-initial-interval-ms: 1000
+    retry-backoff-coefficient: 2.0
+  pre-provision:
+    schedule-id: pre-provision-daily
+    start-to-close-timeout-seconds: 120
+    retry-max-attempts: 3
+    retry-initial-interval-ms: 5000
+    retry-backoff-coefficient: 2.0
+    cron: "0 2 * * *"
+
 rate-limiter:
+  use-temporal-scheduler: ${USE_TEMPORAL_SCHEDULER:false}
   window-size-seconds: 30
   max-per-window: 900
   headroom-windows: 600

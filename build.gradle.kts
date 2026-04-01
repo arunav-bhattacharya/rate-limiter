@@ -23,6 +23,10 @@ dependencies {
     implementation("io.quarkus:quarkus-jdbc-oracle")
     implementation("io.quarkus:quarkus-scheduler")
 
+    // Temporal SDK
+    implementation("io.temporal:temporal-sdk:1.31.0")
+    implementation("io.temporal:temporal-kotlin:1.31.0")
+
     // Exposed 0.61.0
     implementation("org.jetbrains.exposed:exposed-core:0.61.0")
     implementation("org.jetbrains.exposed:exposed-jdbc:0.61.0")
