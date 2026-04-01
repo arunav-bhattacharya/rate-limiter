@@ -365,32 +365,16 @@ class WindowSlotCounterRepository(
         limit: Int
     ): List<Pair<Instant, Int>> {
         return transaction {
-            val conn = TransactionManager.current().connection.connection as java.sql.Connection
-            conn.prepareStatement(
-                """
-                SELECT WNDW_STRT_TS, SLOT_CT
-                FROM   RL_WNDW_CT
-                WHERE  WNDW_STRT_TS >= ?
-                AND    WNDW_STRT_TS < ?
-                AND    SLOT_CT < ?
-                ORDER BY WNDW_STRT_TS ASC
-                FETCH FIRST ? ROWS ONLY
-                """.trimIndent()
-            ).use { stmt ->
-                stmt.setTimestamp(1, Timestamp.from(from))
-                stmt.setTimestamp(2, Timestamp.from(to))
-                stmt.setInt(3, maxSlots)
-                stmt.setInt(4, limit)
-                val rs = stmt.executeQuery()
-                val results = mutableListOf<Pair<Instant, Int>>()
-                while (rs.next()) {
-                    results.add(
-                        rs.getTimestamp("WNDW_STRT_TS").toInstant() to rs.getInt("SLOT_CT")
-                    )
+            WindowCounterTable
+                .select(WindowCounterTable.windowStart, WindowCounterTable.slotCount)
+                .where {
+                    (WindowCounterTable.windowStart greaterEq from) and
+                        (WindowCounterTable.windowStart less to) and
+                        (WindowCounterTable.slotCount less maxSlots)
                 }
-                rs.close()
-                results
-            }
+                .orderBy(WindowCounterTable.windowStart)
+                .limit(limit)
+                .map { it[WindowCounterTable.windowStart] to it[WindowCounterTable.slotCount] }
         }
     }
 
