@@ -3,7 +3,7 @@ package com.ratelimiter.slot
 import com.ratelimiter.repo.EventSlotRepository
 import com.ratelimiter.repo.WindowSlotCounterRepository
 import jakarta.enterprise.context.ApplicationScoped
-import org.eclipse.microprofile.config.inject.ConfigProperty
+import org.eclipse.microprofile.config.ConfigProvider
 import org.jetbrains.exposed.sql.Transaction
 import org.jetbrains.exposed.sql.transactions.transaction
 import java.time.Duration
@@ -34,25 +34,7 @@ import java.util.concurrent.ThreadLocalRandom
 class SlotAssignmentServiceV3(
     private val eventSlotRepository: EventSlotRepository,
     private val windowSlotCounterRepository: WindowSlotCounterRepository,
-    @param:ConfigProperty(name = "rate-limiter.max-per-window", defaultValue = "900")
-    private val maxPerWindow: Int,
-    @param:ConfigProperty(name = "rate-limiter.window-size-seconds", defaultValue = "30")
-    private val windowSizeSeconds: Long,
-    @param:ConfigProperty(name = "rate-limiter.headroom-windows", defaultValue = "600")
-    private val headroomWindows: Long,
-    @param:ConfigProperty(name = "rate-limiter.lock-headroom-windows", defaultValue = "50")
-    private val lockHeadroomWindows: Long,
-    @param:ConfigProperty(name = "rate-limiter.max-retry-iterations", defaultValue = "4")
-    private val maxRetryIterations: Int
 ) {
-    private val windowSizeMs: Long = windowSizeSeconds * 1000
-    private val windowSize: Duration = Duration.ofSeconds(windowSizeSeconds)
-    private val lockHeadroom: Duration = windowSize.multipliedBy(lockHeadroomWindows)
-
-    companion object {
-        const val STATIC_CONFIG_ID = "STATIC"
-    }
-
     fun assignSlot(eventId: String, requestedTime: Instant): AssignedSlot {
 
         // Phase 0: Pre-transaction idempotency check (own short-lived transaction).
@@ -138,5 +120,26 @@ class SlotAssignmentServiceV3(
             if (d.isNegative) Duration.ZERO else d
         }
         return AssignedSlot(eventId = eventId, scheduledTime = scheduledTime, delay = delay)
+    }
+
+    companion object {
+        const val STATIC_CONFIG_ID = "STATIC"
+
+        private val config = ConfigProvider.getConfig()
+
+        private val maxPerWindow: Int =
+            config.getOptionalValue("rate-limiter.max-per-window", Int::class.javaObjectType).orElse(900)
+        private val windowSizeSeconds: Long =
+            config.getOptionalValue("rate-limiter.window-size-seconds", Long::class.javaObjectType).orElse(30L)
+        private val headroomWindows: Long =
+            config.getOptionalValue("rate-limiter.headroom-windows", Long::class.javaObjectType).orElse(600L)
+        private val lockHeadroomWindows: Long =
+            config.getOptionalValue("rate-limiter.lock-headroom-windows", Long::class.javaObjectType).orElse(50L)
+        private val maxRetryIterations: Int =
+            config.getOptionalValue("rate-limiter.max-retry-iterations", Int::class.javaObjectType).orElse(4)
+
+        private val windowSizeMs: Long = windowSizeSeconds * 1000
+        private val windowSize: Duration = Duration.ofSeconds(windowSizeSeconds)
+        private val lockHeadroom: Duration = windowSize.multipliedBy(lockHeadroomWindows)
     }
 }

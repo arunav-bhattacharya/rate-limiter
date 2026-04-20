@@ -4,7 +4,7 @@ import com.ratelimiter.repo.EventSlotRepository
 import com.ratelimiter.repo.SkipPointerRepository
 import com.ratelimiter.repo.WindowSlotCounterRepository
 import jakarta.enterprise.context.ApplicationScoped
-import org.eclipse.microprofile.config.inject.ConfigProperty
+import org.eclipse.microprofile.config.ConfigProvider
 import org.jetbrains.exposed.sql.transactions.transaction
 import java.time.Duration
 import java.time.Instant
@@ -54,31 +54,9 @@ class SlotAssignmentServiceV6(
     private val windowSlotCounterRepository: WindowSlotCounterRepository,
     private val skipPointerRepository: SkipPointerRepository,
     private val windowPicker: WindowPicker,
-    @param:ConfigProperty(name = "rate-limiter.v6.window-size", defaultValue = "30s")
-    private val windowSize: Duration,
-    @param:ConfigProperty(name = "rate-limiter.v6.max-slots-per-window", defaultValue = "900")
-    private val maxSlotsPerWindow: Int,
-    @param:ConfigProperty(name = "rate-limiter.v6.soft-max-percent", defaultValue = "90")
-    private val softMaxPercent: Int,
-    @param:ConfigProperty(name = "rate-limiter.v6.default-max-duration", defaultValue = "8h")
-    val defaultMaxDuration: Duration,
-    @param:ConfigProperty(name = "rate-limiter.v6.window-chunk-duration", defaultValue = "15m")
-    private val windowChunkDuration: Duration,
-    @param:ConfigProperty(name = "rate-limiter.v6.extension-windows", defaultValue = "40")
-    private val extensionWindows: Int,
-    @param:ConfigProperty(name = "rate-limiter.v6.max-extensions-beyond", defaultValue = "5")
-    private val maxExtensionsBeyond: Int,
 ) {
-    companion object {
-        const val STATIC_CONFIG_ID = "STATIC"
-    }
-
-    private val windowSizeMs: Long = windowSize.toMillis()
-    private val windowSizeSeconds: Long = windowSize.toSeconds()
-    private val extensionDuration: Duration = windowSize.multipliedBy(extensionWindows.toLong())
-
-    /** Phase 1 operating limit: floor(maxSlots * softMaxPercent / 100) */
-    private val softMax: Int = floor(maxSlotsPerWindow * softMaxPercent / 100.0).toInt()
+    /** Exposed on the instance for external callers (e.g. [SlotAssignmentV2Resource]). */
+    val defaultMaxDuration: Duration = Companion.defaultMaxDuration
 
     fun assignSlot(eventId: String, requestedTime: Instant, maxDuration: Duration = defaultMaxDuration): AssignedSlot {
         // Step 1: Read DB skip pointer
@@ -261,4 +239,31 @@ class SlotAssignmentServiceV6(
             .toList()
     }
 
+    companion object {
+        const val STATIC_CONFIG_ID = "STATIC"
+
+        private val config = ConfigProvider.getConfig()
+
+        private val windowSize: Duration =
+            config.getOptionalValue("rate-limiter.v6.window-size", Duration::class.java).orElse(Duration.ofSeconds(30))
+        private val maxSlotsPerWindow: Int =
+            config.getOptionalValue("rate-limiter.v6.max-slots-per-window", Int::class.javaObjectType).orElse(900)
+        private val softMaxPercent: Int =
+            config.getOptionalValue("rate-limiter.v6.soft-max-percent", Int::class.javaObjectType).orElse(90)
+        private val defaultMaxDuration: Duration =
+            config.getOptionalValue("rate-limiter.v6.default-max-duration", Duration::class.java).orElse(Duration.ofHours(8))
+        private val windowChunkDuration: Duration =
+            config.getOptionalValue("rate-limiter.v6.window-chunk-duration", Duration::class.java).orElse(Duration.ofMinutes(15))
+        private val extensionWindows: Int =
+            config.getOptionalValue("rate-limiter.v6.extension-windows", Int::class.javaObjectType).orElse(40)
+        private val maxExtensionsBeyond: Int =
+            config.getOptionalValue("rate-limiter.v6.max-extensions-beyond", Int::class.javaObjectType).orElse(5)
+
+        private val windowSizeMs: Long = windowSize.toMillis()
+        private val windowSizeSeconds: Long = windowSize.toSeconds()
+        private val extensionDuration: Duration = windowSize.multipliedBy(extensionWindows.toLong())
+
+        /** Phase 1 operating limit: floor(maxSlots * softMaxPercent / 100) */
+        private val softMax: Int = floor(maxSlotsPerWindow * softMaxPercent / 100.0).toInt()
+    }
 }

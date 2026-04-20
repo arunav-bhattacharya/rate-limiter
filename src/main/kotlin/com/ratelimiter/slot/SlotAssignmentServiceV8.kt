@@ -3,7 +3,7 @@ package com.ratelimiter.slot
 import com.ratelimiter.repo.EventSlotRepository
 import com.ratelimiter.repo.WindowSlotCounterRepository
 import jakarta.enterprise.context.ApplicationScoped
-import org.eclipse.microprofile.config.inject.ConfigProperty
+import org.eclipse.microprofile.config.ConfigProvider
 import org.jetbrains.exposed.sql.transactions.transaction
 import java.time.Duration
 import java.time.Instant
@@ -35,19 +35,7 @@ class SlotAssignmentServiceV8(
     private val eventSlotRepository: EventSlotRepository,
     private val windowSlotCounterRepository: WindowSlotCounterRepository,
     private val windowPicker: WindowPicker,
-    @param:ConfigProperty(name = "rate-limiter.v8.window-size", defaultValue = "30s")
-    private val windowSize: Duration,
-    @param:ConfigProperty(name = "rate-limiter.v8.max-slots-per-window", defaultValue = "900")
-    private val maxSlotsPerWindow: Int,
-    @param:ConfigProperty(name = "rate-limiter.v8.candidate-window-count", defaultValue = "30")
-    private val candidateWindowCount: Int,
 ) {
-    companion object {
-        const val STATIC_CONFIG_ID = "STATIC"
-    }
-
-    private val windowSizeMs: Long = windowSize.toMillis()
-
     /**
      * Assigns a slot for [eventId] within [requestedTime, requestedTime + maxDuration).
      *
@@ -125,5 +113,20 @@ class SlotAssignmentServiceV8(
                 delay = delay
             )
         }
+    }
+
+    companion object {
+        const val STATIC_CONFIG_ID = "STATIC"
+
+        private val config = ConfigProvider.getConfig()
+
+        private val windowSize: Duration =
+            config.getOptionalValue("rate-limiter.v8.window-size", Duration::class.java).orElse(Duration.ofSeconds(30))
+        private val maxSlotsPerWindow: Int =
+            config.getOptionalValue("rate-limiter.v8.max-slots-per-window", Int::class.javaObjectType).orElse(900)
+        private val candidateWindowCount: Int =
+            config.getOptionalValue("rate-limiter.v8.candidate-window-count", Int::class.javaObjectType).orElse(30)
+
+        private val windowSizeMs: Long = windowSize.toMillis()
     }
 }

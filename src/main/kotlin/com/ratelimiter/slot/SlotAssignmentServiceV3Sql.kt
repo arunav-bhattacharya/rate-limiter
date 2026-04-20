@@ -1,8 +1,7 @@
 package com.ratelimiter.slot
 
 import jakarta.enterprise.context.ApplicationScoped
-import jakarta.inject.Inject
-import org.eclipse.microprofile.config.inject.ConfigProperty
+import org.eclipse.microprofile.config.ConfigProvider
 import org.jetbrains.exposed.sql.transactions.transaction
 import org.slf4j.LoggerFactory
 import java.sql.Timestamp
@@ -22,19 +21,7 @@ import java.util.concurrent.ThreadLocalRandom
  * Uses static config from application.yaml (no config table).
  */
 @ApplicationScoped
-class SlotAssignmentServiceV3Sql @Inject constructor(
-    @param:ConfigProperty(name = "rate-limiter.max-per-window", defaultValue = "100")
-    private val maxPerWindow: Int,
-    @param:ConfigProperty(name = "rate-limiter.window-size-seconds", defaultValue = "30")
-    private val windowSizeSeconds: Long,
-    @param:ConfigProperty(name = "rate-limiter.max-windows-in-chunk", defaultValue = "100")
-    private val maxWindowsInChunk: Int,
-    @param:ConfigProperty(name = "rate-limiter.max-chunks-to-search", defaultValue = "2")
-    private val maxChunksToSearch: Int
-) {
-    private val logger = LoggerFactory.getLogger(SlotAssignmentServiceV3Sql::class.java)
-    private val windowSizeMs: Long = windowSizeSeconds * 1000
-
+class SlotAssignmentServiceV3Sql {
     fun assignSlot(eventId: String, requestedTime: Instant): AssignedSlot {
         val totalStart = System.nanoTime()
 
@@ -167,6 +154,22 @@ class SlotAssignmentServiceV3Sql @Inject constructor(
 
     private fun computeFullWindowJitterMs(windowSizeMs: Long): Long {
         return ThreadLocalRandom.current().nextLong(0, windowSizeMs)
+    }
+
+    companion object {
+        private val logger = LoggerFactory.getLogger(SlotAssignmentServiceV3Sql::class.java)
+        private val config = ConfigProvider.getConfig()
+
+        private val maxPerWindow: Int =
+            config.getOptionalValue("rate-limiter.max-per-window", Int::class.javaObjectType).orElse(100)
+        private val windowSizeSeconds: Long =
+            config.getOptionalValue("rate-limiter.window-size-seconds", Long::class.javaObjectType).orElse(30L)
+        private val maxWindowsInChunk: Int =
+            config.getOptionalValue("rate-limiter.max-windows-in-chunk", Int::class.javaObjectType).orElse(100)
+        private val maxChunksToSearch: Int =
+            config.getOptionalValue("rate-limiter.max-chunks-to-search", Int::class.javaObjectType).orElse(2)
+
+        private val windowSizeMs: Long = windowSizeSeconds * 1000
     }
 }
 

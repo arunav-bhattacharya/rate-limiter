@@ -2,7 +2,7 @@ package com.ratelimiter.slot
 
 import com.ratelimiter.repo.EventSlotRepository
 import jakarta.enterprise.context.ApplicationScoped
-import org.eclipse.microprofile.config.inject.ConfigProperty
+import org.eclipse.microprofile.config.ConfigProvider
 import java.time.Duration
 import java.time.Instant
 import java.util.concurrent.ThreadLocalRandom
@@ -23,20 +23,7 @@ import kotlin.math.floor
 @ApplicationScoped
 class SlotAssignmentServiceV4(
     private val eventSlotRepository: EventSlotRepository,
-    @param:ConfigProperty(name = "rate-limiter.max-per-window", defaultValue = "100")
-    private val maxPerWindow: Int,
-    @param:ConfigProperty(name = "rate-limiter.window-size-seconds", defaultValue = "30")
-    private val windowSizeSeconds: Long,
-    @param:ConfigProperty(name = "rate-limiter.headroom-windows", defaultValue = "100")
-    private val headroomWindows: Long,
-    @param:ConfigProperty(name = "rate-limiter.window-fill-threshold", defaultValue = "0.9")
-    private val windowFillThreshold: Double,
-    @param:ConfigProperty(name = "rate-limiter.headroom-capacity-threshold", defaultValue = "0.5")
-    private val headroomCapacityThreshold: Double,
 ) {
-    private val windowSize: Duration = Duration.ofSeconds(windowSizeSeconds)
-    private val windowSizeMs: Long = windowSizeSeconds * 1000
-
     fun assignSlot(eventId: String, requestedTime: Instant): AssignedSlot {
         // 1. Idempotency
         val existing = eventSlotRepository.fetchAssignedSlot(eventId)
@@ -91,5 +78,23 @@ class SlotAssignmentServiceV4(
             eventId, windowStart, scheduledTime,
             SlotAssignmentServiceV3.STATIC_CONFIG_ID, requestedTime
         )
+    }
+
+    companion object {
+        private val config = ConfigProvider.getConfig()
+
+        private val maxPerWindow: Int =
+            config.getOptionalValue("rate-limiter.max-per-window", Int::class.javaObjectType).orElse(100)
+        private val windowSizeSeconds: Long =
+            config.getOptionalValue("rate-limiter.window-size-seconds", Long::class.javaObjectType).orElse(30L)
+        private val headroomWindows: Long =
+            config.getOptionalValue("rate-limiter.headroom-windows", Long::class.javaObjectType).orElse(100L)
+        private val windowFillThreshold: Double =
+            config.getOptionalValue("rate-limiter.window-fill-threshold", Double::class.javaObjectType).orElse(0.9)
+        private val headroomCapacityThreshold: Double =
+            config.getOptionalValue("rate-limiter.headroom-capacity-threshold", Double::class.javaObjectType).orElse(0.5)
+
+        private val windowSize: Duration = Duration.ofSeconds(windowSizeSeconds)
+        private val windowSizeMs: Long = windowSizeSeconds * 1000
     }
 }

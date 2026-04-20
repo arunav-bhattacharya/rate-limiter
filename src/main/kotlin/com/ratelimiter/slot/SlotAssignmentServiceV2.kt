@@ -6,8 +6,7 @@ import com.ratelimiter.repo.RateLimitConfigRepository
 import com.ratelimiter.repo.WindowChunkFrontierRepository
 import com.ratelimiter.repo.WindowSlotCounterRepository
 import jakarta.enterprise.context.ApplicationScoped
-import jakarta.inject.Inject
-import org.eclipse.microprofile.config.inject.ConfigProperty
+import org.eclipse.microprofile.config.ConfigProvider
 import org.jetbrains.exposed.sql.Transaction
 import org.jetbrains.exposed.sql.transactions.transaction
 import java.sql.Connection
@@ -25,26 +24,15 @@ import java.util.concurrent.ThreadLocalRandom
  *
  * Public signature unchanged from prior V2: `assignSlot(eventId, requestedTime)`.
  * Config is loaded internally via [RateLimitConfigRepository] using a
- * constructor-injected name (default "default").
+ * statically-loaded name (default "default").
  */
 @ApplicationScoped
-class SlotAssignmentServiceV2 @Inject constructor(
+class SlotAssignmentServiceV2(
     private val configRepository: RateLimitConfigRepository,
     private val eventSlotRepository: EventSlotRepository,
     private val windowSlotCounterRepository: WindowSlotCounterRepository,
     private val windowChunkFrontierRepository: WindowChunkFrontierRepository,
-    @param:ConfigProperty(name = "rate-limiter.config-name", defaultValue = "default")
-    private val configName: String,
-    @ConfigProperty(name = "rate-limiter.max-windows-in-chunk", defaultValue = "100")
-    rawMaxWindowsInChunk: Long,
-    @ConfigProperty(name = "rate-limiter.max-chunks-to-search", defaultValue = "2")
-    rawMaxChunksToSearch: Int,
-    @param:ConfigProperty(name = "rate-limiter.query-timeout-seconds", defaultValue = "3")
-    private val queryTimeoutSeconds: Int,
 ) {
-    private val maxWindowsInChunk: Long = rawMaxWindowsInChunk.coerceIn(1, 100)
-    private val maxChunksToSearch: Int = rawMaxChunksToSearch.coerceIn(1, 4)
-
     fun assignSlot(eventId: String, requestedTime: Instant): AssignedSlot {
         eventSlotRepository.fetchAssignedSlot(eventId)?.let { return it }
 
@@ -167,4 +155,20 @@ class SlotAssignmentServiceV2 @Inject constructor(
             queryTimeout = queryTimeoutSeconds
             block()
         }
+
+    companion object {
+        private val config = ConfigProvider.getConfig()
+
+        private val configName: String =
+            config.getOptionalValue("rate-limiter.config-name", String::class.java).orElse("default")
+        private val queryTimeoutSeconds: Int =
+            config.getOptionalValue("rate-limiter.query-timeout-seconds", Int::class.javaObjectType).orElse(3)
+
+        private val maxWindowsInChunk: Long =
+            config.getOptionalValue("rate-limiter.max-windows-in-chunk", Long::class.javaObjectType)
+                .orElse(100L).coerceIn(1, 100)
+        private val maxChunksToSearch: Int =
+            config.getOptionalValue("rate-limiter.max-chunks-to-search", Int::class.javaObjectType)
+                .orElse(2).coerceIn(1, 4)
+    }
 }
