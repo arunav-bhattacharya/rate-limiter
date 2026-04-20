@@ -5,9 +5,11 @@ import com.ratelimiter.db.isDuplicateKeyViolation
 import com.ratelimiter.slot.AssignedSlot
 import jakarta.enterprise.context.ApplicationScoped
 import org.jetbrains.exposed.exceptions.ExposedSQLException
+import org.jetbrains.exposed.sql.JoinType
 import org.jetbrains.exposed.sql.Transaction
 import org.jetbrains.exposed.sql.count
 import org.jetbrains.exposed.sql.insert
+import org.jetbrains.exposed.sql.max
 import org.jetbrains.exposed.sql.selectAll
 import org.jetbrains.exposed.sql.transactions.transaction
 import org.jetbrains.exposed.sql.SortOrder.DESC

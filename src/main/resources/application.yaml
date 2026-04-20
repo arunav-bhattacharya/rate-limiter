@@ -155,6 +155,10 @@ rate-limiter:
   max-retry-iterations: 4
   pre-provision-days: 60
   pre-provision-batch-size: 10000
+  config-name: default
+  max-windows-in-chunk: 100
+  max-chunks-to-search: 2
+  query-timeout-seconds: 3
   v5:
     window-size: 30s
     max-slots-per-window: 900
@@ -192,6 +196,9 @@ rate-limiter:
     lock-headroom-windows: 5
     lock-query-timeout-seconds: 30
     max-retry-iterations: 3
+    max-windows-in-chunk: 4
+    max-chunks-to-search: 2
+    query-timeout-seconds: 30
     v5:
       window-size: 4s
       max-slots-per-window: 4

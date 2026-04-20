@@ -32,6 +32,36 @@ object SkipPointerTable : Table("RL_SKIP_PTR") {
     override val primaryKey = PrimaryKey(requestedTime, skipTo)
 }
 
+/**
+ * Append-only frontier tracker for chunked window provisioning.
+ * Multiple rows per REQ_TS — one per chunk extension.
+ * Read: SELECT MAX(WNDW_END_TS) WHERE REQ_TS = ?
+ * Write: INSERT (REQ_TS, WNDW_END_TS) — duplicates absorbed by composite PK.
+ */
+object WindowChunkFrontierTable : Table("RL_WNDW_FRONTIER_TRK") {
+    val requestedTime = timestamp("REQ_TS")
+    val windowEnd = timestamp("WNDW_END_TS")
+    val createdAt = timestamp("CREAT_TS")
+
+    override val primaryKey = PrimaryKey(requestedTime, windowEnd)
+}
+
+/**
+ * Versioned rate-limit config. Multiple rows per WNDW_CONFIG_NM may exist for audit;
+ * exactly one should have ACT_IN = 1 at any given time per name.
+ */
+object RateLimitConfigTable : Table("RL_EVENT_WNDW_CONFIG") {
+    val configId = varchar("RL_WNDW_CONFIG_ID", 50)
+    val configName = varchar("WNDW_CONFIG_NM", 128)
+    val maxPerWindow = integer("WNDW_MAX_EVENT_CT")
+    val windowSizeIso = varchar("WNDW_SIZE_ISO_DUR_TX", 25)
+    val effectiveFrom = timestamp("CONFIG_EFF_STRT_DT")
+    val isActive = integer("ACT_IN")
+    val createdAt = timestamp("CREAT_TS")
+
+    override val primaryKey = PrimaryKey(configId)
+}
+
 /** Immutable slot assignment record. */
 object RateLimitEventSlotTable : Table("RL_EVENT_SLOT_DTL") {
     val slotId = varchar("WNDW_SLOT_ID", 50)
