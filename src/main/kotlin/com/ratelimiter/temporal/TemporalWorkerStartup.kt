@@ -24,15 +24,14 @@ import org.slf4j.LoggerFactory
 /**
  * Bridges Quarkus CDI lifecycle with Temporal worker lifecycle.
  *
- * On startup (if enabled):
+ * On startup:
  *   1. Creates worker factory and registers workflow + activity types
  *   2. Starts long-polling the Temporal Server for tasks
- *   3. Starts the counter-refresh workflow (idempotent via USE_EXISTING)
- *   4. Triggers one-shot startup pre-provisioning
- *   5. Ensures the daily pre-provision Schedule exists
- *
- * Gated by [useTemporalScheduler] — when false, no Temporal interactions occur
- * and the old Quarkus @Scheduled jobs remain active.
+ *   3. Starts the counter-refresh workflow iff `rate-limiter.use-temporal-scheduler`
+ *      is true (avoids double-running with the V7 Quarkus @Scheduled path)
+ *   4. Triggers one-shot startup pre-provisioning (unconditional — pre-provision
+ *      is Temporal-only now)
+ *   5. Ensures the daily pre-provision Schedule exists (unconditional)
  */
 @Startup
 @ApplicationScoped
@@ -42,7 +41,7 @@ class TemporalWorkerStartup(
     private val preProvisionScheduler: WindowPreProvisioningScheduler,
     private val scheduleRegistrar: ScheduleRegistrar,
     @param:ConfigProperty(name = "rate-limiter.use-temporal-scheduler", defaultValue = "false")
-    private val useTemporalScheduler: Boolean,
+    private val useTemporalCounterRefresh: Boolean,
     @param:ConfigProperty(name = "temporal.task-queue", defaultValue = "rate-limiter-jobs")
     private val taskQueue: String,
     @param:ConfigProperty(name = "temporal.counter-refresh.workflow-id", defaultValue = "v7-counter-refresh")
@@ -57,11 +56,6 @@ class TemporalWorkerStartup(
 
     @PostConstruct
     fun init() {
-        if (!useTemporalScheduler) {
-            logger.info("Temporal scheduler disabled — using Quarkus @Scheduled jobs")
-            return
-        }
-
         logger.info("Starting Temporal worker on task queue: {}", taskQueue)
 
         val factory = WorkerFactory.newInstance(workflowClient)
@@ -83,13 +77,16 @@ class TemporalWorkerStartup(
         workerFactory = factory
         logger.info("Temporal worker started")
 
-        // Start counter-refresh workflow (idempotent — USE_EXISTING if already running)
-        startCounterRefreshWorkflow()
+        // V7 counter-refresh is still served by the Quarkus @Scheduled fallback
+        // unless explicitly opted in to Temporal via the flag.
+        if (useTemporalCounterRefresh) {
+            startCounterRefreshWorkflow()
+        } else {
+            logger.info("Counter-refresh via Quarkus @Scheduled — Temporal counter-refresh workflow skipped")
+        }
 
-        // Trigger one-shot startup pre-provisioning
+        // Pre-provisioning is Temporal-only — fire one-shot + ensure daily schedule.
         startPreProvisionWorkflow()
-
-        // Ensure daily pre-provision schedule exists
         scheduleRegistrar.ensurePreProvisionSchedule()
     }
 

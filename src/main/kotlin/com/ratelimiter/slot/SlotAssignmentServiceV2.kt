@@ -5,6 +5,7 @@ import com.ratelimiter.repo.EventSlotRepository
 import com.ratelimiter.repo.RateLimitConfigRepository
 import com.ratelimiter.repo.WindowChunkFrontierRepository
 import com.ratelimiter.repo.WindowSlotCounterRepository
+import com.ratelimiter.temporal.schedule.ScheduleRegistrar
 import jakarta.enterprise.context.ApplicationScoped
 import org.eclipse.microprofile.config.ConfigProvider
 import org.jetbrains.exposed.sql.Transaction
@@ -15,16 +16,23 @@ import java.time.Instant
 import java.util.concurrent.ThreadLocalRandom
 
 /**
- * V2 slot assignment — chunked, frontier-tracked, runtime-config driven.
+ * V2 slot assignment — frontier-tracked, backed by a background Temporal
+ * pre-provisioner.
  *
- * Unified loop: iteration 0 reads (or provisions) the initial chunk for
- * `requestedTime` via the frontier tracker; subsequent iterations extend the
- * frontier by another chunk. Each iteration runs a short find+lock+claim
- * transaction over the extended range.
+ * Window provisioning is handled exclusively by [WindowPreProvisioningScheduler]
+ * via the daily Temporal Schedule (plus on-demand triggers from this service).
+ * The hot path here never inserts into `RL_WNDW_CT`; it only reads + appends to
+ * `RL_WNDW_FRONTIER_TRK`.
  *
- * Public signature unchanged from prior V2: `assignSlot(eventId, requestedTime)`.
- * Config is loaded internally via [RateLimitConfigRepository] using a
- * statically-loaded name (default "default").
+ * Flow (mirrors the original V2 loop, minus the batch window insert):
+ *   1. Read `MAX(WNDW_END_TS)` from the frontier for this `requestedTime`.
+ *   2. If absent, create an initial frontier entry at
+ *      `requestedTime + windowSize * maxWindowsInChunk`.
+ *   3. Try find+lock+claim in `[requestedTime, chunkEnd)`.
+ *   4. On miss, extend the frontier by `windowSize * maxWindowsInChunk` and
+ *      retry, up to `maxChunksToSearch` times.
+ *   5. After exhaustion, trigger an out-of-band pre-provision run and throw
+ *      `SlotAssignmentException`.
  */
 @ApplicationScoped
 class SlotAssignmentServiceV2(
@@ -32,6 +40,7 @@ class SlotAssignmentServiceV2(
     private val eventSlotRepository: EventSlotRepository,
     private val windowSlotCounterRepository: WindowSlotCounterRepository,
     private val windowChunkFrontierRepository: WindowChunkFrontierRepository,
+    private val scheduleRegistrar: ScheduleRegistrar,
 ) {
     fun assignSlot(eventId: String, requestedTime: Instant): AssignedSlot {
         eventSlotRepository.fetchAssignedSlot(eventId)?.let { return it }
@@ -48,75 +57,74 @@ class SlotAssignmentServiceV2(
         config: RateLimitConfig
     ): AssignedSlot {
         val windowSize = config.windowSize
-        var provisionFrom = requestedTime
+        var chunkEnd: Instant = fetchOrCreateFrontier(requestedTime, windowSize)
 
         for (iteration in 0 until maxChunksToSearch) {
-            val chunkEnd: Instant = if (iteration == 0) {
-                fetchOrProvisionChunk(requestedTime, windowSize)
-            } else {
-                val extensionEnd = provisionFrom.plus(windowSize.multipliedBy(maxWindowsInChunk))
-                rateLimiterTransaction {
-                    provisionChunkAndExtendFrontier(provisionFrom, windowSize, requestedTime, extensionEnd)
-                }
-                extensionEnd
-            }
-
-            findWindowAndClaimSlot(eventId, requestedTime, chunkEnd, requestedTime, config)
+            findWindowAndClaimSlot(eventId, requestedTime, chunkEnd, config)
                 ?.let { return it }
 
-            provisionFrom = chunkEnd
+            // No window in [requestedTime, chunkEnd] — extend frontier by one chunk and retry.
+            chunkEnd = extendFrontier(requestedTime, chunkEnd, windowSize)
         }
 
-        val searched = maxChunksToSearch * maxWindowsInChunk
+        // Final retry against the last extension.
+        findWindowAndClaimSlot(eventId, requestedTime, chunkEnd, config)
+            ?.let { return it }
+
+        scheduleRegistrar.triggerAsync()
+        val searched = (maxChunksToSearch + 1) * maxWindowsInChunk
         throw SlotAssignmentException(
             eventId = eventId,
             windowsSearched = searched,
-            message = "Could not assign slot for event $eventId after searching $searched windows"
+            message = "Could not assign slot for event $eventId after searching $searched windows; scheduler triggered"
         )
     }
 
-    private fun fetchOrProvisionChunk(requestedTime: Instant, windowSize: Duration): Instant {
-        windowChunkFrontierRepository.fetchMaxWindowEndCached(requestedTime)?.let { return it }
-
-        return rateLimiterTransaction {
-            with(windowChunkFrontierRepository) { fetchMaxWindowEndFromDb(requestedTime) }
+    /**
+     * Returns the current frontier max-end for `requestedTime`, creating an
+     * initial row at `requestedTime + windowSize * maxWindowsInChunk` if none
+     * exists. Windows for that range are already present thanks to the
+     * background pre-provisioner.
+     */
+    private fun fetchOrCreateFrontier(requestedTime: Instant, windowSize: Duration): Instant =
+        rateLimiterTransaction {
+            with(windowChunkFrontierRepository) { fetchMaxWindowEnd(requestedTime) }
                 ?.let { return@rateLimiterTransaction it }
 
             val chunkEnd = requestedTime.plus(windowSize.multipliedBy(maxWindowsInChunk))
-            provisionChunkAndExtendFrontier(requestedTime, windowSize, requestedTime, chunkEnd)
+            with(windowChunkFrontierRepository) { insertWindowFrontier(requestedTime, chunkEnd) }
             chunkEnd
         }
+
+    /**
+     * Appends a new frontier row at `currentMaxEnd + windowSize * maxWindowsInChunk`
+     * and returns the new end. No window batch-insert — the background scheduler
+     * is responsible for keeping `RL_WNDW_CT` populated ahead of this frontier.
+     */
+    private fun extendFrontier(
+        requestedTime: Instant,
+        currentMaxEnd: Instant,
+        windowSize: Duration,
+    ): Instant {
+        val newEnd = currentMaxEnd.plus(windowSize.multipliedBy(maxWindowsInChunk))
+        rateLimiterTransaction {
+            with(windowChunkFrontierRepository) { insertWindowFrontier(requestedTime, newEnd) }
+        }
+        return newEnd
     }
 
     private fun findWindowAndClaimSlot(
         eventId: String,
-        scanStart: Instant,
-        lastWindow: Instant,
         requestedTime: Instant,
+        chunkEnd: Instant,
         config: RateLimitConfig,
     ): AssignedSlot? = rateLimiterTransaction {
         val locked = with(windowSlotCounterRepository) {
-            lockFirstAvailableWindow(scanStart, lastWindow, config.maxPerWindow)
+            lockFirstAvailableWindow(requestedTime, chunkEnd, config.maxPerWindow)
         } ?: return@rateLimiterTransaction null
 
         val jitterMs = ThreadLocalRandom.current().nextLong(0, config.windowSizeMs)
         claimSlot(eventId, locked, requestedTime, config.configId, jitterMs)
-    }
-
-    private fun Transaction.provisionChunkAndExtendFrontier(
-        from: Instant,
-        windowSize: Duration,
-        requestedTime: Instant,
-        chunkEnd: Instant,
-    ) {
-        with(windowSlotCounterRepository) {
-            val lastWindow = from.plus(windowSize.multipliedBy(maxWindowsInChunk - 1))
-            if (!windowExists(lastWindow)) {
-                val windows = (0 until maxWindowsInChunk).map { from.plus(windowSize.multipliedBy(it)) }
-                batchInsertWindows(windows)
-            }
-        }
-        with(windowChunkFrontierRepository) { insertWindowFrontier(requestedTime, chunkEnd) }
     }
 
     private fun Transaction.claimSlot(

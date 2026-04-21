@@ -13,9 +13,12 @@ import io.temporal.client.schedules.ScheduleSpec
 import jakarta.enterprise.context.ApplicationScoped
 import org.eclipse.microprofile.config.inject.ConfigProperty
 import org.slf4j.LoggerFactory
+import java.util.concurrent.atomic.AtomicLong
 
 /**
- * Creates the daily pre-provisioning Temporal Schedule.
+ * Creates the daily pre-provisioning Temporal Schedule and exposes an
+ * on-demand out-of-band trigger used by `SlotAssignmentServiceV2` when it
+ * detects the horizon has fallen behind.
  *
  * The schedule triggers a [PreProvisionWorkflow] execution daily at 2 AM UTC.
  * Uses [ScheduleOverlapPolicy.SCHEDULE_OVERLAP_POLICY_SKIP] to prevent concurrent
@@ -32,6 +35,30 @@ class ScheduleRegistrar(
     private val cronExpression: String
 ) {
     private val logger = LoggerFactory.getLogger(ScheduleRegistrar::class.java)
+    private val lastTriggerEpochMs = AtomicLong(0)
+    private val triggerDebounceMs = 5_000L
+
+    /**
+     * Fire-and-forget out-of-band run of the pre-provision schedule. Debounced
+     * to at most one trigger per 5 seconds to avoid flooding Temporal when a
+     * burst of requests hits while the horizon is behind.
+     */
+    fun triggerAsync() {
+        val now = System.currentTimeMillis()
+        val prev = lastTriggerEpochMs.get()
+        if (now - prev < triggerDebounceMs) return
+        if (!lastTriggerEpochMs.compareAndSet(prev, now)) return
+        Thread.startVirtualThread {
+            try {
+                scheduleClient.getHandle(scheduleId).trigger(
+                    ScheduleOverlapPolicy.SCHEDULE_OVERLAP_POLICY_SKIP
+                )
+                logger.info("Triggered out-of-band pre-provision run: {}", scheduleId)
+            } catch (e: Exception) {
+                logger.warn("Failed to trigger pre-provision schedule", e)
+            }
+        }
+    }
 
     fun ensurePreProvisionSchedule() {
         val schedule = Schedule.newBuilder()

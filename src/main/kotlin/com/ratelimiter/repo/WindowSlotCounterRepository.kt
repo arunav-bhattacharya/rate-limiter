@@ -167,17 +167,16 @@ class WindowSlotCounterRepository(
 
     /**
      * Returns the last provisioned window timestamp.
-     * Used by the pre-provisioner to determine where provisioning left off.
+     * Used by the pre-provisioner to determine where provisioning left off,
+     * and by SlotAssignmentServiceV2 to derive the frontier chunk end.
      */
-    fun fetchMaxProvisionedWindow(): Instant? {
-        return transaction {
-            WindowCounterTable
-                .select(WindowCounterTable.windowStart)
-                .orderBy(WindowCounterTable.windowStart, org.jetbrains.exposed.sql.SortOrder.DESC)
-                .limit(1)
-                .firstOrNull()
-                ?.get(WindowCounterTable.windowStart)
-        }
+    fun Transaction.fetchMaxProvisionedWindow(): Instant? {
+        return WindowCounterTable
+            .select(WindowCounterTable.windowStart)
+            .orderBy(WindowCounterTable.windowStart, org.jetbrains.exposed.sql.SortOrder.DESC)
+            .limit(1)
+            .firstOrNull()
+            ?.get(WindowCounterTable.windowStart)
     }
 
     fun Transaction.incrementSlotCount(windowStart: Instant) {
